@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use network::{ClientType, ConnectionOptions, FieldArg, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, FieldArg, GraphQLClient, UrlOptions, UrlScheme};
 use serde::Deserialize;
 use serde_json::json;
 use wiremock::matchers::{body_string_contains, method, path};
@@ -34,8 +34,8 @@ async fn connect_sends_default_connectivity_query() {
         .mount(&server)
         .await;
 
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts_for(&server)).await.unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts_for(&server)).await.unwrap();
     server.verify().await;
 }
 
@@ -48,8 +48,8 @@ async fn connect_fails_on_server_error() {
         .mount(&server)
         .await;
 
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    let err = network.with_opts(opts_for(&server)).await.unwrap_err();
+    let mut gql = GraphQLClient::default();
+    let err = gql.connect(opts_for(&server)).await.unwrap_err();
     assert!(matches!(err, network::Error::GraphQLConnect { .. }));
 }
 
@@ -66,8 +66,8 @@ async fn connect_uses_custom_connectivity_query() {
 
     let mut opts = opts_for(&server);
     opts.graphql_connectivity_query = Some("query { ping }".to_string());
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts).await.unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts).await.unwrap();
     server.verify().await;
 }
 
@@ -83,9 +83,8 @@ async fn query_decodes_typed_response() {
 
     let mut opts = opts_for(&server);
     opts.skip_connectivity_check = true;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts).await.unwrap();
 
     #[derive(Deserialize)]
     struct Data {
@@ -117,9 +116,8 @@ async fn query_surfaces_graphql_errors() {
 
     let mut opts = opts_for(&server);
     opts.skip_connectivity_check = true;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts).await.unwrap();
 
     let err = gql
         .query::<serde_json::Value>("query { missing }", None)
@@ -142,9 +140,8 @@ async fn query_fields_declares_only_present_sorted_args() {
 
     let mut opts = opts_for(&server);
     opts.skip_connectivity_check = true;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts).await.unwrap();
 
     let args = vec![
         FieldArg::new("id", "1", "ID!"),
@@ -169,9 +166,8 @@ async fn query_fields_unwraps_the_selected_field_before_decoding() {
 
     let mut opts = opts_for(&server);
     opts.skip_connectivity_check = true;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts).await.unwrap();
 
     #[derive(Deserialize)]
     struct UserFields {
@@ -200,9 +196,8 @@ async fn batch_mutate_namespaces_args_and_returns_ordered_results() {
 
     let mut opts = opts_for(&server);
     opts.skip_connectivity_check = true;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts).await.unwrap();
 
     let ops = vec![
         network::BatchOp {

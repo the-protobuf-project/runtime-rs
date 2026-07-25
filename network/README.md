@@ -1,7 +1,7 @@
 # tpp-network
 
-GraphQL, HTTP, and WebSocket clients behind a single factory ([`Network::new_connection`]) with
-consistent connection options and optional connectivity verification. A Rust port of
+GraphQL, HTTP, and WebSocket clients, each constructed directly and configured with consistent
+connection options and optional connectivity verification. A Rust port of
 [`runtime-go/network`](https://github.com/the-protobuf-project/runtime-go/tree/main/network),
 built the Rust way — see the
 [workspace README](https://github.com/the-protobuf-project/runtime-rs#differences-from-the-go-implementation)
@@ -19,12 +19,12 @@ The library crate is imported as `network` regardless of the published package n
 ## Quick start
 
 ```rust,no_run
-use network::{ClientType, ConnectionOptions, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, GraphQLClient, UrlOptions, UrlScheme};
 use serde::Deserialize;
 
 # async fn example() -> network::Result<()> {
-let mut conn = Network::new_connection(ClientType::GraphQL)?;
-conn.with_opts(ConnectionOptions {
+let mut gql = GraphQLClient::default();
+gql.connect(ConnectionOptions {
     url: UrlOptions {
         scheme: UrlScheme::Https,
         host: "rickandmortyapi.com".into(),
@@ -33,7 +33,6 @@ conn.with_opts(ConnectionOptions {
     },
     ..Default::default()
 }).await?;
-let gql = conn.as_graphql()?;
 
 #[derive(Deserialize)]
 struct Data { character: Character }
@@ -46,10 +45,9 @@ println!("{} is {}", data.character.name, data.character.status);
 # }
 ```
 
-HTTP and WebSocket clients follow the same `Network::new_connection` → `with_opts` → `as_http` /
-`as_websocket` shape. See [`examples/`](examples) for complete, runnable programs against live
-public services (Rick and Morty's GraphQL API, an httpbin-compatible HTTP service, and a
-WebSocket echo server):
+`HttpClient` and `WebSocketClient` follow the same shape: build with `Default`, then `connect`.
+See [`examples/`](examples) for complete, runnable programs against live public services (Rick
+and Morty's GraphQL API, an httpbin-compatible HTTP service, and a WebSocket echo server):
 
 ```bash
 cargo run --example rickandmorty_graphql

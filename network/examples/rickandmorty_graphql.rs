@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use network::{ClientType, ConnectionOptions, FieldArg, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, FieldArg, GraphQLClient, UrlOptions, UrlScheme};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -50,8 +50,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== GraphQL Client Examples ===");
     println!("Using Rick and Morty GraphQL API\n");
 
-    let mut conn = Network::new_connection(ClientType::GraphQL)?;
-    conn.with_opts(ConnectionOptions {
+    let mut gql = GraphQLClient::default();
+    gql.connect(ConnectionOptions {
         url: UrlOptions {
             scheme: UrlScheme::Https,
             host: "rickandmortyapi.com".to_string(),
@@ -61,7 +61,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     })
     .await?;
-    let gql = conn.as_graphql()?;
     println!("Connected to GraphQL server successfully!\n");
 
     // 1. Typed query (network::GraphQLClient::query) — caller-supplied query text, decoded into T.

@@ -6,40 +6,6 @@ use std::time::Duration;
 
 use crate::error::Error;
 
-/// Identifies which kind of network client [`crate::Network::new_connection`] creates.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ClientType {
-    /// A GraphQL API client ([`crate::GraphQLClient`]).
-    GraphQL,
-    /// An HTTP REST client ([`crate::HttpClient`]).
-    Http,
-    /// A WebSocket client ([`crate::WebSocketClient`]).
-    WebSocket,
-}
-
-impl fmt::Display for ClientType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::GraphQL => "graphql",
-            Self::Http => "http",
-            Self::WebSocket => "websocket",
-        })
-    }
-}
-
-impl FromStr for ClientType {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "graphql" => Ok(Self::GraphQL),
-            "http" => Ok(Self::Http),
-            "websocket" => Ok(Self::WebSocket),
-            other => Err(Error::UnsupportedClientType(other.to_string())),
-        }
-    }
-}
-
 /// The protocol part of a URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum UrlScheme {
@@ -95,8 +61,9 @@ pub struct UrlOptions {
     pub params: HashMap<String, String>,
 }
 
-/// Settings shared by all client types. Pass it to [`crate::Network::with_opts`] or to a client's
-/// `connect` method.
+/// Settings shared by all client types. Pass it to a client's `connect` method (e.g.
+/// [`crate::HttpClient::connect`], [`crate::GraphQLClient::connect`],
+/// [`crate::WebSocketClient::connect`]).
 #[derive(Clone, Default)]
 pub struct ConnectionOptions {
     /// The target endpoint. For HTTP/GraphQL use http or https; for WebSocket use ws or wss.

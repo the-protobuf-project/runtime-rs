@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use network::{ClientType, ConnectionOptions, FieldArg, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, FieldArg, GraphQLClient, UrlOptions, UrlScheme};
 use serde::Deserialize;
 use serde_json::json;
 use tokio::net::TcpListener;
@@ -102,9 +102,8 @@ struct Counter {
 #[tokio::test]
 async fn subscribe_fields_streams_decoded_updates_then_completes() {
     let addr = start_subscription_server().await;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts_for(addr)).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts_for(addr)).await.unwrap();
 
     let mut sub = gql
         .subscribe_fields::<Counter>(
@@ -133,9 +132,8 @@ async fn subscribe_fields_streams_decoded_updates_then_completes() {
 #[tokio::test]
 async fn subscribe_fields_cancellation_stops_subscription() {
     let addr = start_subscription_server().await;
-    let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
-    network.with_opts(opts_for(addr)).await.unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(opts_for(addr)).await.unwrap();
 
     let cancel = tokio_util::sync::CancellationToken::new();
     let mut sub = gql

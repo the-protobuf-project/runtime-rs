@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use network::{ClientType, ConnectionOptions, HttpMethod, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, HttpClient, HttpMethod, UrlOptions, UrlScheme};
 
 fn base_opts(path: &str, params: HashMap<String, String>) -> UrlOptions {
     UrlOptions {
@@ -41,15 +41,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== HTTP Client Examples ===");
     println!("Using httpbingo.org\n");
 
-    let mut conn = Network::new_connection(ClientType::Http)?;
-    conn.with_opts(ConnectionOptions {
+    let mut http = HttpClient::default();
+    http.connect(ConnectionOptions {
         url: base_opts("/get", HashMap::new()),
         timeout: Duration::from_secs(10),
         ..Default::default()
     })
     .await?;
     println!("Connected (HEAD/GET connectivity check passed)\n");
-    let http = conn.as_http()?;
 
     // 1. Simple GET request.
     println!("1. Simple GET Request");

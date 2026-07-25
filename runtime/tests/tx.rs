@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use runtime::{BatchOp, ConnectionOptions, FieldArg, UrlOptions};
+use runtime::{BatchOp, ConnectionOptions, FieldArg, GraphQLClient, UrlOptions};
 use serde_json::json;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -17,24 +17,22 @@ async fn new_connection_tx_add_commit_end_to_end() {
         .await;
 
     let url = url::Url::parse(&server.uri()).unwrap();
-    let mut network = runtime::new_connection(runtime::GRAPHQL_CONN_CLIENT).unwrap();
-    network
-        .with_opts(ConnectionOptions {
-            url: UrlOptions {
-                scheme: runtime::HTTP,
-                host: format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()),
-                paths: vec!["/graphql".to_string()],
-                params: HashMap::new(),
-            },
-            timeout: Duration::from_secs(2),
-            skip_connectivity_check: true,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(ConnectionOptions {
+        url: UrlOptions {
+            scheme: runtime::HTTP,
+            host: format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()),
+            paths: vec!["/graphql".to_string()],
+            params: HashMap::new(),
+        },
+        timeout: Duration::from_secs(2),
+        skip_connectivity_check: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
 
-    let mut tx = runtime::Tx::new(gql);
+    let mut tx = runtime::Tx::new(&gql);
     tx.add(BatchOp {
         field: "insertPromocode".to_string(),
         args: vec![],
@@ -62,24 +60,22 @@ async fn empty_tx_commits_nothing() {
         .await;
 
     let url = url::Url::parse(&server.uri()).unwrap();
-    let mut network = runtime::new_connection(runtime::GRAPHQL_CONN_CLIENT).unwrap();
-    network
-        .with_opts(ConnectionOptions {
-            url: UrlOptions {
-                scheme: runtime::HTTP,
-                host: format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()),
-                paths: vec!["/graphql".to_string()],
-                params: HashMap::new(),
-            },
-            timeout: Duration::from_secs(2),
-            skip_connectivity_check: true,
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    let gql = network.as_graphql().unwrap();
+    let mut gql = GraphQLClient::default();
+    gql.connect(ConnectionOptions {
+        url: UrlOptions {
+            scheme: runtime::HTTP,
+            host: format!("{}:{}", url.host_str().unwrap(), url.port().unwrap()),
+            paths: vec!["/graphql".to_string()],
+            params: HashMap::new(),
+        },
+        timeout: Duration::from_secs(2),
+        skip_connectivity_check: true,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
 
-    let tx = runtime::Tx::new(gql);
+    let tx = runtime::Tx::new(&gql);
     assert!(tx.is_empty());
     let results = tx.commit().await.unwrap();
     assert!(results.is_empty());

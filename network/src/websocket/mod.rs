@@ -38,8 +38,8 @@ struct Inner {
     state: AsyncRwLock<State>,
 }
 
-/// A WebSocket connection client. Create via [`crate::Network::new_connection`] and
-/// [`crate::Network::as_websocket`]. A cheap `Arc` handle to shared state — cloning it shares the
+/// A WebSocket connection client. Create with [`Default`] and configure with
+/// [`WebSocketClient::connect`]. A cheap `Arc` handle to shared state — cloning it shares the
 /// same connection, and all methods are safe for concurrent use, including across clones.
 #[derive(Clone)]
 pub struct WebSocketClient(Arc<Inner>);

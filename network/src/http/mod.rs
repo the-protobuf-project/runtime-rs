@@ -50,9 +50,9 @@ impl From<HttpMethod> for reqwest::Method {
     }
 }
 
-/// An HTTP REST client. Create via [`crate::Network::new_connection`] and
-/// [`crate::Network::as_http`]. It embeds [`ConnectionOptions`] (URL, timeout, headers, retries,
-/// retry delay, skip-connectivity-check).
+/// An HTTP REST client. Create with [`Default`] and configure with [`HttpClient::connect`]. It
+/// embeds [`ConnectionOptions`] (URL, timeout, headers, retries, retry delay,
+/// skip-connectivity-check).
 #[derive(Default)]
 pub struct HttpClient {
     pub(crate) client: Option<reqwest::Client>,

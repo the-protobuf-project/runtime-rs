@@ -19,9 +19,10 @@ where and why this diverges from the original.
   transactional batched mutations, and live `graphql-transport-ws` subscriptions.
 - **WebSocket client** — send/receive, ping/pong keepalive, auto-reconnect, and a cancellable
   message stream.
-- **One factory, one shape** — all three client types are created through
-  [`Network::new_connection`] and configured through [`Network::with_opts`], with a single
-  [`ConnectionOptions`] struct shared across all of them.
+- **One shape, three clients** — [`HttpClient`], [`GraphQLClient`], and [`WebSocketClient`] are
+  each constructed with [`Default`] and configured with a single [`ConnectionOptions`] struct
+  shared across all of them; no factory or common wrapper type stands between you and the client
+  you want.
 - **Connectivity verification** — `connect` checks the target is reachable before returning
   (opt-out per connection), so failures surface immediately instead of on the first real request.
 - **Async-native** — every operation is a plain `async fn` returning `Result<T, Error>` on
@@ -38,7 +39,7 @@ Three crates, mirroring the three Go packages 1:1:
 
 | Crate | Published as | Go source | Purpose |
 |---|---|---|---|
-| [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: `Network` factory, HTTP, WebSocket, GraphQL |
+| [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: HTTP, WebSocket, GraphQL |
 | [`network-graphql`](network-graphql) | `tpp-network-graphql` | `runtime-go/network/graphql` | Predicate/filter/query-builder helpers — independent of `network` |
 | [`runtime`](runtime) | `tpp-runtime` | `runtime-go/network/runtime` | Stable facade re-exporting `network`'s surface, plus `Tx` (atomic batched mutations) |
 
@@ -59,7 +60,7 @@ cargo add tpp-runtime         # stable facade + Tx (optional, depends on tpp-net
 ### HTTP
 
 ```rust,no_run
-use network::{ClientType, ConnectionOptions, HttpMethod, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, HttpClient, HttpMethod, UrlOptions, UrlScheme};
 
 # async fn example() -> network::Result<()> {
 let url = UrlOptions {
@@ -68,14 +69,13 @@ let url = UrlOptions {
     paths: vec!["/users".into()],
     params: Default::default(),
 };
-let mut conn = Network::new_connection(ClientType::Http)?;
-conn.with_opts(ConnectionOptions {
+let mut http = HttpClient::default();
+http.connect(ConnectionOptions {
     url: url.clone(),
     headers: [("Authorization".into(), "Bearer token".into())].into(),
     ..Default::default()
 }).await?;
 
-let http = conn.as_http()?;
 let body = http.request(HttpMethod::Get, &url, Vec::new(), &Default::default(), 0, 3, None).await?;
 # Ok(())
 # }
@@ -84,12 +84,12 @@ let body = http.request(HttpMethod::Get, &url, Vec::new(), &Default::default(), 
 ### GraphQL
 
 ```rust,no_run
-use network::{ClientType, ConnectionOptions, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, GraphQLClient, UrlOptions, UrlScheme};
 use serde::Deserialize;
 
 # async fn example() -> network::Result<()> {
-let mut conn = Network::new_connection(ClientType::GraphQL)?;
-conn.with_opts(ConnectionOptions {
+let mut gql = GraphQLClient::default();
+gql.connect(ConnectionOptions {
     url: UrlOptions {
         scheme: UrlScheme::Https,
         host: "api.example.com".into(),
@@ -98,7 +98,6 @@ conn.with_opts(ConnectionOptions {
     },
     ..Default::default()
 }).await?;
-let gql = conn.as_graphql()?;
 
 #[derive(Deserialize)]
 struct Data { user: User }
@@ -113,12 +112,12 @@ let data: Data = gql.query(r#"query { user(id: "123") { id name } }"#, None).awa
 ### WebSocket
 
 ```rust,no_run
-use network::{ClientType, ConnectionOptions, Message, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, Message, UrlOptions, UrlScheme, WebSocketClient};
 use std::time::Duration;
 
 # async fn example() -> network::Result<()> {
-let mut conn = Network::new_connection(ClientType::WebSocket)?;
-conn.with_opts(ConnectionOptions {
+let ws = WebSocketClient::default();
+ws.connect(ConnectionOptions {
     url: UrlOptions {
         scheme: UrlScheme::Wss,
         host: "ws.example.com".into(),
@@ -127,7 +126,6 @@ conn.with_opts(ConnectionOptions {
     },
     ..Default::default()
 }).await?;
-let ws = conn.as_websocket()?;
 
 ws.set_auto_reconnect(true, Some(Duration::from_secs(5))).await;
 let mut updates = ws.listen(None);
@@ -159,8 +157,7 @@ while let Some(msg) = updates.recv().await {
 
 ### Connectivity verification
 
-By default, `connect` (and therefore `Network::with_opts`) verifies the target is reachable
-before returning:
+By default, each client's `connect` verifies the target is reachable before returning:
 
 - **HTTP** — sends a `HEAD` request; if the server returns `405 Method Not Allowed`, a `GET` is
   sent instead and its body is drained (up to 1 MiB) so the connection can be reused.
@@ -277,11 +274,11 @@ of the transport layer itself).
 
 ### Design patterns
 
-- **Factory** — [`Network::new_connection`] builds the requested client type behind one
-  constructor.
-- **Enum dispatch, not `dyn Trait`** — [`NetworkClient`] is a closed three-variant enum
-  (`GraphQL`/`Http`/`WebSocket`), avoiding `async-trait` boxing while giving compiler-checked
-  exhaustiveness Go's type switch can't.
+- **Direct construction, no factory** — [`HttpClient`], [`GraphQLClient`], and
+  [`WebSocketClient`] are built with [`Default`] and configured with `connect`; there's no common
+  wrapper type or enum standing between construction and use, since the client type you want is
+  always known at the call site (see [Differences from the Go implementation](#differences-from-the-go-implementation)
+  for why Go needed one and Rust doesn't).
 - **Interior mutability for shared handles** — `WebSocketClient` and `GraphQLClient`'s live
   connection state sits behind `tokio::sync` locks so a client can be cloned cheaply and driven
   concurrently (e.g. a background `listen` task alongside foreground `send`s).
@@ -324,10 +321,14 @@ proc-macro system to replace it. The consequences, by area:
   [`subscription_task.rs`](network/src/graphql/subscription_task.rs)) rather than wrapping an
   external GraphQL-WS client crate, keeping this workspace's dependency footprint and protocol
   behavior fully in its own control.
-- **The `Client` interface** becomes a closed `NetworkClient` enum (`GraphQL`/`Http`/`WebSocket`)
-  instead of a `Box<dyn Trait>` — there are exactly three implementations, known at compile time,
-  so enum dispatch avoids both `async-trait` boxing and the async-fn-in-dyn-trait problem while
-  giving exhaustive-match compile-time coverage Go's type switch can't.
+- **No `Client` interface, no factory** — Go's `Client` interface plus `NewConnection` factory
+  and `AsGraphQLConnectionType`-style type assertions exist because Go has no other way for one
+  constructor to return "any of three concrete types" and let the caller recover the concrete one
+  afterward. That's not a runtime need here: the client type is a compile-time constant at every
+  real call site in both languages (Go's own generated code always calls
+  `NewConnection(GraphQLConnClient)` with a literal constant). So this port skips the indirection
+  entirely — `HttpClient`, `GraphQLClient`, and `WebSocketClient` are constructed directly via
+  `Default`, with no wrapper type, no enum, and no `TypeCast` error variant to encounter.
 - **Async model**: Go's goroutine-plus-channel pattern (`<-chan HTTPResponse`, `<-chan
   GraphQLResult`) becomes plain `async fn` returning `Result<T, Error>` throughout. Cancellation,
   where Go used `context.Context`, is an explicit `Option<&tokio_util::sync::CancellationToken>`
@@ -365,7 +366,8 @@ automatically.
 
 Apache-2.0 — see [LICENSE](LICENSE).
 
-[`Network::new_connection`]: network/src/client.rs
-[`Network::with_opts`]: network/src/client.rs
-[`NetworkClient`]: network/src/client.rs
+[`HttpClient`]: network/src/http/mod.rs
+[`GraphQLClient`]: network/src/graphql/mod.rs
+[`WebSocketClient`]: network/src/websocket/mod.rs
 [`ConnectionOptions`]: network/src/options.rs
+[`Default`]: https://doc.rust-lang.org/std/default/trait.Default.html

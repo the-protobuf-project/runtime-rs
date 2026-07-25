@@ -5,14 +5,6 @@
 /// [`std::error::Error::source`] walks the same causal chain Go's `errors.Unwrap` does.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// [`crate::Network::new_connection`] was called with a [`crate::ClientType`] that has no
-    /// implementation.
-    #[error("client type not supported: {0}")]
-    UnsupportedClientType(String),
-    /// A `Network::as_*` accessor was called on a client of a different concrete type.
-    #[error("failed to cast to {0}")]
-    TypeCast(&'static str),
-
     /// A [`crate::UrlOptions::scheme`] value wasn't one of `http`, `https`, `ws`, or `wss`.
     #[error("invalid URL scheme: {0}. Must be 'http', 'https', 'ws', or 'wss'")]
     InvalidScheme(String),

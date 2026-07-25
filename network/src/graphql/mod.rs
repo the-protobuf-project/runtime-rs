@@ -1,6 +1,6 @@
 //! The GraphQL client: connection lifecycle plus raw, typed, field-based, batch, and
-//! subscription operations. Start with [`GraphQLClient`], obtained via
-//! [`crate::Network::as_graphql`].
+//! subscription operations. Start with [`GraphQLClient::default`] and
+//! [`GraphQLClient::connect`].
 
 mod batch;
 mod helpers;
@@ -24,9 +24,9 @@ pub use subscription::Subscription;
 /// [`ConnectionOptions::graphql_connectivity_query`] for strict servers that limit introspection.
 pub const DEFAULT_GRAPHQL_CONNECTIVITY_QUERY: &str = "query { __typename }";
 
-/// A GraphQL API client. Create via [`crate::Network::new_connection`] and
-/// [`crate::Network::as_graphql`]. It embeds [`ConnectionOptions`] (URL, timeout, headers,
-/// skip-connectivity-check, GraphQL connectivity query).
+/// A GraphQL API client. Create with [`Default`] and configure with [`GraphQLClient::connect`].
+/// It embeds [`ConnectionOptions`] (URL, timeout, headers, skip-connectivity-check, GraphQL
+/// connectivity query).
 #[derive(Default)]
 pub struct GraphQLClient {
     pub(crate) http: Option<reqwest::Client>,

@@ -18,8 +18,8 @@ The library crate is imported as `runtime` regardless of the published package n
 
 ```rust,no_run
 # async fn example() -> runtime::Result<()> {
-let mut network = runtime::new_connection(runtime::ClientType::GraphQL)?;
-network.with_opts(runtime::ConnectionOptions {
+let mut gql = runtime::GraphQLClient::default();
+gql.connect(runtime::ConnectionOptions {
     url: runtime::UrlOptions {
         scheme: runtime::HTTP,
         host: "localhost:3280".to_string(),
@@ -28,7 +28,6 @@ network.with_opts(runtime::ConnectionOptions {
     },
     ..Default::default()
 }).await?;
-let gql = network.as_graphql()?;
 # Ok(())
 # }
 ```

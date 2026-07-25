@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use network::{ClientType, ConnectionOptions, Error, HttpMethod, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, Error, HttpClient, HttpMethod, UrlOptions, UrlScheme};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -29,8 +29,8 @@ async fn connect_head_success_skips_get() {
         .mount(&server)
         .await;
 
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    network.with_opts(opts_for(&server, "/api")).await.unwrap();
+    let mut http = HttpClient::default();
+    http.connect(opts_for(&server, "/api")).await.unwrap();
 
     server.verify().await;
 }
@@ -51,8 +51,8 @@ async fn connect_head_405_falls_back_to_get() {
         .mount(&server)
         .await;
 
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    network.with_opts(opts_for(&server, "/api")).await.unwrap();
+    let mut http = HttpClient::default();
+    http.connect(opts_for(&server, "/api")).await.unwrap();
 
     server.verify().await;
 }
@@ -68,8 +68,8 @@ async fn connect_skip_connectivity_check_sends_no_request() {
 
     let mut opts = opts_for(&server, "/api");
     opts.skip_connectivity_check = true;
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    network.with_opts(opts).await.unwrap();
+    let mut http = HttpClient::default();
+    http.connect(opts).await.unwrap();
 
     server.verify().await;
 }
@@ -87,8 +87,8 @@ async fn connect_fails_when_unreachable() {
         ..Default::default()
     };
     opts.retries = 0;
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    let err = network.with_opts(opts).await.unwrap_err();
+    let mut http = HttpClient::default();
+    let err = http.connect(opts).await.unwrap_err();
     match err {
         Error::HttpConnect { host, .. } => assert_eq!(host, "127.0.0.1:1"),
         other => panic!("expected HttpConnect, got {other:?}"),
@@ -109,9 +109,8 @@ async fn request_retries_and_wraps_last_error() {
         .await;
 
     let opts = opts_for(&server, "/always-500");
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    network.with_opts(opts.clone()).await.unwrap();
-    let http = network.as_http().unwrap();
+    let mut http = HttpClient::default();
+    http.connect(opts.clone()).await.unwrap();
 
     let err = http
         .request(
@@ -150,9 +149,8 @@ async fn request_cancellation_stops_immediately() {
 
     let mut opts = opts_for(&server, "/slow");
     opts.timeout = Duration::from_secs(10);
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    network.with_opts(opts.clone()).await.unwrap();
-    let http = network.as_http().unwrap();
+    let mut http = HttpClient::default();
+    http.connect(opts.clone()).await.unwrap();
 
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_clone = cancel.clone();
@@ -192,9 +190,8 @@ async fn request_success_returns_body() {
         .await;
 
     let opts = opts_for(&server, "/data");
-    let mut network = Network::new_connection(ClientType::Http).unwrap();
-    network.with_opts(opts.clone()).await.unwrap();
-    let http = network.as_http().unwrap();
+    let mut http = HttpClient::default();
+    http.connect(opts.clone()).await.unwrap();
 
     let data = http
         .request(

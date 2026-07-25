@@ -9,15 +9,15 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use network::{ClientType, ConnectionOptions, Message, Network, UrlOptions, UrlScheme};
+use network::{ConnectionOptions, Message, UrlOptions, UrlScheme, WebSocketClient};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== WebSocket Client Examples ===");
     println!("Using wss://echo.websocket.org\n");
 
-    let mut conn = Network::new_connection(ClientType::WebSocket)?;
-    conn.with_opts(ConnectionOptions {
+    let ws = WebSocketClient::default();
+    ws.connect(ConnectionOptions {
         url: UrlOptions {
             scheme: UrlScheme::Wss,
             host: "echo.websocket.org".to_string(),
@@ -29,7 +29,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
     println!("Connected!\n");
-    let ws = conn.as_websocket()?;
 
     // The service greets new connections with a banner message before echoing; drain it first.
     println!("1. Simple Echo");
@@ -77,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    conn.as_websocket_mut()?.close().await?;
+    ws.close().await?;
     println!("\nAll WebSocket examples completed successfully.");
     Ok(())
 }

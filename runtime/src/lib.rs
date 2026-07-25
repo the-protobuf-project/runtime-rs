@@ -6,8 +6,8 @@
 //!
 //! ```no_run
 //! # async fn example() -> runtime::Result<()> {
-//! let mut network = runtime::new_connection(runtime::ClientType::GraphQL)?;
-//! network.with_opts(runtime::ConnectionOptions {
+//! let mut gql = runtime::GraphQLClient::default();
+//! gql.connect(runtime::ConnectionOptions {
 //!     url: runtime::UrlOptions {
 //!         scheme: runtime::HTTP,
 //!         host: "localhost:3280".to_string(),
@@ -16,36 +16,28 @@
 //!     },
 //!     ..Default::default()
 //! }).await?;
-//! let gql = network.as_graphql()?;
 //! # Ok(())
 //! # }
 //! ```
 //!
-//! Go's facade also re-exports `Boolean`/`Float`/`Int`/`String` GraphQL scalar aliases. Those
-//! existed only to support `hasura/go-graphql-client`'s reflection-based query building, which
-//! this workspace's `network` crate does not use (typed GraphQL operations take an explicit
-//! query string instead) — so only [`Id`] is carried forward here.
+//! Go's facade also re-exports a `NewConnection` factory and a `ClientType` enum, needed there
+//! because Go's `Client` interface is the only way to have one constructor return any of three
+//! concrete types. Rust doesn't need that indirection — the client type is always known at the
+//! call site, so [`GraphQLClient`], [`HttpClient`], and [`WebSocketClient`] are constructed
+//! directly via [`Default`]. Go's `Boolean`/`Float`/`Int`/`String` scalar aliases are dropped for
+//! the same reason typed operations don't need them (see the crate-level docs on [`network`]) —
+//! only [`Id`] is carried forward here.
 
 #![warn(missing_docs)]
 
 mod tx;
 
 pub use network::{
-    BatchOp, ClientType, ConnectionOptions, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, DEFAULT_TIMEOUT,
-    Error, FieldArg, GraphQLClient, HttpClient, HttpMethod, Id, Message, Network, NetworkClient,
-    Result, Subscription, UrlOptions, UrlScheme, WebSocketClient,
+    BatchOp, ConnectionOptions, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, DEFAULT_TIMEOUT, Error,
+    FieldArg, GraphQLClient, HttpClient, HttpMethod, Id, Message, Result, Subscription, UrlOptions,
+    UrlScheme, WebSocketClient,
 };
 pub use tx::Tx;
-
-// Client-type and URL-scheme constants, re-exported for call-site parity with the Go facade
-// (`runtime.GraphQLConnClient`-style usage).
-
-/// Creates a [`GraphQLClient`].
-pub const GRAPHQL_CONN_CLIENT: ClientType = ClientType::GraphQL;
-/// Creates an [`HttpClient`].
-pub const HTTP_CONN_CLIENT: ClientType = ClientType::Http;
-/// Creates a [`WebSocketClient`].
-pub const WEBSOCKET_CONN_CLIENT: ClientType = ClientType::WebSocket;
 
 /// Plain HTTP.
 pub const HTTP: UrlScheme = UrlScheme::Http;
@@ -55,12 +47,6 @@ pub const HTTPS: UrlScheme = UrlScheme::Https;
 pub const WS: UrlScheme = UrlScheme::Ws;
 /// TLS-secured WebSocket.
 pub const WSS: UrlScheme = UrlScheme::Wss;
-
-/// Creates a network client of the given type using the factory. See
-/// [`network::Network::new_connection`].
-pub fn new_connection(client_type: ClientType) -> Result<Network> {
-    Network::new_connection(client_type)
-}
 
 /// Converts a parsed [`url::Url`] into [`UrlOptions`] for [`ConnectionOptions`], so generated
 /// clients can connect straight from `Url::parse` output.
