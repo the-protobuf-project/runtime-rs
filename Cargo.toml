@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["network", "network-graphql", "runtime"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.93"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "stream"] }
+tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
+tungstenite = "0.30"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+url = "2.5"
+thiserror = "2.0"
+futures-util = "0.3"
+tracing = "0.1"
+opentelemetry = "0.32"
+opentelemetry-http = "0.32"
+http = "1.4"
+
+network = { path = "network", package = "tpp-network", version = "0.1.0" }
+network-graphql = { path = "network-graphql", package = "tpp-network-graphql", version = "0.1.0" }

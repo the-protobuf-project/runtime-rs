@@ -1,0 +1,33 @@
+[package]
+name = "tpp-network"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "GraphQL, HTTP, and WebSocket client transport (Rust port of runtime-go/network)"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+readme = "README.md"
+keywords = ["graphql", "http", "websocket", "async", "client"]
+categories = ["network-programming", "web-programming::http-client", "asynchronous"]
+
+[lib]
+name = "network"
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+reqwest = { workspace = true }
+tokio-tungstenite = { workspace = true }
+tungstenite = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+thiserror = { workspace = true }
+futures-util = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry-http = { workspace = true }
+http = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"

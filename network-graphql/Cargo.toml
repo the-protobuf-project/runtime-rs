@@ -1,0 +1,19 @@
+[package]
+name = "tpp-network-graphql"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Predicate/filter/query-builder helpers for generated GraphQL CRUD clients (Rust port of runtime-go/network/graphql)"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+readme = "README.md"
+keywords = ["graphql", "query-builder", "predicate", "crud", "filter"]
+categories = ["web-programming"]
+
+[lib]
+name = "network_graphql"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

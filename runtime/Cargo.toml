@@ -1,0 +1,23 @@
+[package]
+name = "tpp-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Stable facade re-exporting network's public surface (Rust port of runtime-go/network/runtime)"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+readme = "README.md"
+keywords = ["graphql", "facade", "client", "transaction", "batch"]
+categories = ["network-programming", "web-programming::http-client"]
+
+[lib]
+name = "runtime"
+
+[dependencies]
+network = { workspace = true }
+url = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+wiremock = "0.6"
