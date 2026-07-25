@@ -8,7 +8,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio::sync::{Mutex as AsyncMutex, RwLock as AsyncRwLock};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::{tungstenite, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite};
 use tokio_util::sync::CancellationToken;
 
 pub use tokio_tungstenite::tungstenite::Message;
@@ -71,21 +71,28 @@ impl WebSocketClient {
         }
 
         let path_index = self.0.state.read().await.path_index;
-        let full_url = build_full_url(&opts.url, path_index).map_err(|e| Error::BuildUrl(Box::new(e)))?;
+        let full_url =
+            build_full_url(&opts.url, path_index).map_err(|e| Error::BuildUrl(Box::new(e)))?;
         let request = build_ws_request(&full_url, &opts.url.host, &opts.headers)?;
 
         let dial = tokio_tungstenite::connect_async(request);
         let (ws_stream, _resp) = match tokio::time::timeout(opts.timeout, dial).await {
             Ok(Ok(pair)) => pair,
             Ok(Err(err)) => {
-                return Err(Error::WsConnect { host: opts.url.host.clone(), source: Box::new(err) })
+                return Err(Error::WsConnect {
+                    host: opts.url.host.clone(),
+                    source: Box::new(err),
+                });
             }
             Err(_) => {
                 let timeout_err = tungstenite::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "WebSocket handshake timed out",
                 ));
-                return Err(Error::WsConnect { host: opts.url.host.clone(), source: Box::new(timeout_err) });
+                return Err(Error::WsConnect {
+                    host: opts.url.host.clone(),
+                    source: Box::new(timeout_err),
+                });
             }
         };
 
@@ -179,9 +186,13 @@ fn build_ws_request(
 ) -> Result<http::Request<()>> {
     let mut request = full_url
         .into_client_request()
-        .map_err(|e| Error::WsConnect { host: host.to_string(), source: Box::new(e) })?;
+        .map_err(|e| Error::WsConnect {
+            host: host.to_string(),
+            source: Box::new(e),
+        })?;
     for (k, v) in headers {
-        let name = http::HeaderName::from_bytes(k.as_bytes()).map_err(|_| Error::InvalidHeader(k.clone()))?;
+        let name = http::HeaderName::from_bytes(k.as_bytes())
+            .map_err(|_| Error::InvalidHeader(k.clone()))?;
         let value = http::HeaderValue::from_str(v).map_err(|_| Error::InvalidHeader(v.clone()))?;
         request.headers_mut().insert(name, value);
     }

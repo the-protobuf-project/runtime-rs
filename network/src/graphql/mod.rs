@@ -13,7 +13,7 @@ mod ws_protocol;
 
 use crate::error::{Error, Result};
 use crate::options::{ConnectionOptions, DEFAULT_TIMEOUT};
-use crate::transport::{new_pooled_client, HeaderCarrier};
+use crate::transport::{HeaderCarrier, new_pooled_client};
 use crate::url::build_full_url;
 
 pub use batch::BatchOp;
@@ -80,10 +80,12 @@ impl GraphQLClient {
             .graphql_connectivity_query
             .clone()
             .unwrap_or_else(|| DEFAULT_GRAPHQL_CONNECTIVITY_QUERY.to_string());
-        self.exec_raw(&query, None).await.map_err(|source| Error::GraphQLConnect {
-            host: self.options.url.host.clone(),
-            source: Box::new(source),
-        })?;
+        self.exec_raw(&query, None)
+            .await
+            .map_err(|source| Error::GraphQLConnect {
+                host: self.options.url.host.clone(),
+                source: Box::new(source),
+            })?;
         Ok(())
     }
 
@@ -100,7 +102,10 @@ impl GraphQLClient {
         let endpoint = self.endpoint.as_ref().ok_or(Error::GraphQLNotInitialized)?;
 
         let mut body = serde_json::Map::new();
-        body.insert("query".to_string(), serde_json::Value::String(document.to_string()));
+        body.insert(
+            "query".to_string(),
+            serde_json::Value::String(document.to_string()),
+        );
         if let Some(v) = variables {
             body.insert("variables".to_string(), v.clone());
         }
@@ -135,6 +140,9 @@ impl GraphQLClient {
             return Err(Error::UnexpectedStatus(status.as_u16()));
         }
 
-        Ok(payload.get("data").cloned().unwrap_or(serde_json::Value::Null))
+        Ok(payload
+            .get("data")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null))
     }
 }

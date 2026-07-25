@@ -26,7 +26,10 @@ fn base_opts(path: &str, params: HashMap<String, String>) -> UrlOptions {
 /// headers here — this example must set one explicitly.
 fn headers_with_ua(extra: &[(&str, &str)]) -> HashMap<String, String> {
     let mut headers = HashMap::new();
-    headers.insert("User-Agent".to_string(), "runtime-rs-example/0.1".to_string());
+    headers.insert(
+        "User-Agent".to_string(),
+        "runtime-rs-example/0.1".to_string(),
+    );
     for (k, v) in extra {
         headers.insert(k.to_string(), v.to_string());
     }
@@ -51,9 +54,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Simple GET request.
     println!("1. Simple GET Request");
     let url = base_opts("/get", HashMap::new());
-    let body = http.request(HttpMethod::Get, &url, Vec::new(), &headers_with_ua(&[]), 0, 0, None).await?;
+    let body = http
+        .request(
+            HttpMethod::Get,
+            &url,
+            Vec::new(),
+            &headers_with_ua(&[]),
+            0,
+            0,
+            None,
+        )
+        .await?;
     println!("   Success! Response length: {} bytes", body.len());
-    println!("   Preview: {}\n", &String::from_utf8_lossy(&body)[..120.min(body.len())]);
+    println!(
+        "   Preview: {}\n",
+        &String::from_utf8_lossy(&body)[..120.min(body.len())]
+    );
 
     // 2. GET with query parameters.
     println!("2. GET with Query Parameters");
@@ -61,16 +77,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     params.insert("hello".to_string(), "world".to_string());
     params.insert("lang".to_string(), "rust".to_string());
     let url = base_opts("/get", params);
-    let body = http.request(HttpMethod::Get, &url, Vec::new(), &headers_with_ua(&[]), 0, 0, None).await?;
+    let body = http
+        .request(
+            HttpMethod::Get,
+            &url,
+            Vec::new(),
+            &headers_with_ua(&[]),
+            0,
+            0,
+            None,
+        )
+        .await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     println!("   Success! Echoed args: {}\n", json["args"]);
 
     // 3. POST with a JSON body.
     println!("3. POST with JSON Body");
     let url = base_opts("/post", HashMap::new());
-    let payload = serde_json::json!({"message": "hello from runtime-rs", "n": 42}).to_string().into_bytes();
+    let payload = serde_json::json!({"message": "hello from runtime-rs", "n": 42})
+        .to_string()
+        .into_bytes();
     let headers = headers_with_ua(&[("Content-Type", "application/json")]);
-    let body = http.request(HttpMethod::Post, &url, payload, &headers, 0, 0, None).await?;
+    let body = http
+        .request(HttpMethod::Post, &url, payload, &headers, 0, 0, None)
+        .await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     println!("   Success! Server saw JSON: {}\n", json["json"]);
 
@@ -78,7 +108,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    demonstrates retry-exhaustion wrapping the last error).
     println!("4. Automatic Retries (against an endpoint that always 500s)");
     let url = base_opts("/status/500", HashMap::new());
-    match http.request(HttpMethod::Get, &url, Vec::new(), &headers_with_ua(&[]), 0, 2, None).await {
+    match http
+        .request(
+            HttpMethod::Get,
+            &url,
+            Vec::new(),
+            &headers_with_ua(&[]),
+            0,
+            2,
+            None,
+        )
+        .await
+    {
         Ok(_) => println!("   Unexpected success"),
         Err(e) => println!("   Got expected error after retries: {e}\n"),
     }
@@ -93,7 +134,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         cancel_clone.cancel();
     });
     let start = std::time::Instant::now();
-    match http.request(HttpMethod::Get, &url, Vec::new(), &headers_with_ua(&[]), 0, 0, Some(&cancel)).await {
+    match http
+        .request(
+            HttpMethod::Get,
+            &url,
+            Vec::new(),
+            &headers_with_ua(&[]),
+            0,
+            0,
+            Some(&cancel),
+        )
+        .await
+    {
         Ok(_) => println!("   Unexpected success"),
         Err(e) => println!("   Cancelled after {:?}: {e}\n", start.elapsed()),
     }

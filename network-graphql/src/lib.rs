@@ -28,6 +28,6 @@ pub use fields_string::StringField;
 pub use handlers::{MutationHandler, QueryHandler};
 pub use keyset::after;
 pub use nullable::Nullable;
-pub use predicate::{and, not, or, relation, Predicate};
+pub use predicate::{Predicate, and, not, or, relation};
 pub use requests::{CreateRequest, DeleteRequest, ListRequest, UpdateRequest};
 pub use scalars::{Bigdecimal, Int64, Variable};

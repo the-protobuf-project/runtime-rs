@@ -1,7 +1,7 @@
 use serde_json::Value;
 
-use super::named::{sorted_args, FieldArg};
 use super::GraphQLClient;
+use super::named::{FieldArg, sorted_args};
 use crate::error::{Error, Result};
 
 /// One mutation in a transactional batch: a root mutation field, its arguments, and the
@@ -34,7 +34,11 @@ impl GraphQLClient {
         for (i, op) in ops.iter().enumerate() {
             let alias = format!("m{i}");
             let sorted = sorted_args(&op.args);
-            heads.push(format!("{} {}", build_batch_tag(&alias, &op.field, &sorted), op.selection));
+            heads.push(format!(
+                "{} {}",
+                build_batch_tag(&alias, &op.field, &sorted),
+                op.selection
+            ));
             for a in &sorted {
                 let var_name = format!("{alias}_{}", a.name);
                 variables.insert(var_name.clone(), a.value.clone());
@@ -48,7 +52,11 @@ impl GraphQLClient {
             format!("({})", var_decl_parts.join(", "))
         };
         let document = format!("mutation{var_decls} {{ {} }}", heads.join(" "));
-        let variables = if variables.is_empty() { None } else { Some(Value::Object(variables)) };
+        let variables = if variables.is_empty() {
+            None
+        } else {
+            Some(Value::Object(variables))
+        };
 
         let data = self
             .exec_raw(&document, variables.as_ref())

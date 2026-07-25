@@ -12,7 +12,7 @@
 
 use crate::columns::OrderTerm;
 use crate::keyset::after;
-use crate::predicate::{and, Predicate};
+use crate::predicate::{Predicate, and};
 
 /// The optional arguments shared by list, find, aggregate, and live-list operations: a
 /// where filter, result ordering, and limit/offset paging.

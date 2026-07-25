@@ -62,9 +62,7 @@ impl Serialize for Int64 {
 impl<'de> Deserialize<'de> for Int64 {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match serde_json::Value::deserialize(deserializer)? {
-            serde_json::Value::String(s) => {
-                s.parse::<i64>().map(Int64).map_err(D::Error::custom)
-            }
+            serde_json::Value::String(s) => s.parse::<i64>().map(Int64).map_err(D::Error::custom),
             serde_json::Value::Number(n) => n
                 .as_i64()
                 .map(Int64)

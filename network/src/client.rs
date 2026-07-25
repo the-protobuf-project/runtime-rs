@@ -65,7 +65,10 @@ impl Network {
             ClientType::Http => NetworkClient::Http(HttpClient::default()),
             ClientType::WebSocket => NetworkClient::WebSocket(WebSocketClient::default()),
         };
-        Ok(Self { client, options: ConnectionOptions::default() })
+        Ok(Self {
+            client,
+            options: ConnectionOptions::default(),
+        })
     }
 
     /// Applies the given connection options and establishes the connection (including the

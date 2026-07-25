@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use serde::Serialize;
 
 use crate::columns::{OrderBy, OrderTerm};
-use crate::predicate::{pred, Predicate};
+use crate::predicate::{Predicate, pred};
 
 /// A generated handle for a boolean column.
 pub struct BoolField {

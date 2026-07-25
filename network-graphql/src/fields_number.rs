@@ -1,7 +1,7 @@
 //! Generated handles for 64-bit integer and floating-point columns.
 
 use crate::columns::{OrderBy, OrderTerm};
-use crate::predicate::{pred, Predicate};
+use crate::predicate::{Predicate, pred};
 use crate::scalars::Int64;
 
 /// A generated handle for a 64-bit integer column.

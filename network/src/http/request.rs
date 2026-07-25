@@ -47,7 +47,8 @@ impl super::HttpClient {
                 }
             }
 
-            let full_url = build_full_url(url_options, path_index).map_err(|e| Error::BuildUrl(Box::new(e)))?;
+            let full_url = build_full_url(url_options, path_index)
+                .map_err(|e| Error::BuildUrl(Box::new(e)))?;
             let attempt_fut = self.send_once(method, &full_url, body.clone(), headers);
             let attempt_result = match cancel {
                 Some(cancel) => {
@@ -71,7 +72,9 @@ impl super::HttpClient {
 
         Err(Error::RetryExhausted {
             retries: max_retries,
-            source: Box::new(last_err.expect("at least one attempt runs when max_retries loop executes")),
+            source: Box::new(
+                last_err.expect("at least one attempt runs when max_retries loop executes"),
+            ),
         })
     }
 
@@ -130,17 +133,29 @@ mod tests {
 
     #[test]
     fn validates_known_4xx() {
-        assert!(matches!(validate_status_code(404), Err(Error::ClientStatus(404, "Not Found"))));
-        assert!(matches!(validate_status_code(429), Err(Error::ClientStatus(429, "Too Many Requests"))));
+        assert!(matches!(
+            validate_status_code(404),
+            Err(Error::ClientStatus(404, "Not Found"))
+        ));
+        assert!(matches!(
+            validate_status_code(429),
+            Err(Error::ClientStatus(429, "Too Many Requests"))
+        ));
     }
 
     #[test]
     fn validates_5xx() {
-        assert!(matches!(validate_status_code(503), Err(Error::ServerStatus(503))));
+        assert!(matches!(
+            validate_status_code(503),
+            Err(Error::ServerStatus(503))
+        ));
     }
 
     #[test]
     fn validates_unexpected() {
-        assert!(matches!(validate_status_code(300), Err(Error::UnexpectedStatus(300))));
+        assert!(matches!(
+            validate_status_code(300),
+            Err(Error::UnexpectedStatus(300))
+        ));
     }
 }

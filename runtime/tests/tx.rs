@@ -35,7 +35,11 @@ async fn new_connection_tx_add_commit_end_to_end() {
     let gql = network.as_graphql().unwrap();
 
     let mut tx = runtime::Tx::new(gql);
-    tx.add(BatchOp { field: "insertPromocode".to_string(), args: vec![], selection: "{ id }".to_string() });
+    tx.add(BatchOp {
+        field: "insertPromocode".to_string(),
+        args: vec![],
+        selection: "{ id }".to_string(),
+    });
     tx.add(BatchOp {
         field: "insertBookingMoney".to_string(),
         args: vec![FieldArg::new("amount", 100, "Int!")],
@@ -51,7 +55,11 @@ async fn new_connection_tx_add_commit_end_to_end() {
 #[tokio::test]
 async fn empty_tx_commits_nothing() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
 
     let url = url::Url::parse(&server.uri()).unwrap();
     let mut network = runtime::new_connection(runtime::GRAPHQL_CONN_CLIENT).unwrap();

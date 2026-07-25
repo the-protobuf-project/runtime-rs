@@ -15,11 +15,15 @@ async fn start_echo_server(drop_first: bool) -> SocketAddr {
     tokio::spawn(async move {
         let mut first = true;
         loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
             let should_drop = drop_first && first;
             first = false;
             tokio::spawn(async move {
-                let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                    return;
+                };
                 if should_drop {
                     drop(ws);
                     return;
@@ -81,7 +85,9 @@ async fn auto_reconnect_after_read_error() {
     let addr = start_echo_server(true).await;
     let client = WebSocketClient::default();
     client.connect(ws_opts(addr)).await.unwrap();
-    client.set_auto_reconnect(true, Some(Duration::from_millis(50))).await;
+    client
+        .set_auto_reconnect(true, Some(Duration::from_millis(50)))
+        .await;
 
     let mut rx = client.listen(None);
 
@@ -106,9 +112,16 @@ async fn listen_terminates_without_auto_reconnect() {
     client.connect(ws_opts(addr)).await.unwrap();
 
     let mut rx = client.listen(None);
-    let result = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+        .await
+        .unwrap();
     assert!(matches!(result, Some(Err(_))));
-    assert!(tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap().is_none());
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
@@ -121,6 +134,8 @@ async fn cancellation_stops_listen() {
     let mut rx = client.listen(Some(cancel.clone()));
     cancel.cancel();
 
-    let result = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await.unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(1), rx.recv())
+        .await
+        .unwrap();
     assert!(matches!(result, Some(Err(network::Error::Cancelled))));
 }

@@ -70,8 +70,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     struct CharacterData {
         character: Character,
     }
-    let data: CharacterData =
-        gql.query(r#"query { character(id: 1) { name status species gender } }"#, None).await?;
+    let data: CharacterData = gql
+        .query(
+            r#"query { character(id: 1) { name status species gender } }"#,
+            None,
+        )
+        .await?;
     println!("   Name: {}", data.character.name);
     println!("   Status: {}", data.character.status);
     println!("   Species: {}", data.character.species);
@@ -87,7 +91,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
     println!("   Name: {}", with_episodes.name);
-    println!("   Appears in {} episodes; first three:", with_episodes.episode.len());
+    println!(
+        "   Appears in {} episodes; first three:",
+        with_episodes.episode.len()
+    );
     for ep in with_episodes.episode.iter().take(3) {
         println!("     - {} ({})", ep.name, ep.episode);
     }
@@ -103,7 +110,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(&serde_json::Value::Object(variables)),
         )
         .await?;
-    let count = raw["characters"]["results"].as_array().map(|a| a.len()).unwrap_or(0);
+    let count = raw["characters"]["results"]
+        .as_array()
+        .map(|a| a.len())
+        .unwrap_or(0);
     println!("   SUCCESS: {count} characters matching \"Rick\"");
     if let Some(first) = raw["characters"]["results"].get(0) {
         println!("   First match: {} ({})", first["name"], first["status"]);
@@ -116,9 +126,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     struct CharactersData {
         characters: CharactersPage,
     }
-    let page: CharactersData =
-        gql.query("query { characters { results { id name status species } } }", None).await?;
-    println!("   SUCCESS: Found {} characters on this page", page.characters.results.len());
+    let page: CharactersData = gql
+        .query(
+            "query { characters { results { id name status species } } }",
+            None,
+        )
+        .await?;
+    println!(
+        "   SUCCESS: Found {} characters on this page",
+        page.characters.results.len()
+    );
     for c in page.characters.results.iter().take(5) {
         println!("   - #{} {} ({}, {})", c.id, c.name, c.status, c.species);
     }

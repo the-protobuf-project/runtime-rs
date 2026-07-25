@@ -1,0 +1,60 @@
+name: Publish to crates.io
+
+# Manual only — nothing in this repo ever publishes automatically. Publish
+# tpp-network-graphql and tpp-network first (and wait for them to be
+# indexed); tpp-runtime depends on tpp-network via the registry and its
+# publish/dry-run will fail until tpp-network is actually live.
+on:
+  workflow_dispatch:
+    inputs:
+      crate:
+        description: "Crate to publish"
+        required: true
+        type: choice
+        options:
+          - tpp-network-graphql
+          - tpp-network
+          - tpp-runtime
+      dry_run:
+        description: "Dry run only (no upload)"
+        required: true
+        type: boolean
+        default: true
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.crate }}
+    runs-on: ubuntu-latest
+    # Configure a "crates-io" environment with required reviewers in repo
+    # settings to gate real (non-dry-run) publishes behind manual approval.
+    environment: crates-io
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Map crate name to package directory
+        id: dir
+        run: |
+          case "${{ inputs.crate }}" in
+            tpp-network) echo "path=network" >> "$GITHUB_OUTPUT" ;;
+            tpp-network-graphql) echo "path=network-graphql" >> "$GITHUB_OUTPUT" ;;
+            tpp-runtime) echo "path=runtime" >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - name: Test
+        run: cargo test -p ${{ inputs.crate }}
+
+      - name: Publish (dry run)
+        if: ${{ inputs.dry_run }}
+        working-directory: ${{ steps.dir.outputs.path }}
+        run: cargo publish --dry-run
+
+      - name: Publish
+        if: ${{ !inputs.dry_run }}
+        working-directory: ${{ steps.dir.outputs.path }}
+        run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

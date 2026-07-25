@@ -15,7 +15,9 @@ impl WebSocketClient {
     pub async fn send(&self, message: Message) -> Result<()> {
         let mut guard = self.0.sink.lock().await;
         let sink = guard.as_mut().ok_or(Error::WsNotConnected)?;
-        sink.send(message).await.map_err(|e| Error::WsSend(Box::new(e)))
+        sink.send(message)
+            .await
+            .map_err(|e| Error::WsSend(Box::new(e)))
     }
 
     /// Reads the next WebSocket message. Blocks until a message is available, the connection is
@@ -62,7 +64,10 @@ impl WebSocketClient {
                 }
             }
         }
-        Err(Error::WsRetryExhausted { retries: max_retries, source: Box::new(last_err) })
+        Err(Error::WsRetryExhausted {
+            retries: max_retries,
+            source: Box::new(last_err),
+        })
     }
 
     /// Reads messages in a loop and forwards each on the returned channel. The channel receives

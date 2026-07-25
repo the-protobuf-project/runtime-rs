@@ -26,11 +26,9 @@ mod websocket;
 pub use client::{Network, NetworkClient};
 pub use error::{Error, Result};
 pub use graphql::{
-    BatchOp, FieldArg, GraphQLClient, Subscription, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY,
+    BatchOp, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, FieldArg, GraphQLClient, Subscription,
 };
 pub use http::{HttpClient, HttpMethod};
-pub use options::{
-    ClientType, ConnectionOptions, Id, UrlOptions, UrlScheme, DEFAULT_TIMEOUT,
-};
+pub use options::{ClientType, ConnectionOptions, DEFAULT_TIMEOUT, Id, UrlOptions, UrlScheme};
 pub use url::{url_options_from_std, websocket_url};
 pub use websocket::{Message, WebSocketClient};

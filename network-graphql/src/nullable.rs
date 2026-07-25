@@ -74,7 +74,9 @@ impl<T: Serialize> Nullable<T> {
         match &self.0 {
             NullableState::Unset => None,
             NullableState::Null => Some(serde_json::json!({ "set": null })),
-            NullableState::Value(v) => Some(serde_json::json!({ "set": serde_json::to_value(v).ok()? })),
+            NullableState::Value(v) => {
+                Some(serde_json::json!({ "set": serde_json::to_value(v).ok()? }))
+            }
         }
     }
 }

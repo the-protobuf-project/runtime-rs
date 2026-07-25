@@ -45,14 +45,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Auto-reconnect + listen loop, matching the Go example's SetAutoReconnect/Listen usage.
     println!("2. Listen Loop with a Few Messages");
-    ws.set_auto_reconnect(true, Some(Duration::from_secs(5))).await;
+    ws.set_auto_reconnect(true, Some(Duration::from_secs(5)))
+        .await;
     let mut updates = ws.listen(None);
 
     let sender = ws.clone();
     tokio::spawn(async move {
         for i in 1..=3 {
             tokio::time::sleep(Duration::from_millis(200)).await;
-            let _ = sender.send(Message::Text(format!("message #{i}").into())).await;
+            let _ = sender
+                .send(Message::Text(format!("message #{i}").into()))
+                .await;
         }
     });
 

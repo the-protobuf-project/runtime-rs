@@ -31,9 +31,9 @@
 mod tx;
 
 pub use network::{
-    BatchOp, ClientType, ConnectionOptions, Error, FieldArg, GraphQLClient, HttpClient, HttpMethod,
-    Id, Message, Network, NetworkClient, Result, Subscription, UrlOptions, UrlScheme,
-    WebSocketClient, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, DEFAULT_TIMEOUT,
+    BatchOp, ClientType, ConnectionOptions, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, DEFAULT_TIMEOUT,
+    Error, FieldArg, GraphQLClient, HttpClient, HttpMethod, Id, Message, Network, NetworkClient,
+    Result, Subscription, UrlOptions, UrlScheme, WebSocketClient,
 };
 pub use tx::Tx;
 

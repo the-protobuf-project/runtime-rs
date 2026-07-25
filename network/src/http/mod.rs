@@ -3,7 +3,7 @@ mod request;
 use std::fmt;
 
 use crate::error::{Error, Result};
-use crate::options::{ConnectionOptions, UrlScheme, DEFAULT_TIMEOUT};
+use crate::options::{ConnectionOptions, DEFAULT_TIMEOUT, UrlScheme};
 use crate::transport::new_pooled_client;
 use crate::url::build_full_url;
 
@@ -89,21 +89,30 @@ impl HttpClient {
     /// Sends a HEAD request (falling back to GET on 405) and drains the response body so the
     /// connection can be reused. Returns an error if the host is unreachable.
     async fn check_connectivity(&self, full_url: &str) -> Result<()> {
-        let client = self.client.as_ref().expect("connect sets client before check_connectivity");
+        let client = self
+            .client
+            .as_ref()
+            .expect("connect sets client before check_connectivity");
         let host = self.options.url.host.clone();
 
         let resp = client
             .head(full_url)
             .send()
             .await
-            .map_err(|source| Error::HttpConnect { host: host.clone(), source })?;
+            .map_err(|source| Error::HttpConnect {
+                host: host.clone(),
+                source,
+            })?;
 
         let resp = if resp.status() == reqwest::StatusCode::METHOD_NOT_ALLOWED {
             client
                 .get(full_url)
                 .send()
                 .await
-                .map_err(|source| Error::HttpConnect { host: host.clone(), source })?
+                .map_err(|source| Error::HttpConnect {
+                    host: host.clone(),
+                    source,
+                })?
         } else {
             resp
         };
@@ -112,7 +121,10 @@ impl HttpClient {
         let mut drained = 0usize;
         use futures_util::StreamExt;
         while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|source| Error::HttpConnect { host: host.clone(), source })?;
+            let chunk = chunk.map_err(|source| Error::HttpConnect {
+                host: host.clone(),
+                source,
+            })?;
             drained += chunk.len();
             if drained >= MAX_CONNECTIVITY_RESPONSE_BODY_BYTES {
                 break;

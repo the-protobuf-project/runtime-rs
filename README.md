@@ -1,29 +1,67 @@
 # runtime-rs
 
-A Cargo workspace providing GraphQL, HTTP, and WebSocket clients, plus generated-CRUD-client
-helpers — a Rust port of [`runtime-go/network`](../runtime-go/network), built the Rust way rather
-than a line-for-line translation.
+[![CI](https://github.com/the-protobuf-project/runtime-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/the-protobuf-project/runtime-rs/actions/workflows/ci.yml)
+[![docs](https://github.com/the-protobuf-project/runtime-rs/actions/workflows/docs.yml/badge.svg)](https://the-protobuf-project.github.io/runtime-rs/network/)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+A comprehensive Rust workspace providing unified GraphQL, HTTP, and WebSocket clients, plus
+predicate/filter helpers for generated CRUD clients — a Rust port of
+[`runtime-go/network`](https://github.com/the-protobuf-project/runtime-go/tree/main/network),
+built the Rust way rather than as a line-for-line translation. See
+[Differences from the Go implementation](#differences-from-the-go-implementation) for exactly
+where and why this diverges from the original.
+
+## Features
+
+- **HTTP client** — GET/POST/PUT/PATCH/DELETE with per-attempt timeouts, configurable retries,
+  and cooperative cancellation.
+- **GraphQL client** — raw queries, typed queries/mutations, dynamic field-based operations,
+  transactional batched mutations, and live `graphql-transport-ws` subscriptions.
+- **WebSocket client** — send/receive, ping/pong keepalive, auto-reconnect, and a cancellable
+  message stream.
+- **One factory, one shape** — all three client types are created through
+  [`Network::new_connection`] and configured through [`Network::with_opts`], with a single
+  [`ConnectionOptions`] struct shared across all of them.
+- **Connectivity verification** — `connect` checks the target is reachable before returning
+  (opt-out per connection), so failures surface immediately instead of on the first real request.
+- **Async-native** — every operation is a plain `async fn` returning `Result<T, Error>` on
+  `tokio`; no callback or channel plumbing.
+- **Distributed tracing** — an optional `opentelemetry` `TextMapPropagator` injects the active
+  span into every outgoing HTTP/GraphQL request.
+- **CRUD helpers** ([`network-graphql`](network-graphql)) — `where`-clause predicate building,
+  typed column handles, a three-state `Nullable<T>` for masked updates, and cursor pagination, for
+  whatever code generator emits your resource types.
 
 ## Workspace layout
 
 Three crates, mirroring the three Go packages 1:1:
 
-| Crate | Go source | Purpose |
-|---|---|---|
-| [`network`](network) | `runtime-go/network` | Core clients: `Network` factory, HTTP, WebSocket, GraphQL (queries, mutations, batches, subscriptions) |
-| [`network-graphql`](network-graphql) | `runtime-go/network/graphql` | Predicate/filter/query-builder helpers for generated CRUD clients — independent of `network` |
-| [`runtime`](runtime) | `runtime-go/network/runtime` | Stable facade re-exporting `network`'s public surface, plus `Tx` (atomic batched mutations) |
+| Crate | Published as | Go source | Purpose |
+|---|---|---|---|
+| [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: `Network` factory, HTTP, WebSocket, GraphQL |
+| [`network-graphql`](network-graphql) | `tpp-network-graphql` | `runtime-go/network/graphql` | Predicate/filter/query-builder helpers — independent of `network` |
+| [`runtime`](runtime) | `tpp-runtime` | `runtime-go/network/runtime` | Stable facade re-exporting `network`'s surface, plus `Tx` (atomic batched mutations) |
 
 `runtime` depends on `network`; `network-graphql` depends on neither, matching the Go dependency
-graph.
+graph. Each crate is imported under its short name (`network`, `network_graphql`, `runtime`)
+regardless of its published package name — see the `[lib] name` override in each `Cargo.toml`.
+
+## Installation
+
+```bash
+cargo add tpp-network        # HTTP, GraphQL, WebSocket clients
+cargo add tpp-network-graphql # CRUD predicate/filter helpers (optional, standalone)
+cargo add tpp-runtime         # stable facade + Tx (optional, depends on tpp-network)
+```
 
 ## Quick start
 
 ### HTTP
 
-```rust
+```rust,no_run
 use network::{ClientType, ConnectionOptions, HttpMethod, Network, UrlOptions, UrlScheme};
 
+# async fn example() -> network::Result<()> {
 let url = UrlOptions {
     scheme: UrlScheme::Https,
     host: "api.example.com".into(),
@@ -39,17 +77,25 @@ conn.with_opts(ConnectionOptions {
 
 let http = conn.as_http()?;
 let body = http.request(HttpMethod::Get, &url, Vec::new(), &Default::default(), 0, 3, None).await?;
+# Ok(())
+# }
 ```
 
 ### GraphQL
 
-```rust
+```rust,no_run
 use network::{ClientType, ConnectionOptions, Network, UrlOptions, UrlScheme};
 use serde::Deserialize;
 
+# async fn example() -> network::Result<()> {
 let mut conn = Network::new_connection(ClientType::GraphQL)?;
 conn.with_opts(ConnectionOptions {
-    url: UrlOptions { scheme: UrlScheme::Https, host: "api.example.com".into(), paths: vec!["/graphql".into()], params: Default::default() },
+    url: UrlOptions {
+        scheme: UrlScheme::Https,
+        host: "api.example.com".into(),
+        paths: vec!["/graphql".into()],
+        params: Default::default(),
+    },
     ..Default::default()
 }).await?;
 let gql = conn.as_graphql()?;
@@ -60,17 +106,25 @@ struct Data { user: User }
 struct User { id: String, name: String }
 
 let data: Data = gql.query(r#"query { user(id: "123") { id name } }"#, None).await?;
+# Ok(())
+# }
 ```
 
 ### WebSocket
 
-```rust
+```rust,no_run
 use network::{ClientType, ConnectionOptions, Message, Network, UrlOptions, UrlScheme};
 use std::time::Duration;
 
+# async fn example() -> network::Result<()> {
 let mut conn = Network::new_connection(ClientType::WebSocket)?;
 conn.with_opts(ConnectionOptions {
-    url: UrlOptions { scheme: UrlScheme::Wss, host: "ws.example.com".into(), paths: vec!["/ws".into()], params: Default::default() },
+    url: UrlOptions {
+        scheme: UrlScheme::Wss,
+        host: "ws.example.com".into(),
+        paths: vec!["/ws".into()],
+        params: Default::default(),
+    },
     ..Default::default()
 }).await?;
 let ws = conn.as_websocket()?;
@@ -84,31 +138,155 @@ while let Some(msg) = updates.recv().await {
         Err(e) => { eprintln!("connection error: {e}"); break; }
     }
 }
+# Ok(())
+# }
 ```
 
 ## Configuration
 
-`ConnectionOptions` (shared by all three client types):
+[`ConnectionOptions`], shared by all three client types:
 
-- `url: UrlOptions` — scheme, host, paths, query params.
-- `timeout: Duration` — connection + per-request timeout; zero uses `DEFAULT_TIMEOUT` (10s).
-- `headers: HashMap<String, String>` — sent on every request / the WebSocket handshake.
-- `retries: usize`, `retry_delay: Duration` — HTTP retry policy (default delay 2s).
-- `skip_connectivity_check: bool` — skip the initial HTTP/GraphQL reachability check. Ignored for
-  WebSocket (the handshake itself is the check).
-- `graphql_connectivity_query: Option<String>` — override the GraphQL reachability query.
-- `trace_propagator: Option<Arc<dyn opentelemetry::propagation::TextMapPropagator + Send + Sync>>`
-  — when set, injects the active span into outgoing HTTP/GraphQL headers.
+| Field | Type | Meaning |
+|---|---|---|
+| `url` | `UrlOptions` | Scheme, host, candidate paths, query params |
+| `timeout` | `Duration` | Connection + per-request timeout; zero uses `DEFAULT_TIMEOUT` (10s) |
+| `headers` | `HashMap<String, String>` | Sent on every request / the WebSocket handshake |
+| `retries` | `usize` | Max retries for `HttpClient::request` |
+| `retry_delay` | `Duration` | Pause between retries; zero uses a 2s default |
+| `skip_connectivity_check` | `bool` | Skip the initial reachability check (see below) |
+| `graphql_connectivity_query` | `Option<String>` | Override the GraphQL reachability query |
+| `trace_propagator` | `Option<Arc<dyn TextMapPropagator + Send + Sync>>` | Injects the active span into outgoing requests when set |
+
+### Connectivity verification
+
+By default, `connect` (and therefore `Network::with_opts`) verifies the target is reachable
+before returning:
+
+- **HTTP** — sends a `HEAD` request; if the server returns `405 Method Not Allowed`, a `GET` is
+  sent instead and its body is drained (up to 1 MiB) so the connection can be reused.
+- **GraphQL** — sends a small introspection query (`query { __typename }` by default, or
+  `graphql_connectivity_query` if set).
+- **WebSocket** — the handshake itself is the check; `skip_connectivity_check` is ignored.
+
+Set `skip_connectivity_check: true` to skip the extra round trip when you know the server is up.
+
+### URL options
+
+```rust
+use network::{UrlOptions, UrlScheme};
+
+let opts = UrlOptions {
+    scheme: UrlScheme::Https,      // Http, Https, Ws, or Wss
+    host: "example.com:8443".into(), // may include a port
+    paths: vec!["/v1".into(), "/v2".into()], // a client selects one by index
+    params: Default::default(),     // query parameters
+};
+```
+
+## Error handling
+
+Every fallible operation returns `network::Result<T>` (`Result<T, network::Error>`), one flat
+error enum whose `Display` mirrors Go's error strings and whose `source()` chain walks the same
+causal path Go's `errors.Unwrap` does:
+
+```rust,no_run
+# use network::{GraphQLClient, Error};
+# async fn example(gql: &GraphQLClient) {
+match gql.query::<serde_json::Value>("query { user(id: \"1\") { name } }", None).await {
+    Ok(data) => println!("{data}"),
+    Err(Error::GraphQLErrors(errors)) => eprintln!("server returned errors: {errors:?}"),
+    Err(Error::RetryExhausted { retries, source }) => {
+        eprintln!("gave up after {retries} retries: {source}")
+    }
+    Err(e) => eprintln!("request failed: {e}"),
+}
+# }
+```
+
+## Advanced features
+
+### Cancellation
+
+Every retrying/long-lived operation (`HttpClient::request`, `WebSocketClient::listen`,
+`GraphQLClient::subscribe_fields`) takes an optional
+[`tokio_util::sync::CancellationToken`](https://docs.rs/tokio-util) instead of Go's
+`context.Context`:
+
+```rust,no_run
+use tokio_util::sync::CancellationToken;
+# use network::{HttpClient, HttpMethod, UrlOptions};
+# async fn example(http: &HttpClient, url: &UrlOptions) {
+let cancel = CancellationToken::new();
+let handle = cancel.clone();
+tokio::spawn(async move {
+    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    handle.cancel();
+});
+let _ = http.request(HttpMethod::Get, url, Vec::new(), &Default::default(), 0, 0, Some(&cancel)).await;
+# }
+```
+
+### WebSocket auto-reconnect
+
+```rust,no_run
+# use network::WebSocketClient;
+# async fn example(ws: &WebSocketClient) {
+ws.set_auto_reconnect(true, Some(std::time::Duration::from_secs(5))).await;
+// listen() now reconnects (after the configured delay) on a read error instead of terminating.
+# }
+```
+
+### Atomic batched mutations (`tpp-runtime`)
+
+```rust,no_run
+use runtime::{BatchOp, Tx};
+
+# async fn example(gql: &runtime::GraphQLClient) -> runtime::Result<()> {
+let mut tx = Tx::new(gql);
+tx.add(BatchOp { field: "insertUser".into(), args: vec![], selection: "{ id }".into() });
+tx.add(BatchOp { field: "insertPost".into(), args: vec![], selection: "{ id }".into() });
+let results = tx.commit().await?; // all-or-nothing: one GraphQL transaction
+# Ok(())
+# }
+```
+
+## Examples
+
+Complete, runnable programs against **live public services** (no local server needed):
+
+```bash
+cargo run -p tpp-network --example rickandmorty_graphql  # https://rickandmortyapi.com/graphql
+cargo run -p tpp-network --example httpbin_http           # an httpbin-compatible HTTP service
+cargo run -p tpp-network --example websocket_echo         # a public WebSocket echo service
+cargo run -p tpp-network-graphql --example basic_usage    # predicate + masked-update patch
+```
 
 ## Testing
 
 ```bash
 cargo test --workspace
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --check
 ```
 
 HTTP and GraphQL tests use [`wiremock`](https://docs.rs/wiremock); WebSocket and GraphQL
-subscription tests spin up a real, hand-rolled `tokio-tungstenite` server in-process.
+subscription tests spin up a real, hand-rolled `tokio-tungstenite` server in-process (no mocking
+of the transport layer itself).
+
+## Architecture
+
+### Design patterns
+
+- **Factory** — [`Network::new_connection`] builds the requested client type behind one
+  constructor.
+- **Enum dispatch, not `dyn Trait`** — [`NetworkClient`] is a closed three-variant enum
+  (`GraphQL`/`Http`/`WebSocket`), avoiding `async-trait` boxing while giving compiler-checked
+  exhaustiveness Go's type switch can't.
+- **Interior mutability for shared handles** — `WebSocketClient` and `GraphQLClient`'s live
+  connection state sits behind `tokio::sync` locks so a client can be cloned cheaply and driven
+  concurrently (e.g. a background `listen` task alongside foreground `send`s).
+- **One error type per crate** — a single `thiserror` enum per crate rather than a taxonomy of
+  per-domain error types, mirroring Go's single untyped `error` return.
 
 ## Differences from the Go implementation
 
@@ -143,9 +321,9 @@ proc-macro system to replace it. The consequences, by area:
   etc.) are dropped — `Option<T>`/`Some(v)` already does that job natively in Rust.
 - **GraphQL subscriptions** (`graphql-transport-ws`) are hand-rolled on `tokio-tungstenite`
   (see [`network/src/graphql/subscription.rs`](network/src/graphql/subscription.rs) and
-  [`ws_protocol.rs`](network/src/graphql/subscription.rs)) rather than wrapping an external
-  GraphQL-WS client crate, keeping this workspace's dependency footprint and protocol behavior
-  fully in its own control.
+  [`subscription_task.rs`](network/src/graphql/subscription_task.rs)) rather than wrapping an
+  external GraphQL-WS client crate, keeping this workspace's dependency footprint and protocol
+  behavior fully in its own control.
 - **The `Client` interface** becomes a closed `NetworkClient` enum (`GraphQL`/`Http`/`WebSocket`)
   instead of a `Box<dyn Trait>` — there are exactly three implementations, known at compile time,
   so enum dispatch avoids both `async-trait` boxing and the async-fn-in-dyn-trait problem while
@@ -158,7 +336,36 @@ proc-macro system to replace it. The consequences, by area:
   `In(...)` → `is_in(...)`. Go's exported `PascalCase` free functions (`And`, `Or`, `Not`,
   `Relation`) become Rust's conventional `snake_case` (`and`, `or`, `not`, `relation`).
 
-Everything else — connectivity-check semantics (HEAD→GET-on-405 for HTTP, an introspection query
-for GraphQL, dial-is-the-check for WebSocket), retry/backoff behavior, ping/pong keepalive,
+Everything else — connectivity-check semantics, retry/backoff behavior, ping/pong keepalive,
 auto-reconnect, and the `BatchMutate`/`SetColumns` argument-namespacing and
 omit/null/value-distinction semantics — is a faithful, tested port.
+
+## Continuous integration
+
+Every push and pull request runs, via [`.github/workflows/ci.yml`](.github/workflows/ci.yml):
+
+- **test** — `cargo test` per crate, plus the full workspace
+- **lint** — `cargo clippy --all-targets -- -D warnings` and `cargo fmt --check`
+- **docs** — `cargo doc --no-deps` with warnings promoted to errors (catches missing docs and
+  broken intra-doc links)
+- **msrv** — a build against the pinned minimum Rust version (`rust-version` in the workspace
+  manifest)
+- **audit** — [`cargo-audit`](https://github.com/rustsec/rustsec) against the RustSec advisory
+  database
+
+Rendered API docs are published to GitHub Pages on every push to `main` (see
+[`.github/workflows/docs.yml`](.github/workflows/docs.yml)). Tagged releases get a GitHub Release
+with an auto-generated changelog (see
+[`.github/workflows/release.yml`](.github/workflows/release.yml)); publishing to crates.io is a
+separate, manually-triggered workflow (see
+[`.github/workflows/publish.yml`](.github/workflows/publish.yml)) — nothing publishes
+automatically.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).
+
+[`Network::new_connection`]: network/src/client.rs
+[`Network::with_opts`]: network/src/client.rs
+[`NetworkClient`]: network/src/client.rs
+[`ConnectionOptions`]: network/src/options.rs

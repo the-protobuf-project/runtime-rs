@@ -1,5 +1,5 @@
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use super::GraphQLClient;
@@ -21,7 +21,11 @@ pub struct FieldArg {
 
 impl FieldArg {
     /// Builds a `FieldArg`, converting `value` to JSON via [`serde::Serialize`].
-    pub fn new(name: impl Into<String>, value: impl Serialize, gql_type: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        value: impl Serialize,
+        gql_type: impl Into<String>,
+    ) -> Self {
         Self {
             name: name.into(),
             value: serde_json::to_value(value).unwrap_or(Value::Null),
@@ -71,7 +75,11 @@ impl GraphQLClient {
         for a in &sorted {
             variables.insert(a.name.clone(), a.value.clone());
         }
-        let variables = if variables.is_empty() { None } else { Some(Value::Object(variables)) };
+        let variables = if variables.is_empty() {
+            None
+        } else {
+            Some(Value::Object(variables))
+        };
 
         let data = self
             .exec_raw(&document, variables.as_ref())
@@ -100,7 +108,10 @@ pub(crate) fn build_field_tag(field: &str, sorted_args: &[&FieldArg]) -> String 
     if sorted_args.is_empty() {
         return field.to_string();
     }
-    let parts: Vec<String> = sorted_args.iter().map(|a| format!("{}: ${}", a.name, a.name)).collect();
+    let parts: Vec<String> = sorted_args
+        .iter()
+        .map(|a| format!("{}: ${}", a.name, a.name))
+        .collect();
     format!("{field}({})", parts.join(", "))
 }
 
@@ -110,7 +121,10 @@ pub(crate) fn build_variable_declarations(sorted_args: &[&FieldArg]) -> String {
     if sorted_args.is_empty() {
         return String::new();
     }
-    let parts: Vec<String> = sorted_args.iter().map(|a| format!("${}: {}", a.name, a.gql_type)).collect();
+    let parts: Vec<String> = sorted_args
+        .iter()
+        .map(|a| format!("${}: {}", a.name, a.gql_type))
+        .collect();
     format!("({})", parts.join(", "))
 }
 
@@ -125,9 +139,18 @@ mod tests {
 
     #[test]
     fn field_tag_sorted_args() {
-        let args = vec![FieldArg::new("id", "1", "ID!"), FieldArg::new("active", true, "Boolean")];
+        let args = vec![
+            FieldArg::new("id", "1", "ID!"),
+            FieldArg::new("active", true, "Boolean"),
+        ];
         let sorted = sorted_args(&args);
-        assert_eq!(build_field_tag("user", &sorted), "user(active: $active, id: $id)");
-        assert_eq!(build_variable_declarations(&sorted), "($active: Boolean, $id: ID!)");
+        assert_eq!(
+            build_field_tag("user", &sorted),
+            "user(active: $active, id: $id)"
+        );
+        assert_eq!(
+            build_variable_declarations(&sorted),
+            "($active: Boolean, $id: ID!)"
+        );
     }
 }

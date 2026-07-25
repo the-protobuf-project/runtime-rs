@@ -27,7 +27,9 @@ async fn connect_sends_default_connectivity_query() {
     Mock::given(method("POST"))
         .and(path("/graphql"))
         .and(body_string_contains("__typename"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"__typename": "Query"}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"__typename": "Query"}})),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -40,7 +42,11 @@ async fn connect_sends_default_connectivity_query() {
 #[tokio::test]
 async fn connect_fails_on_server_error() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).and(path("/graphql")).respond_with(ResponseTemplate::new(500)).mount(&server).await;
+    Mock::given(method("POST"))
+        .and(path("/graphql"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
 
     let mut network = Network::new_connection(ClientType::GraphQL).unwrap();
     let err = network.with_opts(opts_for(&server)).await.unwrap_err();
@@ -91,7 +97,10 @@ async fn query_decodes_typed_response() {
         name: String,
     }
 
-    let data: Data = gql.query("query { user(id: \"1\") { id name } }", None).await.unwrap();
+    let data: Data = gql
+        .query("query { user(id: \"1\") { id name } }", None)
+        .await
+        .unwrap();
     assert_eq!(data.user.id, "1");
     assert_eq!(data.user.name, "Ada");
 }
@@ -112,7 +121,10 @@ async fn query_surfaces_graphql_errors() {
     network.with_opts(opts).await.unwrap();
     let gql = network.as_graphql().unwrap();
 
-    let err = gql.query::<serde_json::Value>("query { missing }", None).await.unwrap_err();
+    let err = gql
+        .query::<serde_json::Value>("query { missing }", None)
+        .await
+        .unwrap_err();
     assert!(matches!(err, network::Error::GraphQLOperation(_)));
 }
 
@@ -121,7 +133,9 @@ async fn query_fields_declares_only_present_sorted_args() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(body_string_contains("user(active: $active, id: $id)"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": {"user": {"id": "1"}}})))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"data": {"user": {"id": "1"}}})),
+        )
         .expect(1)
         .mount(&server)
         .await;
@@ -132,7 +146,10 @@ async fn query_fields_declares_only_present_sorted_args() {
     network.with_opts(opts).await.unwrap();
     let gql = network.as_graphql().unwrap();
 
-    let args = vec![FieldArg::new("id", "1", "ID!"), FieldArg::new("active", true, "Boolean")];
+    let args = vec![
+        FieldArg::new("id", "1", "ID!"),
+        FieldArg::new("active", true, "Boolean"),
+    ];
     let _: serde_json::Value = gql.query_fields("user", &args, "{ id }").await.unwrap();
     server.verify().await;
 }
@@ -163,7 +180,10 @@ async fn query_fields_unwraps_the_selected_field_before_decoding() {
     }
 
     let args = vec![FieldArg::new("id", "1", "ID!")];
-    let user: UserFields = gql.query_fields("user", &args, "{ id name }").await.unwrap();
+    let user: UserFields = gql
+        .query_fields("user", &args, "{ id name }")
+        .await
+        .unwrap();
     assert_eq!(user.id, "1");
     assert_eq!(user.name, "Ada");
 }
@@ -185,7 +205,11 @@ async fn batch_mutate_namespaces_args_and_returns_ordered_results() {
     let gql = network.as_graphql().unwrap();
 
     let ops = vec![
-        network::BatchOp { field: "insertThing".to_string(), args: vec![], selection: "{ id }".to_string() },
+        network::BatchOp {
+            field: "insertThing".to_string(),
+            args: vec![],
+            selection: "{ id }".to_string(),
+        },
         network::BatchOp {
             field: "insertThing".to_string(),
             args: vec![FieldArg::new("objects", json!([]), "[ThingInsertInput!]!")],

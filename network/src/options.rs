@@ -119,7 +119,8 @@ pub struct ConnectionOptions {
     /// When set, injects the calling span's context into every outgoing GraphQL and HTTP request
     /// as headers, so a downstream service that continues the same propagator sees this request as
     /// a child span. `None` (the default) injects nothing.
-    pub trace_propagator: Option<Arc<dyn opentelemetry::propagation::TextMapPropagator + Send + Sync>>,
+    pub trace_propagator:
+        Option<Arc<dyn opentelemetry::propagation::TextMapPropagator + Send + Sync>>,
 }
 
 impl fmt::Debug for ConnectionOptions {
@@ -131,7 +132,10 @@ impl fmt::Debug for ConnectionOptions {
             .field("retries", &self.retries)
             .field("retry_delay", &self.retry_delay)
             .field("skip_connectivity_check", &self.skip_connectivity_check)
-            .field("graphql_connectivity_query", &self.graphql_connectivity_query)
+            .field(
+                "graphql_connectivity_query",
+                &self.graphql_connectivity_query,
+            )
             .field("trace_propagator", &self.trace_propagator.is_some())
             .finish()
     }
@@ -143,7 +147,9 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A GraphQL `ID` scalar. GraphQL's `ID` type serializes as a JSON string on the wire even when
 /// the underlying value looks numeric.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(transparent)]
 pub struct Id(pub String);
 

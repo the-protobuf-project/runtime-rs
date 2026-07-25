@@ -1,7 +1,7 @@
 //! Minimal usage example: building a filter predicate and a masked update patch, the two
 //! building blocks generated resource clients compose into `List`/`Update` requests.
 
-use network_graphql::{and, ColumnPatch, Nullable, Predicate, StringField};
+use network_graphql::{ColumnPatch, Nullable, Predicate, StringField, and};
 
 struct UpdateOrganisationInput {
     display_name: Nullable<String>,
@@ -24,7 +24,9 @@ fn main() {
     let filter: Predicate = and(&[name.ilike("%rick%"), email.is_null(false)]);
     println!("filter: {}", serde_json::to_string(&filter).unwrap());
 
-    let patch = UpdateOrganisationInput { display_name: Nullable::value("Rick Sanchez".to_string()) };
+    let patch = UpdateOrganisationInput {
+        display_name: Nullable::value("Rick Sanchez".to_string()),
+    };
     assert!(patch.display_name.is_set());
     println!("update columns: {:?}", patch.set_columns());
 }

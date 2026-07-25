@@ -60,7 +60,11 @@ async fn connect_head_405_falls_back_to_get() {
 #[tokio::test]
 async fn connect_skip_connectivity_check_sends_no_request() {
     let server = MockServer::start().await;
-    Mock::given(method("HEAD")).respond_with(ResponseTemplate::new(200)).expect(0).mount(&server).await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(0)
+        .mount(&server)
+        .await;
 
     let mut opts = opts_for(&server, "/api");
     opts.skip_connectivity_check = true;
@@ -94,7 +98,10 @@ async fn connect_fails_when_unreachable() {
 #[tokio::test]
 async fn request_retries_and_wraps_last_error() {
     let server = MockServer::start().await;
-    Mock::given(method("HEAD")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/always-500"))
         .respond_with(ResponseTemplate::new(500))
@@ -107,7 +114,15 @@ async fn request_retries_and_wraps_last_error() {
     let http = network.as_http().unwrap();
 
     let err = http
-        .request(HttpMethod::Get, &opts.url, Vec::new(), &HashMap::new(), 0, 2, None)
+        .request(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            2,
+            None,
+        )
         .await
         .unwrap_err();
 
@@ -123,7 +138,10 @@ async fn request_retries_and_wraps_last_error() {
 #[tokio::test]
 async fn request_cancellation_stops_immediately() {
     let server = MockServer::start().await;
-    Mock::given(method("HEAD")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/slow"))
         .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_secs(5)))
@@ -145,7 +163,15 @@ async fn request_cancellation_stops_immediately() {
 
     let start = std::time::Instant::now();
     let err = http
-        .request(HttpMethod::Get, &opts.url, Vec::new(), &HashMap::new(), 0, 0, Some(&cancel))
+        .request(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            0,
+            Some(&cancel),
+        )
         .await
         .unwrap_err();
     assert!(start.elapsed() < Duration::from_secs(2));
@@ -155,7 +181,10 @@ async fn request_cancellation_stops_immediately() {
 #[tokio::test]
 async fn request_success_returns_body() {
     let server = MockServer::start().await;
-    Mock::given(method("HEAD")).respond_with(ResponseTemplate::new(200)).mount(&server).await;
+    Mock::given(method("HEAD"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/data"))
         .respond_with(ResponseTemplate::new(200).set_body_string("hello"))
@@ -168,7 +197,15 @@ async fn request_success_returns_body() {
     let http = network.as_http().unwrap();
 
     let data = http
-        .request(HttpMethod::Get, &opts.url, Vec::new(), &HashMap::new(), 0, 0, None)
+        .request(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            0,
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(data, b"hello");

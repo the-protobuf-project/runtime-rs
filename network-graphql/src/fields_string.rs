@@ -1,7 +1,7 @@
 //! A generated handle for a string-like column (text, id, timestamp).
 
 use crate::columns::{OrderBy, OrderTerm};
-use crate::predicate::{pred, Predicate};
+use crate::predicate::{Predicate, pred};
 
 /// A generated handle for a string-like column (text, id, timestamp). Its methods build
 /// a [`Predicate`] for the column; ordered comparisons treat the value lexically, which

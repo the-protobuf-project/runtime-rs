@@ -29,7 +29,10 @@ pub struct Tx<'a> {
 impl<'a> Tx<'a> {
     /// Returns a `Tx` that will commit through `gql`.
     pub fn new(gql: &'a GraphQLClient) -> Self {
-        Self { gql, ops: Vec::new() }
+        Self {
+            gql,
+            ops: Vec::new(),
+        }
     }
 
     /// Queues a mutation op and returns the `Tx` for chaining.

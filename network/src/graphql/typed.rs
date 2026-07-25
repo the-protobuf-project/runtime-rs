@@ -1,24 +1,36 @@
-use serde::de::DeserializeOwned;
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 use serde_json::Value;
 
-use super::{helpers, GraphQLClient};
+use super::{GraphQLClient, helpers};
 use crate::error::{Error, Result};
 
 impl GraphQLClient {
     /// Runs a GraphQL query. `query` is the full, caller-supplied query text; `variables` is
     /// sent alongside it. The response's `data` object is decoded into `T`.
-    pub async fn query<T: DeserializeOwned>(&self, query: &str, variables: Option<&Value>) -> Result<T> {
+    pub async fn query<T: DeserializeOwned>(
+        &self,
+        query: &str,
+        variables: Option<&Value>,
+    ) -> Result<T> {
         self.exec_typed(query, variables).await
     }
 
     /// Runs a GraphQL mutation. `mutation` is the full, caller-supplied mutation text;
     /// `variables` is sent alongside it. The response's `data` object is decoded into `T`.
-    pub async fn mutation<T: DeserializeOwned>(&self, mutation: &str, variables: Option<&Value>) -> Result<T> {
+    pub async fn mutation<T: DeserializeOwned>(
+        &self,
+        mutation: &str,
+        variables: Option<&Value>,
+    ) -> Result<T> {
         self.exec_typed(mutation, variables).await
     }
 
-    async fn exec_typed<T: DeserializeOwned>(&self, document: &str, variables: Option<&Value>) -> Result<T> {
+    async fn exec_typed<T: DeserializeOwned>(
+        &self,
+        document: &str,
+        variables: Option<&Value>,
+    ) -> Result<T> {
         let data = self
             .exec_raw(document, variables)
             .await

@@ -1,0 +1,87 @@
+name: Release
+
+on:
+  push:
+    tags:
+      # Workspace-wide release:  v1.2.3
+      # Crate-scoped release:    network/v0.5.0  runtime/v0.2.0  etc.
+      - "v[0-9]+.[0-9]+.[0-9]+*"
+      - "*/v[0-9]+.[0-9]+.[0-9]+*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create GitHub release
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history for changelog generation
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Tags like "network/v0.5.0" scope the changelog to that crate's
+      # directory; a bare "v1.2.3" is workspace-wide.
+      - name: Identify crate scope
+        id: scope
+        run: |
+          TAG="${{ github.ref_name }}"
+          if [[ "$TAG" == *"/"* ]]; then
+            CRATE_DIR="${TAG%%/*}"
+            VERSION="${TAG#*/}"
+          else
+            CRATE_DIR="."
+            VERSION="$TAG"
+          fi
+          echo "crate_dir=$CRATE_DIR" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      # The whole workspace must be green before any tag is released,
+      # regardless of which crate the tag scopes to.
+      - name: Test workspace
+        run: cargo test --workspace
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          TAG="${{ steps.scope.outputs.tag }}"
+          CRATE_DIR="${{ steps.scope.outputs.crate_dir }}"
+
+          if [ "$CRATE_DIR" = "." ]; then
+            PREV=$(git tag --sort=-version:refname | grep -E '^v[0-9]' | sed -n '2p')
+            NOTES=$(git log "${PREV:+$PREV..}HEAD" --pretty=format:"- %s (%h)" --no-merges | head -50)
+          else
+            PREV=$(git tag --sort=-version:refname | grep -E "^${CRATE_DIR}/v" | sed -n '2p')
+            NOTES=$(git log "${PREV:+$PREV..}HEAD" --pretty=format:"- %s (%h)" --no-merges -- "$CRATE_DIR" | head -50)
+          fi
+          NOTES="${NOTES:-No changes listed.}"
+
+          {
+            echo "## What's Changed"
+            echo ""
+            echo "$NOTES"
+            echo ""
+            if [ "$CRATE_DIR" != "." ]; then
+              echo "**Crate:** \`$CRATE_DIR\`"
+            fi
+            if [ -n "$PREV" ]; then
+              echo "**Full diff:** https://github.com/${{ github.repository }}/compare/${PREV}...${TAG}"
+            fi
+          } > release_notes.md
+
+      - name: Create GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ steps.scope.outputs.tag }}
+          body_path: release_notes.md
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

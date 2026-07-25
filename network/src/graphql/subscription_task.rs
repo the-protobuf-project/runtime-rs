@@ -24,7 +24,9 @@ pub(super) type WsStream = futures_util::stream::SplitStream<
 /// Serializes `msg` as a graphql-transport-ws text frame and sends it.
 pub(super) async fn send_json(sink: &mut WsSink, msg: &ClientMessage<'_>) -> Result<()> {
     let text = serde_json::to_string(msg)?;
-    sink.send(Message::Text(text.into())).await.map_err(|e| Error::WsSend(Box::new(e)))
+    sink.send(Message::Text(text.into()))
+        .await
+        .map_err(|e| Error::WsSend(Box::new(e)))
 }
 
 /// Reads frames until a `connection_ack` arrives (or `timeout` elapses), discarding anything
@@ -44,7 +46,9 @@ pub(super) async fn await_connection_ack(stream: &mut WsStream, timeout: Duratio
             }
         }
     };
-    tokio::time::timeout(timeout, wait).await.map_err(|_| Error::Timeout)?
+    tokio::time::timeout(timeout, wait)
+        .await
+        .map_err(|_| Error::Timeout)?
 }
 
 /// Drives one subscription after the handshake completes: forwards each `next` payload (decoded

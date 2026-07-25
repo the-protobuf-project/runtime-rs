@@ -8,7 +8,7 @@
 use serde::Serialize;
 
 use crate::columns::{OrderBy, OrderTerm};
-use crate::predicate::{pred, Predicate};
+use crate::predicate::{Predicate, pred};
 
 /// Restricts a list to rows that sort strictly after `last` for the order term: `col
 /// _gt last` when `term` is ascending, `col _lt last` when descending. `last` is the

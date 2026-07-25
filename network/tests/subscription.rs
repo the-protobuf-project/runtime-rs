@@ -16,7 +16,9 @@ async fn start_subscription_server() -> SocketAddr {
     let addr = listener.local_addr().unwrap();
     tokio::spawn(async move {
         loop {
-            let Ok((stream, _)) = listener.accept().await else { return };
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
             tokio::spawn(async move {
                 #[allow(clippy::result_large_err)]
                 let echo_subprotocol = |req: &tokio_tungstenite::tungstenite::handshake::server::Request,
@@ -26,11 +28,16 @@ async fn start_subscription_server() -> SocketAddr {
                     }
                     Ok(response)
                 };
-                let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol).await else { return };
+                let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, echo_subprotocol).await
+                else {
+                    return;
+                };
                 let (mut sink, mut stream) = ws.split();
 
                 loop {
-                    let Some(Ok(Message::Text(txt))) = stream.next().await else { return };
+                    let Some(Ok(Message::Text(txt))) = stream.next().await else {
+                        return;
+                    };
                     let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
                     if v["type"] == "connection_init" {
                         break;
@@ -43,7 +50,9 @@ async fn start_subscription_server() -> SocketAddr {
 
                 let sub_id;
                 loop {
-                    let Some(Ok(Message::Text(txt))) = stream.next().await else { return };
+                    let Some(Ok(Message::Text(txt))) = stream.next().await else {
+                        return;
+                    };
                     let v: serde_json::Value = serde_json::from_str(&txt).unwrap();
                     if v["type"] == "subscribe" {
                         sub_id = v["id"].as_str().unwrap().to_string();
@@ -98,7 +107,12 @@ async fn subscribe_fields_streams_decoded_updates_then_completes() {
     let gql = network.as_graphql().unwrap();
 
     let mut sub = gql
-        .subscribe_fields::<Counter>("counterUpdated", &[FieldArg::new("from", 0, "Int!")], "{ counter }", None)
+        .subscribe_fields::<Counter>(
+            "counterUpdated",
+            &[FieldArg::new("from", 0, "Int!")],
+            "{ counter }",
+            None,
+        )
         .await
         .unwrap();
 
@@ -130,6 +144,11 @@ async fn subscribe_fields_cancellation_stops_subscription() {
         .unwrap();
 
     cancel.cancel();
-    let result = tokio::time::timeout(Duration::from_secs(2), sub.updates().recv()).await.unwrap();
-    assert!(result.is_none(), "expected the updates channel to close after cancellation");
+    let result = tokio::time::timeout(Duration::from_secs(2), sub.updates().recv())
+        .await
+        .unwrap();
+    assert!(
+        result.is_none(),
+        "expected the updates channel to close after cancellation"
+    );
 }
