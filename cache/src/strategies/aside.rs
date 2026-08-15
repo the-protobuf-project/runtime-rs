@@ -10,13 +10,84 @@
 //! backend expiry. Keeping that metadata here preserves the Driver/Strategy
 //! boundary and makes Rust and Go Aside entries wire-compatible.
 
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
-use crate::core::Options;
+use crate::core::{Driver, Keyspace, Loader, Options};
 use crate::{CacheError, Result};
+
+use super::flight::Flight;
+
+/// Private read-through strategy under construction.
+///
+/// The Provider will eventually expose this through [`crate::core::Aside`]
+/// rather than letting callers assemble coordination resources independently.
+/// In particular, `flight` must be shared by every Aside view of one database,
+/// matching the Go build architecture.
+// This milestone exercises only Driver reads and invalidation. The remaining
+// dependencies become live in the load/store and refresh milestones.
+#[allow(dead_code)]
+pub(crate) struct AsideImpl {
+    driver: Arc<dyn Driver>,
+    keyspace: Keyspace,
+    loader: Loader,
+    default_ttl: Duration,
+    default_stale: Duration,
+    require_ttl: bool,
+    flight: Arc<Flight>,
+    negative_ttl: Duration,
+}
+
+impl AsideImpl {
+    /// Wires dependencies without performing I/O or allocating cache storage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        driver: Arc<dyn Driver>,
+        keyspace: Keyspace,
+        loader: Loader,
+        default_ttl: Duration,
+        default_stale: Duration,
+        require_ttl: bool,
+        flight: Arc<Flight>,
+        negative_ttl: Duration,
+    ) -> Self {
+        Self {
+            driver,
+            keyspace,
+            loader,
+            default_ttl,
+            default_stale,
+            require_ttl,
+            flight,
+            negative_ttl,
+        }
+    }
+
+    /// Reads and decodes one Aside entry.
+    ///
+    /// **Cost**: Exactly one Driver GET and no index operations.
+    /// **Side effects**: None. A stale value is only classified here; scheduling
+    /// its refresh belongs to a later orchestration milestone.
+    async fn read(&self, id: &str) -> Result<StoredEntry> {
+        let key = self.keyspace.aside_entry(id);
+        let frame = self.driver.get(&key).await?;
+        unpack(&frame, unix_millis(SystemTime::now())?)
+    }
+
+    /// Deletes either a cached value or remembered absence.
+    ///
+    /// Both states use one entry key, so invalidation remains one Driver DELETE
+    /// and makes a newly created source value visible immediately.
+    async fn invalidate_entry(&self, id: &str) -> Result<()> {
+        let key = self.keyspace.aside_entry(id);
+        self.driver.delete(&[&key]).await
+    }
+}
 
 /// Resolves the lease for a load that will write an Aside entry.
 ///
@@ -106,7 +177,11 @@ fn fresh_until_millis(now: SystemTime, fresh_for: Duration) -> Result<i64> {
     let deadline = now.checked_add(fresh_for).ok_or_else(|| {
         CacheError::Internal("Aside freshness deadline exceeds SystemTime".to_owned())
     })?;
-    let since_epoch = deadline.duration_since(UNIX_EPOCH).map_err(|error| {
+    unix_millis(deadline)
+}
+
+fn unix_millis(time: SystemTime) -> Result<i64> {
+    let since_epoch = time.duration_since(UNIX_EPOCH).map_err(|error| {
         CacheError::Internal(format!("Aside freshness deadline predates Unix epoch: {error}"))
     })?;
     i64::try_from(since_epoch.as_millis()).map_err(|error| {
@@ -228,7 +303,139 @@ fn invalid_envelope(reason: String) -> CacheError {
 
 #[cfg(test)]
 mod tests {
+    use futures::FutureExt;
+
+    use crate::core::MemoryDriver;
+
     use super::*;
+
+    fn test_aside(driver: Arc<MemoryDriver>) -> AsideImpl {
+        let loader: Loader = Arc::new(|_| async { Ok(b"null".to_vec()) }.boxed());
+        AsideImpl::new(
+            driver,
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            Duration::from_secs(30),
+        )
+    }
+
+    #[tokio::test]
+    async fn test_aside_read_fresh_value_returns_payload() {
+        let driver = Arc::new(MemoryDriver::new());
+        let aside = test_aside(driver.clone());
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("id");
+        let frame = pack_value(br#"{"name":"value"}"#, i64::MAX).unwrap();
+        driver
+            .set(&key, &frame, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let entry = aside.read("id").await.unwrap();
+
+        assert_eq!(
+            entry,
+            StoredEntry::Value {
+                body: br#"{"name":"value"}"#.to_vec(),
+                stale: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_read_expired_freshness_returns_stale_payload() {
+        let driver = Arc::new(MemoryDriver::new());
+        let aside = test_aside(driver.clone());
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("id");
+        let frame = pack_value(br#""old""#, 1).unwrap();
+        driver
+            .set(&key, &frame, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let entry = aside.read("id").await.unwrap();
+
+        assert_eq!(
+            entry,
+            StoredEntry::Value {
+                body: br#""old""#.to_vec(),
+                stale: true,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_read_remembered_absence_returns_void() {
+        let driver = Arc::new(MemoryDriver::new());
+        let aside = test_aside(driver.clone());
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("missing");
+        driver
+            .set(&key, &pack_void().unwrap(), Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        let entry = aside.read("missing").await.unwrap();
+
+        assert_eq!(entry, StoredEntry::Void);
+    }
+
+    #[tokio::test]
+    async fn test_aside_read_driver_miss_returns_not_found() {
+        let aside = test_aside(Arc::new(MemoryDriver::new()));
+
+        let result = aside.read("missing").await;
+
+        assert!(matches!(result, Err(CacheError::NotFound)));
+    }
+
+    #[tokio::test]
+    async fn test_aside_read_malformed_envelope_returns_error() {
+        let driver = Arc::new(MemoryDriver::new());
+        let aside = test_aside(driver.clone());
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("bad");
+        driver
+            .set(&key, b"not-json", Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let result = aside.read("bad").await;
+
+        assert!(matches!(result, Err(CacheError::Internal(_))));
+    }
+
+    #[tokio::test]
+    async fn test_aside_invalidate_value_deletes_entry() {
+        let driver = Arc::new(MemoryDriver::new());
+        let aside = test_aside(driver.clone());
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("id");
+        let frame = pack_value(br#""value""#, 0).unwrap();
+        driver
+            .set(&key, &frame, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        aside.invalidate_entry("id").await.unwrap();
+
+        assert!(!driver.exists(&key).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_aside_invalidate_void_deletes_remembered_absence() {
+        let driver = Arc::new(MemoryDriver::new());
+        let aside = test_aside(driver.clone());
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("missing");
+        driver
+            .set(&key, &pack_void().unwrap(), Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        aside.invalidate_entry("missing").await.unwrap();
+
+        assert!(!driver.exists(&key).await.unwrap());
+    }
 
     #[test]
     fn test_aside_ttl_explicit_overrides_permanent_and_default() {
