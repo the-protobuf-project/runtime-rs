@@ -9,5 +9,6 @@
 
 pub mod volatile;
 pub mod document;
+mod aside;
 pub use document::DocumentImpl;
 pub use volatile::VolatileImpl;
