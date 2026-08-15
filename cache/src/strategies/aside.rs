@@ -129,6 +129,33 @@ impl AsideImpl {
         self.driver.set(&key, &frame, freshness.hard_ttl).await?;
         Ok(value)
     }
+
+    /// Loads through the database's shared in-process Flight.
+    ///
+    /// Concurrent callers for one ID receive the same Loader result. Starting a
+    /// new distinct ID consumes one Flight permit and may return `Overloaded`;
+    /// joining work already in progress never consumes another permit.
+    async fn load_through_flight(&self, id: &str, opts: &Options) -> Result<Vec<u8>> {
+        let aside = Self::clone(self);
+        let owned_id = id.to_owned();
+        let owned_opts = opts.clone();
+
+        self.flight
+            .run(id, move || async move {
+                aside.load_and_store(&owned_id, &owned_opts).await
+            })
+            .await
+    }
+
+    /// Reloads and overwrites one entry through the shared Flight.
+    ///
+    /// Refresh intentionally does not read first. It is used when the caller
+    /// knows the authoritative value changed and wants the cache warmed now.
+    /// A refresh joins any load for the same ID that is already running instead
+    /// of starting duplicate source work.
+    async fn refresh_entry(&self, id: &str, opts: &Options) -> Result<()> {
+        self.load_through_flight(id, opts).await.map(|_| ())
+    }
 }
 
 /// Resolves the lease for a load that will write an Aside entry.
@@ -488,6 +515,141 @@ mod tests {
                 stale: true,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_through_flight_collapses_concurrent_loaders() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(br#""shared""#.to_vec())
+            }
+            .boxed()
+        });
+        let aside = Arc::new(test_aside_with_loader(
+            driver,
+            loader,
+            Duration::from_secs(30),
+        ));
+        let mut callers = Vec::new();
+
+        for _ in 0..32 {
+            let aside = aside.clone();
+            callers.push(tokio::spawn(async move {
+                aside
+                    .load_through_flight("hot", &Options::default())
+                    .await
+                    .unwrap()
+            }));
+        }
+
+        for caller in callers {
+            assert_eq!(caller.await.unwrap(), br#""shared""#);
+        }
+        assert_eq!(
+            executions.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_refresh_entry_overwrites_cached_value() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                let version = loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                Ok(format!(r#""v{version}""#).into_bytes())
+            }
+            .boxed()
+        });
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+
+        aside
+            .load_through_flight("item", &Options::default())
+            .await
+            .unwrap();
+        aside
+            .refresh_entry("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""v2""#.to_vec(),
+                stale: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_shared_flight_collapses_across_loader_views() {
+        let driver = Arc::new(MemoryDriver::new());
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        let flight = Arc::new(Flight::new(8, Duration::from_secs(1)));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let first_loader: Loader = {
+            let started = started.clone();
+            let release = release.clone();
+            Arc::new(move |_| {
+                let started = started.clone();
+                let release = release.clone();
+                async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(br#""first""#.to_vec())
+                }
+                .boxed()
+            })
+        };
+        let second_loader: Loader =
+            Arc::new(|_| async { Ok(br#""second""#.to_vec()) }.boxed());
+        let first_view = AsideImpl::new(
+            driver.clone(),
+            keyspace.clone(),
+            first_loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            flight.clone(),
+            Duration::from_secs(30),
+        );
+        let second_view = AsideImpl::new(
+            driver,
+            keyspace,
+            second_loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            flight,
+            Duration::from_secs(30),
+        );
+
+        let first = tokio::spawn(async move {
+            first_view
+                .load_through_flight("same", &Options::default())
+                .await
+        });
+        started.notified().await;
+        let second = tokio::spawn(async move {
+            second_view
+                .load_through_flight("same", &Options::default())
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        release.notify_one();
+
+        assert_eq!(first.await.unwrap().unwrap(), br#""first""#);
+        assert_eq!(second.await.unwrap().unwrap(), br#""first""#);
     }
 
     #[tokio::test]
