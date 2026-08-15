@@ -28,7 +28,7 @@ type Calls = HashMap<String, watch::Receiver<SharedResult>>;
 /// the first caller for a new key acquires a permit. Work runs in a detached
 /// Tokio task, so cancellation of the caller that happened to arrive first does
 /// not cancel a result awaited by other callers.
-pub(super) struct Flight {
+pub(crate) struct Flight {
     calls: Arc<Mutex<Calls>>,
     budget: Arc<Semaphore>,
     timeout: Duration,
@@ -39,7 +39,7 @@ impl Flight {
     ///
     /// A zero concurrency setting still permits one load. Leaving it at zero
     /// would reject all cold keys and make the cache permanently unusable.
-    pub(super) fn new(concurrency: usize, timeout: Duration) -> Self {
+    pub(crate) fn new(concurrency: usize, timeout: Duration) -> Self {
         Self {
             calls: Arc::new(Mutex::new(HashMap::new())),
             budget: Arc::new(Semaphore::new(concurrency.max(1))),
@@ -51,7 +51,7 @@ impl Flight {
     ///
     /// The closure, rather than a pre-created future, is accepted so a joining
     /// caller does not even construct work that will never run.
-    pub(super) async fn run<W, F>(&self, key: &str, work: W) -> Result<Vec<u8>>
+    pub(crate) async fn run<W, F>(&self, key: &str, work: W) -> Result<Vec<u8>>
     where
         W: FnOnce() -> F + Send + 'static,
         F: Future<Output = Result<Vec<u8>>> + Send + 'static,

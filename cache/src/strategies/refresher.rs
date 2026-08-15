@@ -20,7 +20,7 @@ struct State {
 }
 
 /// Runs background work under a fixed non-queuing budget.
-pub(super) struct Refresher {
+pub(crate) struct Refresher {
     state: Arc<Mutex<State>>,
     idle: Arc<Notify>,
     slots: Arc<Semaphore>,
@@ -28,7 +28,7 @@ pub(super) struct Refresher {
 }
 
 impl Refresher {
-    pub(super) fn new(limit: usize, timeout: Duration) -> Self {
+    pub(crate) fn new(limit: usize, timeout: Duration) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
                 closed: false,
@@ -45,7 +45,7 @@ impl Refresher {
     /// Returning `false` is expected when closed, full, or briefly contended;
     /// stale data remains valid and a later reader may retry. The state lock is
     /// acquired with `try_lock`, so serving a stale reader never waits here.
-    pub(super) fn go<W, F>(&self, work: W) -> bool
+    pub(crate) fn go<W, F>(&self, work: W) -> bool
     where
         W: FnOnce() -> F + Send + 'static,
         F: Future<Output = ()> + Send + 'static,
@@ -86,7 +86,7 @@ impl Refresher {
     }
 
     /// Stops admission and waits for admitted tasks up to `limit`.
-    pub(super) async fn drain(&self, limit: Duration) -> Result<()> {
+    pub(crate) async fn drain(&self, limit: Duration) -> Result<()> {
         {
             let mut state = self.state.lock().await;
             state.closed = true;

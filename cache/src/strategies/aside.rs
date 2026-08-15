@@ -1,7 +1,3 @@
-// The envelope is introduced one reviewed milestone before AsideImpl consumes
-// it. Remove this temporary allowance when the strategy implementation lands.
-#![cfg_attr(not(test), allow(dead_code))]
-
 //! Internal envelope used by the read-through Aside strategy.
 //!
 //! This deliberately mirrors `runtime-go/cache/core/envelope.go`. The backend
@@ -19,7 +15,7 @@ use std::{
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
-use crate::core::{Driver, Keyspace, Loader, Options};
+use crate::core::{Aside, Driver, Keyspace, Loader, Options};
 use crate::{CacheError, Result};
 
 use super::flight::Flight;
@@ -62,17 +58,22 @@ impl Drop for RefreshClaim {
     }
 }
 
-/// Private read-through strategy under construction.
+/// Read-through caching over a caller-provided Loader.
 ///
 /// The Provider will eventually expose this through [`crate::core::Aside`]
 /// rather than letting callers assemble coordination resources independently.
 /// In particular, `flight` must be shared by every Aside view of one database,
 /// matching the Go build architecture.
-// This milestone exercises only Driver reads and invalidation. The remaining
-// dependencies become live in the load/store and refresh milestones.
-#[allow(dead_code)]
+///
+/// Aside prevents source stampedes by collapsing same-ID loads, remembers
+/// authoritative absence briefly, and can return stale values immediately while
+/// refreshing them in bounded background work. It has no enumeration index and
+/// therefore no index hot key, but separate processes may each load once until a
+/// safe fenced-lock capability is implemented.
+///
+/// Best for read-heavy values whose authority is a slower database or service.
 #[derive(Clone)]
-pub(crate) struct AsideImpl {
+pub struct AsideImpl {
     driver: Arc<dyn Driver>,
     keyspace: Keyspace,
     loader: Loader,
@@ -85,9 +86,41 @@ pub(crate) struct AsideImpl {
     negative_ttl: Duration,
 }
 
+#[async_trait::async_trait]
+impl Aside for AsideImpl {
+    async fn get_or_load(&self, id: &str, dest: &mut Vec<u8>, opts: &Options) -> Result<()> {
+        match self.read(id).await {
+            Ok(StoredEntry::Value { body, stale }) => {
+                *dest = body;
+                if stale {
+                    // Admission and any later refresh failure are intentionally
+                    // invisible: this caller already received a valid value.
+                    self.refresh_in_background(id, opts);
+                }
+                Ok(())
+            }
+            Ok(StoredEntry::Void) => Err(CacheError::NotFound),
+            Err(CacheError::NotFound) => {
+                *dest = self.load_through_flight(id, opts).await?;
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn refresh(&self, id: &str, opts: &Options) -> Result<()> {
+        self.refresh_entry(id, opts).await
+    }
+
+    async fn invalidate(&self, id: &str) -> Result<()> {
+        self.invalidate_entry(id).await
+    }
+}
+
 impl AsideImpl {
     /// Wires dependencies without performing I/O or allocating cache storage.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
         keyspace: Keyspace,
@@ -483,6 +516,193 @@ mod tests {
             Arc::new(Refresher::new(8, Duration::from_secs(1))),
             negative_ttl,
         )
+    }
+
+    #[tokio::test]
+    async fn test_aside_get_or_load_fresh_hit_skips_loader() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(br#""loaded""#.to_vec())
+            }
+            .boxed()
+        });
+        let aside = test_aside_with_loader(driver.clone(), loader, Duration::from_secs(30));
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("item");
+        driver
+            .set(
+                &key,
+                &pack_value(br#""cached""#, 0).unwrap(),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+
+        let mut destination = Vec::new();
+        aside
+            .get_or_load("item", &mut destination, &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(destination, br#""cached""#);
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_aside_get_or_load_miss_loads_and_stores() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""loaded""#.to_vec()) }.boxed());
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+        let mut destination = Vec::new();
+
+        aside
+            .get_or_load("item", &mut destination, &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(destination, br#""loaded""#);
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""loaded""#.to_vec(),
+                stale: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_get_or_load_void_returns_not_found_without_loader() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(br#""loaded""#.to_vec())
+            }
+            .boxed()
+        });
+        let aside = test_aside_with_loader(driver.clone(), loader, Duration::from_secs(30));
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("missing");
+        driver
+            .set(&key, &pack_void().unwrap(), Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        let result = aside
+            .get_or_load("missing", &mut Vec::new(), &Options::default())
+            .await;
+
+        assert!(matches!(result, Err(CacheError::NotFound)));
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_aside_get_or_load_stale_returns_before_background_refresh() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                let version = loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if version > 1 {
+                    tokio::time::sleep(Duration::from_millis(80)).await;
+                }
+                Ok(format!(r#""v{version}""#).into_bytes())
+            }
+            .boxed()
+        });
+        let refresher = Arc::new(Refresher::new(8, Duration::from_secs(1)));
+        let aside = AsideImpl::new(
+            driver,
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            refresher.clone(),
+            Duration::from_secs(30),
+        );
+        let opts = Options::default()
+            .with_ttl(Duration::from_millis(15))
+            .with_stale(Duration::from_secs(1));
+        let mut destination = Vec::new();
+        aside
+            .get_or_load("item", &mut destination, &opts)
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        let started = tokio::time::Instant::now();
+        aside
+            .get_or_load("item", &mut destination, &opts)
+            .await
+            .unwrap();
+
+        assert_eq!(destination, br#""v1""#);
+        assert!(started.elapsed() < Duration::from_millis(40));
+        refresher.drain(Duration::from_secs(1)).await.unwrap();
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""v2""#.to_vec(),
+                stale: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_refresh_trait_reloads_entry() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""new""#.to_vec()) }.boxed());
+        let aside = test_aside_with_loader(driver.clone(), loader, Duration::from_secs(30));
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("item");
+        driver
+            .set(
+                &key,
+                &pack_value(br#""old""#, 0).unwrap(),
+                Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+
+        aside.refresh("item", &Options::default()).await.unwrap();
+
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""new""#.to_vec(),
+                stale: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_invalidate_trait_clears_remembered_absence() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""created""#.to_vec()) }.boxed());
+        let aside = test_aside_with_loader(driver.clone(), loader, Duration::from_secs(30));
+        let key = Keyspace::new("test", "db", 0, false).aside_entry("item");
+        driver
+            .set(&key, &pack_void().unwrap(), Duration::from_secs(30))
+            .await
+            .unwrap();
+
+        aside.invalidate("item").await.unwrap();
+        let mut destination = Vec::new();
+        aside
+            .get_or_load("item", &mut destination, &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(destination, br#""created""#);
     }
 
     #[tokio::test]
