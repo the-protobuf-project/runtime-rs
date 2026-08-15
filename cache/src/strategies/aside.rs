@@ -10,10 +10,111 @@
 //! backend expiry. Keeping that metadata here preserves the Driver/Strategy
 //! boundary and makes Rust and Go Aside entries wire-compatible.
 
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
 
+use crate::core::Options;
 use crate::{CacheError, Result};
+
+/// Resolves the lease for a load that will write an Aside entry.
+///
+/// The ordering is the cache-wide safety contract: an operation-specific TTL
+/// wins, then deliberate permanence, then the configured default, followed by
+/// `NoTTL` when leases are mandatory, and finally implicit permanence when they
+/// are not. This check happens before invoking a Loader so an invalid write does
+/// not first perform expensive source work.
+fn resolve_ttl(default_ttl: Duration, require_ttl: bool, opts: &Options) -> Result<Duration> {
+    if let Some(ttl) = opts.ttl {
+        return Ok(ttl);
+    }
+
+    if opts.permanent {
+        return Ok(Duration::ZERO);
+    }
+
+    if !default_ttl.is_zero() {
+        return Ok(default_ttl);
+    }
+
+    if require_ttl {
+        return Err(CacheError::NoTTL);
+    }
+
+    Ok(Duration::ZERO)
+}
+
+/// Resolves the stale-serving window independently of the entry lease.
+fn resolve_stale(default_stale: Duration, opts: &Options) -> Duration {
+    match opts.stale {
+        Some(stale) => stale,
+        None => default_stale,
+    }
+}
+
+/// Separates the deadline carried by the envelope from backend hard expiry.
+#[derive(Debug, Eq, PartialEq)]
+struct Freshness {
+    /// A zero duration means no separate freshness deadline is stored.
+    fresh_for: Duration,
+
+    /// The TTL passed to Driver. With stale serving this is `TTL + Stale`.
+    hard_ttl: Duration,
+}
+
+/// Calculates envelope freshness and backend expiry without reading a clock.
+///
+/// Without a stale window, the backend removes the value at TTL and no envelope
+/// deadline is needed. With one, the envelope becomes stale at TTL while the
+/// backend retains it through `TTL + Stale`. A permanent entry has neither
+/// deadline because stale serving has no meaningful boundary without a TTL.
+fn freshness(ttl: Duration, stale: Duration) -> Result<Freshness> {
+    if ttl.is_zero() {
+        return Ok(Freshness {
+            fresh_for: Duration::ZERO,
+            hard_ttl: Duration::ZERO,
+        });
+    }
+
+    if stale.is_zero() {
+        return Ok(Freshness {
+            fresh_for: Duration::ZERO,
+            hard_ttl: ttl,
+        });
+    }
+
+    let hard_ttl = ttl.checked_add(stale).ok_or_else(|| {
+        CacheError::Internal("Aside TTL and stale window overflow Duration".to_owned())
+    })?;
+    Ok(Freshness {
+        fresh_for: ttl,
+        hard_ttl,
+    })
+}
+
+/// Converts a relative freshness window into Go's Unix-millisecond deadline.
+///
+/// Clock access is isolated here so the envelope codec remains deterministic.
+/// All conversions are checked; an unrepresentable deadline is an explicit
+/// error rather than a wrapped timestamp that could make stale data look fresh.
+fn fresh_until_millis(now: SystemTime, fresh_for: Duration) -> Result<i64> {
+    if fresh_for.is_zero() {
+        return Ok(0);
+    }
+
+    let deadline = now.checked_add(fresh_for).ok_or_else(|| {
+        CacheError::Internal("Aside freshness deadline exceeds SystemTime".to_owned())
+    })?;
+    let since_epoch = deadline.duration_since(UNIX_EPOCH).map_err(|error| {
+        CacheError::Internal(format!("Aside freshness deadline predates Unix epoch: {error}"))
+    })?;
+    i64::try_from(since_epoch.as_millis()).map_err(|error| {
+        CacheError::Internal(format!(
+            "Aside freshness deadline does not fit Unix milliseconds: {error}"
+        ))
+    })
+}
 
 /// Go-compatible stored representation.
 ///
@@ -128,6 +229,130 @@ fn invalid_envelope(reason: String) -> CacheError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_aside_ttl_explicit_overrides_permanent_and_default() {
+        let opts = Options::default()
+            .with_ttl(Duration::from_secs(5))
+            .permanent();
+
+        let ttl = resolve_ttl(Duration::from_secs(30), true, &opts).unwrap();
+
+        assert_eq!(ttl, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_aside_ttl_permanent_overrides_default() {
+        let opts = Options::default().permanent();
+
+        let ttl = resolve_ttl(Duration::from_secs(30), true, &opts).unwrap();
+
+        assert_eq!(ttl, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_aside_ttl_default_applies_when_operation_omits_ttl() {
+        let ttl = resolve_ttl(
+            Duration::from_secs(30),
+            true,
+            &Options::default(),
+        )
+        .unwrap();
+
+        assert_eq!(ttl, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_aside_ttl_required_without_lease_returns_error() {
+        let result = resolve_ttl(Duration::ZERO, true, &Options::default());
+
+        assert!(matches!(result, Err(CacheError::NoTTL)));
+    }
+
+    #[test]
+    fn test_aside_ttl_optional_without_lease_is_permanent() {
+        let ttl = resolve_ttl(Duration::ZERO, false, &Options::default()).unwrap();
+
+        assert_eq!(ttl, Duration::ZERO);
+    }
+
+    #[test]
+    fn test_aside_stale_explicit_overrides_default() {
+        let opts = Options::default().with_stale(Duration::from_secs(5));
+
+        let stale = resolve_stale(Duration::from_secs(30), &opts);
+
+        assert_eq!(stale, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn test_aside_stale_default_applies_when_operation_omits_stale() {
+        let stale = resolve_stale(Duration::from_secs(30), &Options::default());
+
+        assert_eq!(stale, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_aside_freshness_without_stale_uses_ttl_as_hard_expiry() {
+        let value = freshness(Duration::from_secs(10), Duration::ZERO).unwrap();
+
+        assert_eq!(
+            value,
+            Freshness {
+                fresh_for: Duration::ZERO,
+                hard_ttl: Duration::from_secs(10),
+            }
+        );
+    }
+
+    #[test]
+    fn test_aside_freshness_with_stale_extends_hard_expiry() {
+        let value = freshness(Duration::from_secs(10), Duration::from_secs(5)).unwrap();
+
+        assert_eq!(
+            value,
+            Freshness {
+                fresh_for: Duration::from_secs(10),
+                hard_ttl: Duration::from_secs(15),
+            }
+        );
+    }
+
+    #[test]
+    fn test_aside_freshness_permanent_ignores_stale_window() {
+        let value = freshness(Duration::ZERO, Duration::from_secs(5)).unwrap();
+
+        assert_eq!(
+            value,
+            Freshness {
+                fresh_for: Duration::ZERO,
+                hard_ttl: Duration::ZERO,
+            }
+        );
+    }
+
+    #[test]
+    fn test_aside_freshness_overflow_returns_error() {
+        let result = freshness(Duration::MAX, Duration::from_nanos(1));
+
+        assert!(matches!(result, Err(CacheError::Internal(_))));
+    }
+
+    #[test]
+    fn test_aside_freshness_deadline_converts_to_unix_millis() {
+        let now = UNIX_EPOCH + Duration::from_millis(1_000);
+
+        let deadline = fresh_until_millis(now, Duration::from_millis(250)).unwrap();
+
+        assert_eq!(deadline, 1_250);
+    }
+
+    #[test]
+    fn test_aside_freshness_zero_has_no_envelope_deadline() {
+        let deadline = fresh_until_millis(SystemTime::now(), Duration::ZERO).unwrap();
+
+        assert_eq!(deadline, 0);
+    }
 
     #[test]
     fn test_aside_envelope_value_round_trip_fresh() {
