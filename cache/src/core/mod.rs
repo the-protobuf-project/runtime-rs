@@ -1,6 +1,7 @@
 //! Core cache abstractions and interfaces
 
 pub mod driver;
+pub mod aside;
 pub mod document;
 pub mod keyspace;
 pub mod memory_driver;
@@ -9,6 +10,7 @@ pub mod options_builder;
 pub mod sets;
 pub mod volatile;
 
+pub use aside::{Aside, Loader};
 pub use document::Document;
 pub use driver::{Driver, ErrMiss};
 pub use keyspace::{check_namespace, IDGenerator, Keyspace};
