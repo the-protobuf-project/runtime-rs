@@ -11,6 +11,7 @@
 //! boundary and makes Rust and Go Aside entries wire-compatible.
 
 use std::{
+    collections::HashSet,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -22,6 +23,44 @@ use crate::core::{Driver, Keyspace, Loader, Options};
 use crate::{CacheError, Result};
 
 use super::flight::Flight;
+use super::refresher::Refresher;
+
+/// Cancellation-safe ownership of one per-ID background refresh claim.
+///
+/// Refresher may time out and drop the work future at any await point. Cleanup
+/// therefore belongs in Drop rather than after an await; otherwise that ID could
+/// remain marked forever and never refresh again.
+struct RefreshClaim {
+    refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    id: Option<String>,
+}
+
+impl RefreshClaim {
+    fn new(refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>, id: String) -> Self {
+        Self {
+            refreshing,
+            id: Some(id),
+        }
+    }
+}
+
+impl Drop for RefreshClaim {
+    fn drop(&mut self) {
+        let Some(id) = self.id.take() else {
+            return;
+        };
+
+        if let Ok(mut refreshing) = self.refreshing.try_lock() {
+            refreshing.remove(&id);
+            return;
+        }
+
+        let refreshing = self.refreshing.clone();
+        tokio::spawn(async move {
+            refreshing.lock().await.remove(&id);
+        });
+    }
+}
 
 /// Private read-through strategy under construction.
 ///
@@ -41,6 +80,8 @@ pub(crate) struct AsideImpl {
     default_stale: Duration,
     require_ttl: bool,
     flight: Arc<Flight>,
+    refresher: Arc<Refresher>,
+    refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>,
     negative_ttl: Duration,
 }
 
@@ -55,6 +96,7 @@ impl AsideImpl {
         default_stale: Duration,
         require_ttl: bool,
         flight: Arc<Flight>,
+        refresher: Arc<Refresher>,
         negative_ttl: Duration,
     ) -> Self {
         Self {
@@ -65,6 +107,8 @@ impl AsideImpl {
             default_stale,
             require_ttl,
             flight,
+            refresher,
+            refreshing: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             negative_ttl,
         }
     }
@@ -155,6 +199,46 @@ impl AsideImpl {
     /// of starting duplicate source work.
     async fn refresh_entry(&self, id: &str, opts: &Options) -> Result<()> {
         self.load_through_flight(id, opts).await.map(|_| ())
+    }
+
+    /// Attempts one detached refresh for a stale ID.
+    ///
+    /// The per-ID claim happens before Refresher admission so a burst of stale
+    /// readers spends one background slot, not one slot per reader that later
+    /// joins the same Flight. Decline and refresh errors are intentionally
+    /// invisible: the initiating reader already has a valid stale value.
+    fn refresh_in_background(&self, id: &str, opts: &Options) -> bool {
+        {
+            let mut refreshing = match self.refreshing.try_lock() {
+                Ok(refreshing) => refreshing,
+                Err(_) => return false,
+            };
+            if !refreshing.insert(id.to_owned()) {
+                return false;
+            }
+        }
+
+        let aside = Self::clone(self);
+        let refreshing = self.refreshing.clone();
+        let owned_id = id.to_owned();
+        let cleanup_id = owned_id.clone();
+        let owned_opts = opts.clone();
+        let admitted = self.refresher.go(move || async move {
+            let _claim = RefreshClaim::new(refreshing, owned_id.clone());
+            let _ = aside
+                .load_through_flight(&owned_id, &owned_opts)
+                .await;
+        });
+
+        if !admitted {
+            // Admission can fail after the per-ID claim. Cleanup is detached so
+            // even brief map contention never delays the stale reader.
+            let refreshing = self.refreshing.clone();
+            tokio::spawn(async move {
+                refreshing.lock().await.remove(&cleanup_id);
+            });
+        }
+        admitted
     }
 }
 
@@ -396,6 +480,7 @@ mod tests {
             Duration::ZERO,
             false,
             Arc::new(Flight::new(8, Duration::from_secs(1))),
+            Arc::new(Refresher::new(8, Duration::from_secs(1))),
             negative_ttl,
         )
     }
@@ -621,6 +706,7 @@ mod tests {
             Duration::ZERO,
             false,
             flight.clone(),
+            Arc::new(Refresher::new(8, Duration::from_secs(1))),
             Duration::from_secs(30),
         );
         let second_view = AsideImpl::new(
@@ -631,6 +717,7 @@ mod tests {
             Duration::ZERO,
             false,
             flight,
+            Arc::new(Refresher::new(8, Duration::from_secs(1))),
             Duration::from_secs(30),
         );
 
@@ -650,6 +737,112 @@ mod tests {
 
         assert_eq!(first.await.unwrap().unwrap(), br#""first""#);
         assert_eq!(second.await.unwrap().unwrap(), br#""first""#);
+    }
+
+    #[tokio::test]
+    async fn test_aside_background_refresh_claims_one_task_per_id() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let release = Arc::new(tokio::sync::Notify::new());
+        let loader_release = release.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            let loader_release = loader_release.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                loader_release.notified().await;
+                Ok(br#""refreshed""#.to_vec())
+            }
+            .boxed()
+        });
+        let refresher = Arc::new(Refresher::new(8, Duration::from_secs(1)));
+        let aside = AsideImpl::new(
+            driver,
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            refresher.clone(),
+            Duration::from_secs(30),
+        );
+
+        assert!(aside.refresh_in_background("hot", &Options::default()));
+        for _ in 0..100 {
+            assert!(!aside.refresh_in_background("hot", &Options::default()));
+        }
+        release.notify_one();
+        refresher.drain(Duration::from_secs(1)).await.unwrap();
+
+        assert_eq!(
+            executions.load(std::sync::atomic::Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_background_refresh_full_budget_declines_distinct_id() {
+        let driver = Arc::new(MemoryDriver::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let loader_release = release.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_release = loader_release.clone();
+            async move {
+                loader_release.notified().await;
+                Ok(br#""refreshed""#.to_vec())
+            }
+            .boxed()
+        });
+        let refresher = Arc::new(Refresher::new(1, Duration::from_secs(1)));
+        let aside = AsideImpl::new(
+            driver,
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            refresher.clone(),
+            Duration::from_secs(30),
+        );
+
+        assert!(aside.refresh_in_background("first", &Options::default()));
+        assert!(!aside.refresh_in_background("second", &Options::default()));
+
+        release.notify_one();
+        refresher.drain(Duration::from_secs(1)).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_aside_background_refresh_timeout_releases_per_id_claim() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| {
+            async {
+                std::future::pending::<()>().await;
+                Ok(Vec::new())
+            }
+            .boxed()
+        });
+        let refresher = Arc::new(Refresher::new(1, Duration::from_millis(10)));
+        let aside = AsideImpl::new(
+            driver,
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            refresher.clone(),
+            Duration::from_secs(30),
+        );
+
+        assert!(aside.refresh_in_background("hot", &Options::default()));
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert!(aside.refresh_in_background("hot", &Options::default()));
+
+        refresher.drain(Duration::from_secs(1)).await.unwrap();
     }
 
     #[tokio::test]
