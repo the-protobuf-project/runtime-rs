@@ -32,6 +32,7 @@ use super::flight::Flight;
 // This milestone exercises only Driver reads and invalidation. The remaining
 // dependencies become live in the load/store and refresh milestones.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub(crate) struct AsideImpl {
     driver: Arc<dyn Driver>,
     keyspace: Keyspace,
@@ -86,6 +87,47 @@ impl AsideImpl {
     async fn invalidate_entry(&self, id: &str) -> Result<()> {
         let key = self.keyspace.aside_entry(id);
         self.driver.delete(&[&key]).await
+    }
+
+    /// Runs the authoritative Loader and stores its result.
+    ///
+    /// TTL and hard-expiry calculations happen before the Loader so a write
+    /// that policy would reject does not first perform expensive source I/O.
+    /// Successful values are framed and written once. Loader-reported absence
+    /// is remembered best-effort under the same entry key, matching Go: failure
+    /// to optimize a later miss must not replace the meaningful `NotFound` that
+    /// the authoritative source returned now.
+    ///
+    /// **Cost**: One Loader execution and at most one Driver SET.
+    /// **Side effects**: Stores a value through hard expiry, or stores a void
+    /// envelope for `negative_ttl` when the Loader returns `NotFound`.
+    async fn load_and_store(&self, id: &str, opts: &Options) -> Result<Vec<u8>> {
+        let ttl = resolve_ttl(self.default_ttl, self.require_ttl, opts)?;
+        let stale = resolve_stale(self.default_stale, opts);
+        let freshness = freshness(ttl, stale)?;
+        let key = self.keyspace.aside_entry(id);
+
+        let value = match (self.loader)(id.to_owned()).await {
+            Ok(value) => value,
+            Err(CacheError::NotFound) => {
+                // Negative caching is an optimization. The Loader's NotFound is
+                // authoritative even when framing or storing its marker fails.
+                if !self.negative_ttl.is_zero() {
+                    if let Ok(frame) = pack_void() {
+                        let _ = self.driver.set(&key, &frame, self.negative_ttl).await;
+                    }
+                }
+                return Err(CacheError::NotFound);
+            }
+            Err(error) => return Err(error),
+        };
+
+        // Go starts freshness after the Loader finishes, not before a slow
+        // source call. Otherwise loader latency would consume the value's TTL.
+        let fresh_until = fresh_until_millis(SystemTime::now(), freshness.fresh_for)?;
+        let frame = pack_value(&value, fresh_until)?;
+        self.driver.set(&key, &frame, freshness.hard_ttl).await?;
+        Ok(value)
     }
 }
 
@@ -311,6 +353,14 @@ mod tests {
 
     fn test_aside(driver: Arc<MemoryDriver>) -> AsideImpl {
         let loader: Loader = Arc::new(|_| async { Ok(b"null".to_vec()) }.boxed());
+        test_aside_with_loader(driver, loader, Duration::from_secs(30))
+    }
+
+    fn test_aside_with_loader(
+        driver: Arc<MemoryDriver>,
+        loader: Loader,
+        negative_ttl: Duration,
+    ) -> AsideImpl {
         AsideImpl::new(
             driver,
             Keyspace::new("test", "db", 0, false),
@@ -319,8 +369,125 @@ mod tests {
             Duration::ZERO,
             false,
             Arc::new(Flight::new(8, Duration::from_secs(1))),
-            Duration::from_secs(30),
+            negative_ttl,
         )
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_and_store_value_writes_readable_envelope() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|id| {
+            async move { Ok(format!(r#"{{"id":"{id}"}}"#).into_bytes()) }.boxed()
+        });
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+
+        let value = aside
+            .load_and_store("item-1", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(value, br#"{"id":"item-1"}"#);
+        assert_eq!(
+            aside.read("item-1").await.unwrap(),
+            StoredEntry::Value {
+                body: br#"{"id":"item-1"}"#.to_vec(),
+                stale: false,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_and_store_required_ttl_rejects_before_loader() {
+        let driver = Arc::new(MemoryDriver::new());
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(b"null".to_vec())
+            }
+            .boxed()
+        });
+        let mut aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+        aside.default_ttl = Duration::ZERO;
+        aside.require_ttl = true;
+
+        let result = aside.load_and_store("item", &Options::default()).await;
+
+        assert!(matches!(result, Err(CacheError::NoTTL)));
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_and_store_not_found_writes_void_envelope() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Err(CacheError::NotFound) }.boxed());
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+
+        let result = aside
+            .load_and_store("missing", &Options::default())
+            .await;
+
+        assert!(matches!(result, Err(CacheError::NotFound)));
+        assert_eq!(aside.read("missing").await.unwrap(), StoredEntry::Void);
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_and_store_loader_error_is_not_cached() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| {
+            async { Err(CacheError::Internal("source unavailable".to_owned())) }.boxed()
+        });
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+
+        let result = aside
+            .load_and_store("item", &Options::default())
+            .await;
+
+        assert!(matches!(result, Err(CacheError::Internal(_))));
+        assert!(matches!(
+            aside.read("item").await,
+            Err(CacheError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_and_store_invalid_loader_json_is_not_cached() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(b"not-json".to_vec()) }.boxed());
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+
+        let result = aside
+            .load_and_store("item", &Options::default())
+            .await;
+
+        assert!(matches!(result, Err(CacheError::Internal(_))));
+        assert!(matches!(
+            aside.read("item").await,
+            Err(CacheError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_aside_load_and_store_stale_window_extends_backend_expiry() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""value""#.to_vec()) }.boxed());
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+        let opts = Options::default()
+            .with_ttl(Duration::from_millis(15))
+            .with_stale(Duration::from_millis(100));
+
+        aside.load_and_store("item", &opts).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(25)).await;
+
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""value""#.to_vec(),
+                stale: true,
+            }
+        );
     }
 
     #[tokio::test]
