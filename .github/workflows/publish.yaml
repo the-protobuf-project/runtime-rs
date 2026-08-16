@@ -15,6 +15,7 @@ on:
           - tpp-network-graphql
           - tpp-network
           - tpp-runtime
+          - runtime-cache
       dry_run:
         description: "Dry run only (no upload)"
         required: true
@@ -35,14 +36,22 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Map crate name to package directory
+      # Resolved from cargo metadata rather than a hardcoded table, so a
+      # crate whose directory name differs from its package name (as they
+      # all do here) can never be mapped to the wrong path. Only the
+      # `crate` input's option list above needs touching for a new crate;
+      # GitHub Actions cannot populate choice inputs dynamically.
+      - name: Resolve package directory
         id: dir
         run: |
-          case "${{ inputs.crate }}" in
-            tpp-network) echo "path=network" >> "$GITHUB_OUTPUT" ;;
-            tpp-network-graphql) echo "path=network-graphql" >> "$GITHUB_OUTPUT" ;;
-            tpp-runtime) echo "path=runtime" >> "$GITHUB_OUTPUT" ;;
-          esac
+          manifest=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r --arg c '${{ inputs.crate }}' \
+                '.packages[] | select(.name == $c) | .manifest_path')
+          if [ -z "$manifest" ]; then
+            echo "No workspace member named '${{ inputs.crate }}'." >&2
+            exit 1
+          fi
+          echo "path=$(dirname "$manifest")" >> "$GITHUB_OUTPUT"
 
       - name: Test
         run: cargo test -p ${{ inputs.crate }}

@@ -6,7 +6,7 @@
 use crate::Result;
 
 /// Sets is implemented by drivers with server-side sets
-/// 
+///
 /// This is what makes a group of ids addressable, enabling enumeration and indexing.
 /// Faking it with a single key holding a serialized list would:
 /// - Put every write in contention on one key
@@ -16,10 +16,10 @@ use crate::Result;
 pub trait Sets: Send + Sync {
     /// Add members to a set
     async fn set_add(&self, key: &str, members: &[&str]) -> Result<()>;
-    
+
     /// Remove members from a set
     async fn set_remove(&self, key: &str, members: &[&str]) -> Result<()>;
-    
+
     /// Get all members of a set
     async fn set_members(&self, key: &str) -> Result<Vec<String>>;
 }
@@ -39,7 +39,9 @@ pub trait SetScanner: Send + Sync {
 
 /// Memory-based Sets implementation for testing
 pub struct MemorySets {
-    data: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, std::collections::HashSet<String>>>>,
+    data: std::sync::Arc<
+        tokio::sync::RwLock<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    >,
 }
 
 impl MemorySets {
@@ -60,7 +62,9 @@ impl Default for MemorySets {
 impl Sets for MemorySets {
     async fn set_add(&self, key: &str, members: &[&str]) -> Result<()> {
         let mut data = self.data.write().await;
-        let set = data.entry(key.to_string()).or_insert_with(std::collections::HashSet::new);
+        let set = data
+            .entry(key.to_string())
+            .or_insert_with(std::collections::HashSet::new);
         for member in members {
             set.insert(member.to_string());
         }

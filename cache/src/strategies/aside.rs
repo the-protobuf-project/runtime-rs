@@ -189,10 +189,10 @@ impl AsideImpl {
             Err(CacheError::NotFound) => {
                 // Negative caching is an optimization. The Loader's NotFound is
                 // authoritative even when framing or storing its marker fails.
-                if !self.negative_ttl.is_zero() {
-                    if let Ok(frame) = pack_void() {
-                        let _ = self.driver.set(&key, &frame, self.negative_ttl).await;
-                    }
+                if !self.negative_ttl.is_zero()
+                    && let Ok(frame) = pack_void()
+                {
+                    let _ = self.driver.set(&key, &frame, self.negative_ttl).await;
                 }
                 return Err(CacheError::NotFound);
             }
@@ -258,9 +258,7 @@ impl AsideImpl {
         let owned_opts = opts.clone();
         let admitted = self.refresher.go(move || async move {
             let _claim = RefreshClaim::new(refreshing, owned_id.clone());
-            let _ = aside
-                .load_through_flight(&owned_id, &owned_opts)
-                .await;
+            let _ = aside.load_through_flight(&owned_id, &owned_opts).await;
         });
 
         if !admitted {
@@ -368,7 +366,9 @@ fn fresh_until_millis(now: SystemTime, fresh_for: Duration) -> Result<i64> {
 
 fn unix_millis(time: SystemTime) -> Result<i64> {
     let since_epoch = time.duration_since(UNIX_EPOCH).map_err(|error| {
-        CacheError::Internal(format!("Aside freshness deadline predates Unix epoch: {error}"))
+        CacheError::Internal(format!(
+            "Aside freshness deadline predates Unix epoch: {error}"
+        ))
     })?;
     i64::try_from(since_epoch.as_millis()).map_err(|error| {
         CacheError::Internal(format!(
@@ -708,9 +708,8 @@ mod tests {
     #[tokio::test]
     async fn test_aside_load_and_store_value_writes_readable_envelope() {
         let driver = Arc::new(MemoryDriver::new());
-        let loader: Loader = Arc::new(|id| {
-            async move { Ok(format!(r#"{{"id":"{id}"}}"#).into_bytes()) }.boxed()
-        });
+        let loader: Loader =
+            Arc::new(|id| async move { Ok(format!(r#"{{"id":"{id}"}}"#).into_bytes()) }.boxed());
         let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
 
         let value = aside
@@ -757,9 +756,7 @@ mod tests {
         let loader: Loader = Arc::new(|_| async { Err(CacheError::NotFound) }.boxed());
         let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
 
-        let result = aside
-            .load_and_store("missing", &Options::default())
-            .await;
+        let result = aside.load_and_store("missing", &Options::default()).await;
 
         assert!(matches!(result, Err(CacheError::NotFound)));
         assert_eq!(aside.read("missing").await.unwrap(), StoredEntry::Void);
@@ -773,9 +770,7 @@ mod tests {
         });
         let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
 
-        let result = aside
-            .load_and_store("item", &Options::default())
-            .await;
+        let result = aside.load_and_store("item", &Options::default()).await;
 
         assert!(matches!(result, Err(CacheError::Internal(_))));
         assert!(matches!(
@@ -790,9 +785,7 @@ mod tests {
         let loader: Loader = Arc::new(|_| async { Ok(b"not-json".to_vec()) }.boxed());
         let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
 
-        let result = aside
-            .load_and_store("item", &Options::default())
-            .await;
+        let result = aside.load_and_store("item", &Options::default()).await;
 
         assert!(matches!(result, Err(CacheError::Internal(_))));
         assert!(matches!(
@@ -856,10 +849,7 @@ mod tests {
         for caller in callers {
             assert_eq!(caller.await.unwrap(), br#""shared""#);
         }
-        assert_eq!(
-            executions.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -916,8 +906,7 @@ mod tests {
                 .boxed()
             })
         };
-        let second_loader: Loader =
-            Arc::new(|_| async { Ok(br#""second""#.to_vec()) }.boxed());
+        let second_loader: Loader = Arc::new(|_| async { Ok(br#""second""#.to_vec()) }.boxed());
         let first_view = AsideImpl::new(
             driver.clone(),
             keyspace.clone(),
@@ -996,10 +985,7 @@ mod tests {
         release.notify_one();
         refresher.drain(Duration::from_secs(1)).await.unwrap();
 
-        assert_eq!(
-            executions.load(std::sync::atomic::Ordering::SeqCst),
-            1
-        );
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1201,12 +1187,7 @@ mod tests {
 
     #[test]
     fn test_aside_ttl_default_applies_when_operation_omits_ttl() {
-        let ttl = resolve_ttl(
-            Duration::from_secs(30),
-            true,
-            &Options::default(),
-        )
-        .unwrap();
+        let ttl = resolve_ttl(Duration::from_secs(30), true, &Options::default()).unwrap();
 
         assert_eq!(ttl, Duration::from_secs(30));
     }

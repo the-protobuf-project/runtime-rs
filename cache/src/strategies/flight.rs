@@ -15,7 +15,7 @@
 
 use std::{collections::HashMap, future::Future, sync::Arc, time::Duration};
 
-use tokio::sync::{watch, Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, watch};
 
 use crate::{CacheError, Result};
 

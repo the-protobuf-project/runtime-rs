@@ -8,11 +8,14 @@
 //! - Reading keys() walks the index (O(entries))
 //! - Does NOT shard - the index is one hot key on all backends
 
-use std::time::Duration;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 
-use crate::{Result, core::{Driver, Document, Options, Keyspace, Sets}};
+use crate::{
+    Result,
+    core::{Document, Driver, Keyspace, Options, Sets},
+};
 
 /// DocumentImpl stores whole encoded values with enumeration
 pub struct DocumentImpl {
@@ -72,7 +75,7 @@ impl DocumentImpl {
 impl Document for DocumentImpl {
     async fn create(&self, value: &[u8], opts: &Options) -> Result<String> {
         let ttl = self.resolve_ttl(opts)?;
-        
+
         // Use provided ID or generate one
         let id = if let Some(ref custom_id) = opts.id {
             custom_id.clone()
@@ -100,7 +103,7 @@ impl Document for DocumentImpl {
     async fn update(&self, id: &str, value: &[u8], opts: &Options) -> Result<()> {
         let ttl = self.resolve_ttl(opts)?;
         let entry_key = self.keyspace.doc_entry(id);
-        
+
         // Replace only if key exists (otherwise update fails)
         let ok = self.driver.replace(&entry_key, value, ttl).await?;
         if !ok {
@@ -112,11 +115,11 @@ impl Document for DocumentImpl {
     async fn delete(&self, id: &str) -> Result<()> {
         let entry_key = self.keyspace.doc_entry(id);
         self.driver.delete(&[&entry_key]).await?;
-        
+
         // Remove from index
         let index_key = self.keyspace.doc_index();
         self.sets.set_remove(&index_key, &[id]).await?;
-        
+
         Ok(())
     }
 
@@ -127,7 +130,7 @@ impl Document for DocumentImpl {
 
     async fn list(&self) -> Result<Vec<Vec<u8>>> {
         let keys = self.keys().await?;
-        
+
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
             match self.driver.get(&self.keyspace.doc_entry(&key)).await {
@@ -157,19 +160,16 @@ mod tests {
         let driver = Arc::new(MemoryDriver::new());
         let sets = Arc::new(MemorySets::new());
         let ks = Keyspace::new("test", "db", 0, false);
-        
-        let doc = DocumentImpl::new(
-            driver,
-            sets,
-            ks,
-            Duration::from_secs(60),
-            false,
-        );
+
+        let doc = DocumentImpl::new(driver, sets, ks, Duration::from_secs(60), false);
 
         // Create an entry
         let opts = Options::default().with_ttl(Duration::from_secs(30));
-        let id = doc.create(b"entry-data", &opts).await.expect("create failed");
-        
+        let id = doc
+            .create(b"entry-data", &opts)
+            .await
+            .expect("create failed");
+
         assert!(!id.is_empty());
 
         // Get it back
@@ -187,14 +187,14 @@ mod tests {
         let driver = Arc::new(MemoryDriver::new());
         let sets = Arc::new(MemorySets::new());
         let ks = Keyspace::new("test", "db", 0, false);
-        
+
         let doc = DocumentImpl::new(driver, sets, ks, Duration::from_secs(60), false);
 
         // Create with custom ID
         let opts = Options::default()
             .with_id("custom-123")
             .with_ttl(Duration::from_secs(30));
-        
+
         let id = doc.create(b"data", &opts).await.expect("create failed");
         assert_eq!(id, "custom-123");
     }

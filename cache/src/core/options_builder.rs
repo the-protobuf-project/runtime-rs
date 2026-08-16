@@ -1,10 +1,10 @@
 //! Option builder pattern (Rust idiomatic)
-//! 
+//!
 //! Implements fluent API similar to Go options, but using Rust's builder pattern.
 
-use std::time::Duration;
-use std::collections::HashMap;
 use super::Options;
+use std::collections::HashMap;
+use std::time::Duration;
 
 impl Options {
     /// Set the custom ID for this entry (Document.Create only)
@@ -60,6 +60,6 @@ mod tests {
 
         assert_eq!(opts.id, Some("entry-123".to_string()));
         assert_eq!(opts.ttl, Some(Duration::from_secs(60)));
-        assert_eq!(opts.permanent, true);
+        assert!(opts.permanent);
     }
 }

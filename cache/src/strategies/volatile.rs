@@ -3,8 +3,11 @@
 //! This is the simplest strategy - just Set/Get/Delete without tracking.
 //! No enumeration, no hot keys, scales with cluster shards.
 
+use crate::{
+    Result,
+    core::{Driver, Keyspace, Options, Volatile},
+};
 use std::time::Duration;
-use crate::{Result, core::{Driver, Volatile, Options, Keyspace}};
 
 /// VolatileImpl is ephemeral key-value storage with TTL
 pub struct VolatileImpl {

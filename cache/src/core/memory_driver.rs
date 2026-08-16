@@ -1,13 +1,13 @@
 //! In-memory driver for testing and learning
-//! 
+//!
 //! This is the simplest Driver implementation - all data in a HashMap with TTL.
 
+use super::Driver;
+use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use crate::Result;
-use super::Driver;
 
 /// Entry stores the value and expiry time
 struct Entry {
@@ -56,7 +56,7 @@ impl Driver for MemoryDriver {
 
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         let data = self.data.read().await;
-        
+
         match data.get(key) {
             Some(entry) => {
                 if entry.is_expired() {
@@ -95,14 +95,14 @@ impl Driver for MemoryDriver {
         };
 
         let mut data = self.data.write().await;
-        
+
         // Check if key exists and is not expired
-        if let Some(entry) = data.get(key) {
-            if !entry.is_expired() {
-                return Ok(false); // Key exists, so Add fails
-            }
+        if let Some(entry) = data.get(key)
+            && !entry.is_expired()
+        {
+            return Ok(false); // Key exists, so Add fails
         }
-        
+
         data.insert(
             key.to_string(),
             Entry {
@@ -121,7 +121,7 @@ impl Driver for MemoryDriver {
         };
 
         let mut data = self.data.write().await;
-        
+
         // Check if key exists and is not expired
         if let Some(entry) = data.get(key) {
             if entry.is_expired() {
@@ -130,7 +130,7 @@ impl Driver for MemoryDriver {
         } else {
             return Ok(false); // Key doesn't exist, so Replace fails
         }
-        
+
         data.insert(
             key.to_string(),
             Entry {
@@ -151,7 +151,7 @@ impl Driver for MemoryDriver {
 
     async fn exists(&self, key: &str) -> Result<bool> {
         let data = self.data.read().await;
-        
+
         match data.get(key) {
             Some(entry) => {
                 if entry.is_expired() {
@@ -166,7 +166,7 @@ impl Driver for MemoryDriver {
 
     async fn touch(&self, key: &str, ttl: Duration) -> Result<()> {
         let mut data = self.data.write().await;
-        
+
         if let Some(entry) = data.get_mut(key) {
             if entry.is_expired() {
                 return Err(crate::CacheError::NotFound);

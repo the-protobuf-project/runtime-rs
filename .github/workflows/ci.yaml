@@ -15,16 +15,40 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # Build and test each crate individually (clear per-crate status),
-  # plus the whole workspace together (catches cross-crate breakage).
+  # Detect which crates the workspace contains so we can fan-out per
+  # crate. Reading this from cargo metadata rather than hardcoding it
+  # means a new workspace member gets its own job the moment it is added
+  # to Cargo.toml — a hardcoded list silently skips it instead.
+  # ------------------------------------------------------------------
+  detect-crates:
+    name: Detect crates
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read workspace members and emit matrix
+        id: set-matrix
+        run: |
+          crates=$(cargo metadata --no-deps --format-version 1 \
+            | jq -c '[.packages[].name] | sort')
+          echo "Workspace crates: $crates"
+          echo "matrix={\"crate\":$crates}" >> "$GITHUB_OUTPUT"
+
+  # ------------------------------------------------------------------
+  # Build and test every crate in parallel, so a failure names the crate
+  # that broke rather than just "the workspace".
   # ------------------------------------------------------------------
   test:
     name: Test (${{ matrix.crate }})
+    needs: detect-crates
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      matrix:
-        crate: [tpp-network, tpp-network-graphql, tpp-runtime, workspace]
+      matrix: ${{ fromJson(needs.detect-crates.outputs.matrix) }}
 
     steps:
       - uses: actions/checkout@v7
@@ -34,23 +58,37 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: |
-          if [ "${{ matrix.crate }}" = "workspace" ]; then
-            cargo build --workspace --all-targets
-          else
-            cargo build -p ${{ matrix.crate }} --all-targets
-          fi
+        run: cargo build -p ${{ matrix.crate }} --all-targets
 
       - name: Test
-        run: |
-          if [ "${{ matrix.crate }}" = "workspace" ]; then
-            cargo test --workspace
-          else
-            cargo test -p ${{ matrix.crate }}
-          fi
+        run: cargo test -p ${{ matrix.crate }}
 
   # ------------------------------------------------------------------
-  # Lint — formatting and clippy, warnings denied.
+  # The crates also have to work together: per-crate jobs resolve
+  # features independently, so this catches breakage that only appears
+  # under the workspace's unified feature set.
+  # ------------------------------------------------------------------
+  workspace:
+    name: Test (workspace)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+  # ------------------------------------------------------------------
+  # Lint — formatting and clippy, warnings denied. Kept as one
+  # workspace-wide job rather than fanned out per crate: clippy shares a
+  # single dependency build across the workspace, so splitting it would
+  # rebuild the same dependencies once per crate for no extra signal.
   # ------------------------------------------------------------------
   lint:
     name: Lint
@@ -129,17 +167,22 @@ jobs:
         run: cargo audit
 
   # ------------------------------------------------------------------
-  # Single status gate that PRs can require before merge.
+  # Single status gate that PRs can require before merge. Reading the
+  # results out of `needs` keeps this correct as jobs are added — only
+  # the needs list below has to be maintained.
   # ------------------------------------------------------------------
   ci-gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [test, lint, docs, msrv, audit]
+    needs: [detect-crates, test, workspace, lint, docs, msrv, audit]
     if: always()
     steps:
       - name: Check all jobs passed
+        env:
+          RESULTS: ${{ toJSON(needs) }}
         run: |
-          if [[ "${{ needs.test.result }}" != "success" || "${{ needs.lint.result }}" != "success" || "${{ needs.docs.result }}" != "success" || "${{ needs.msrv.result }}" != "success" || "${{ needs.audit.result }}" != "success" ]]; then
+          jq -r 'to_entries[] | "\(.value.result)\t\(.key)"' <<< "$RESULTS"
+          if jq -e 'any(.[]; .result != "success")' >/dev/null <<< "$RESULTS"; then
             echo "One or more CI jobs failed."
             exit 1
           fi

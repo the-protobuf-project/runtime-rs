@@ -21,19 +21,19 @@ impl Keyspace {
     /// Create a new keyspace with prefix and namespace
     pub fn new(prefix: &str, namespace: &str, _db: usize, _embed_db: bool) -> Self {
         let mut base = String::new();
-        
+
         if !prefix.is_empty() {
             base.push_str(prefix);
             base.push(':');
         }
-        
+
         if !namespace.is_empty() {
             base.push_str(namespace);
             base.push(':');
         }
-        
+
         base.push_str("cache:");
-        
+
         Self { base }
     }
 
@@ -100,8 +100,8 @@ pub struct IDGenerator;
 impl IDGenerator {
     /// Generate a new unique ID
     pub fn new_id() -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
         use std::sync::atomic::{AtomicU64, Ordering};
+        use std::time::{SystemTime, UNIX_EPOCH};
 
         static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -125,8 +125,14 @@ mod tests {
     fn test_keyspace_keys() {
         let ks = Keyspace::new("app", "orders", 0, false);
 
-        assert_eq!(ks.doc_entry("order-123"), "app:orders:cache:doc:entry:order-123");
-        assert_eq!(ks.vol_entry("session-abc"), "app:orders:cache:vol:session-abc");
+        assert_eq!(
+            ks.doc_entry("order-123"),
+            "app:orders:cache:doc:entry:order-123"
+        );
+        assert_eq!(
+            ks.vol_entry("session-abc"),
+            "app:orders:cache:vol:session-abc"
+        );
         assert_eq!(ks.doc_index(), "app:orders:cache:doc:index");
     }
 
@@ -140,7 +146,7 @@ mod tests {
     fn test_id_generator() {
         let id1 = IDGenerator::new_id();
         let id2 = IDGenerator::new_id();
-        
+
         assert!(!id1.is_empty());
         assert!(!id2.is_empty());
         assert_ne!(id1, id2); // Should be unique
