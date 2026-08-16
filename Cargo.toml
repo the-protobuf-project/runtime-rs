@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["network", "network-graphql", "runtime"]
+members = ["network", "network-graphql", "runtime", "cache"]
 
 [workspace.package]
 edition = "2024"
