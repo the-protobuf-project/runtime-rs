@@ -10,21 +10,23 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
-env:
-  MSRV: "1.93"
-
 jobs:
   # ------------------------------------------------------------------
   # Detect which crates the workspace contains so we can fan-out per
   # crate. Reading this from cargo metadata rather than hardcoding it
   # means a new workspace member gets its own job the moment it is added
   # to Cargo.toml — a hardcoded list silently skips it instead.
+  #
+  # The MSRV is read from the same metadata (workspace.package
+  # rust-version) so the manifest stays the single source of truth; a
+  # constant duplicated here would drift the moment the manifest moved.
   # ------------------------------------------------------------------
   detect-crates:
     name: Detect crates
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
+      msrv: ${{ steps.set-matrix.outputs.msrv }}
     steps:
       - uses: actions/checkout@v7
 
@@ -33,10 +35,21 @@ jobs:
       - name: Read workspace members and emit matrix
         id: set-matrix
         run: |
-          crates=$(cargo metadata --no-deps --format-version 1 \
-            | jq -c '[.packages[].name] | sort')
+          metadata=$(cargo metadata --no-deps --format-version 1)
+
+          crates=$(jq -c '[.packages[].name] | sort' <<< "$metadata")
           echo "Workspace crates: $crates"
           echo "matrix={\"crate\":$crates}" >> "$GITHUB_OUTPUT"
+
+          # Highest rust-version across the members: the toolchain that
+          # every crate is required to build under.
+          msrv=$(jq -r '[.packages[].rust_version // empty] | max // empty' <<< "$metadata")
+          if [ -z "$msrv" ]; then
+            echo "No rust-version declared by any workspace crate." >&2
+            exit 1
+          fi
+          echo "Workspace MSRV: $msrv"
+          echo "msrv=$msrv" >> "$GITHUB_OUTPUT"
 
   # ------------------------------------------------------------------
   # Build and test every crate in parallel, so a failure names the crate
@@ -108,10 +121,22 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # tools/docgen is excluded from the workspace, so --workspace above
+      # does not reach it. Held to the same bar rather than left to rot.
+      - name: Format check (tools/docgen)
+        run: cargo fmt --manifest-path tools/docgen/Cargo.toml --check
+
+      - name: Clippy (tools/docgen)
+        run: cargo clippy --manifest-path tools/docgen/Cargo.toml --all-targets -- -D warnings
+
   # ------------------------------------------------------------------
   # Docs — every public item must carry a doc comment (enforced by
   # #![warn(missing_docs)] in each crate) and every intra-doc link must
   # resolve; both are promoted to hard errors here.
+  #
+  # rustdoc cannot see the README, so tools/docgen covers what it misses:
+  # a crate with no crate-level docs or no manifest description, and a
+  # README crate table that no longer matches the workspace.
   # ------------------------------------------------------------------
   docs:
     name: Docs
@@ -128,19 +153,25 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
 
+      - uses: extractions/setup-just@v3
+
+      - name: Validate crate docs + README freshness
+        run: just docs-check
+
   # ------------------------------------------------------------------
   # MSRV — the workspace must build on the minimum Rust version it
   # declares (workspace.package.rust-version).
   # ------------------------------------------------------------------
   msrv:
-    name: MSRV (${{ env.MSRV }})
+    name: MSRV (${{ needs.detect-crates.outputs.msrv }})
+    needs: detect-crates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
 
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ env.MSRV }}
+          toolchain: ${{ needs.detect-crates.outputs.msrv }}
 
       - uses: Swatinem/rust-cache@v2
 

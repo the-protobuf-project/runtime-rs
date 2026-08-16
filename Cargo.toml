@@ -1,6 +1,15 @@
 [workspace]
 resolver = "3"
 members = ["network", "network-graphql", "runtime", "cache"]
+# Developer tooling, not a published crate: kept out of the workspace so it
+# never lands in the CI crate matrix, the release build, or Cargo.lock.
+exclude = ["tools/docgen"]
+
+# Consumed by tools/docgen, which generates README.md in full.
+[workspace.metadata.docgen]
+tagline = """
+A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go), built the Rust \
+way rather than as a line-for-line translation."""
 
 [workspace.package]
 edition = "2024"
@@ -18,10 +27,19 @@ serde_json = "1.0"
 url = "2.5"
 thiserror = "2.0"
 futures-util = "0.3"
+futures = "0.3"
 tracing = "0.1"
 opentelemetry = "0.32"
 opentelemetry-http = "0.32"
 http = "1.4"
+bytes = "1"
+async-trait = "0.1"
+uuid = { version = "1.0", features = ["v4"] }
+
+# Dev-only, but pinned here so every crate tests against the same versions.
+tokio-test = "0.4"
+wiremock = "0.6"
 
 network = { path = "network", package = "tpp-network", version = "0.1.0" }
 network-graphql = { path = "network-graphql", package = "tpp-network-graphql", version = "0.1.0" }
+cache = { path = "cache", package = "runtime-cache", version = "0.1.0" }

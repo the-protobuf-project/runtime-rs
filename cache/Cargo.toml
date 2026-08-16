@@ -1,18 +1,29 @@
 [package]
 name = "runtime-cache"
 version = "0.1.0"
-edition = "2024"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Cache drivers and read-through/write-through strategies over pluggable backends"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+keywords = ["cache", "redis", "memcached", "async", "read-through"]
+categories = ["caching", "asynchronous"]
+
+# Consumed by tools/docgen to build the README's "Go source" column.
+[package.metadata.docgen]
+go-source = "runtime-go/cache"
 
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-bytes = "1"
-thiserror = "1"
-tracing = "0.1"
-async-trait = "0.1"
-futures = "0.3"
-uuid = { version = "1.0", features = ["v4"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", features = ["raw_value"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
-tokio-test = "0.4"
+tokio = { workspace = true, features = ["test-util"] }
+tokio-test = { workspace = true }
