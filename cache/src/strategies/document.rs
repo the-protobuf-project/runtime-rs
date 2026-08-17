@@ -1,10 +1,11 @@
 //! Document strategy: enumerable storage with index
 //!
-//! Stores whole values and maintains an index so they can be listed.
-//! Used for things like a catalog of orders, products, etc.
+//! Stores whole values and, when the backend supports Sets, maintains an index
+//! so they can be listed. Direct entry operations remain available without
+//! Sets, while enumeration reports `Unsupported`.
 //!
 //! Trade-offs:
-//! - Every Create/Delete touches the index (2 writes)
+//! - With Sets, every Create/Delete also touches the index
 //! - Reading keys() walks the index (O(entries))
 //! - Does NOT shard - the index is one hot key on all backends
 
@@ -13,24 +14,39 @@ use std::time::Duration;
 use uuid::Uuid;
 
 use crate::{
-    Result,
+    CacheError, Result,
     core::{Document, Driver, Keyspace, Options, Sets},
 };
 
-/// DocumentImpl stores whole encoded values with enumeration
+/// Stores whole encoded values, with optional enumeration through server Sets.
+///
+/// Direct create, get, update, and delete operations need only the Driver. When
+/// Sets is present, writes also maintain an enumeration index; without it,
+/// `keys` and `list` explicitly return [`CacheError::Unsupported`]. This matches
+/// the Go strategy and keeps a backend such as Memcached useful without
+/// pretending it can enumerate values.
+///
+/// The enumeration index is a shared hot key and can retain members for expired
+/// values until a read sweeps them. Prefer Volatile when enumeration is not
+/// needed.
 pub struct DocumentImpl {
     driver: Arc<dyn Driver>,
-    sets: Arc<dyn Sets>,
+    // Sets is optional because direct entry operations need only Driver. Only
+    // enumeration requires the index and must refuse when this is absent.
+    sets: Option<Arc<dyn Sets>>,
     keyspace: Keyspace,
     default_ttl: Duration,
     require_ttl: bool,
 }
 
 impl DocumentImpl {
-    /// Create a new Document strategy
+    /// Wires a Document strategy to its driver and optional Sets capability.
+    ///
+    /// **Cost**: Local construction only; no driver round trip.
+    /// **Side effects**: None. Backend data is touched only by trait methods.
     pub fn new(
         driver: Arc<dyn Driver>,
-        sets: Arc<dyn Sets>,
+        sets: Option<Arc<dyn Sets>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -83,9 +99,12 @@ impl Document for DocumentImpl {
             self.new_id()
         };
 
-        // Index first - if the index write fails, we don't store the value
-        let index_key = self.keyspace.doc_index();
-        self.sets.set_add(&index_key, &[&id]).await?;
+        // Index first when available. A failure between the two writes then
+        // leaves a sweepable dangling member, never an invisible stored value.
+        if let Some(sets) = &self.sets {
+            let index_key = self.keyspace.doc_index();
+            sets.set_add(&index_key, &[&id]).await?;
+        }
 
         // Then store the value
         let entry_key = self.keyspace.doc_entry(&id);
@@ -116,16 +135,18 @@ impl Document for DocumentImpl {
         let entry_key = self.keyspace.doc_entry(id);
         self.driver.delete(&[&entry_key]).await?;
 
-        // Remove from index
-        let index_key = self.keyspace.doc_index();
-        self.sets.set_remove(&index_key, &[id]).await?;
+        if let Some(sets) = &self.sets {
+            let index_key = self.keyspace.doc_index();
+            sets.set_remove(&index_key, &[id]).await?;
+        }
 
         Ok(())
     }
 
     async fn keys(&self) -> Result<Vec<String>> {
+        let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
         let index_key = self.keyspace.doc_index();
-        self.sets.set_members(&index_key).await
+        sets.set_members(&index_key).await
     }
 
     async fn list(&self) -> Result<Vec<Vec<u8>>> {
@@ -161,7 +182,7 @@ mod tests {
         let sets = Arc::new(MemorySets::new());
         let ks = Keyspace::new("test", "db", 0, false);
 
-        let doc = DocumentImpl::new(driver, sets, ks, Duration::from_secs(60), false);
+        let doc = DocumentImpl::new(driver, Some(sets), ks, Duration::from_secs(60), false);
 
         // Create an entry
         let opts = Options::default().with_ttl(Duration::from_secs(30));
@@ -188,7 +209,7 @@ mod tests {
         let sets = Arc::new(MemorySets::new());
         let ks = Keyspace::new("test", "db", 0, false);
 
-        let doc = DocumentImpl::new(driver, sets, ks, Duration::from_secs(60), false);
+        let doc = DocumentImpl::new(driver, Some(sets), ks, Duration::from_secs(60), false);
 
         // Create with custom ID
         let opts = Options::default()
@@ -197,5 +218,72 @@ mod tests {
 
         let id = doc.create(b"data", &opts).await.expect("create failed");
         assert_eq!(id, "custom-123");
+    }
+
+    #[tokio::test]
+    async fn test_document_create_without_sets_stores_direct_entry() {
+        let driver = Arc::new(MemoryDriver::new());
+        let doc = DocumentImpl::new(
+            driver,
+            None,
+            Keyspace::new("test", "db", 0, false),
+            Duration::from_secs(60),
+            false,
+        );
+        let options = Options::default().with_id("direct");
+
+        let id = doc.create(b"value", &options).await.unwrap();
+        let mut destination = Vec::new();
+        doc.get(&id, &mut destination).await.unwrap();
+
+        assert_eq!(id, "direct");
+        assert_eq!(destination, b"value");
+    }
+
+    #[tokio::test]
+    async fn test_document_delete_without_sets_removes_direct_entry() {
+        let driver = Arc::new(MemoryDriver::new());
+        let doc = DocumentImpl::new(
+            driver,
+            None,
+            Keyspace::new("test", "db", 0, false),
+            Duration::from_secs(60),
+            false,
+        );
+        let options = Options::default().with_id("direct");
+        doc.create(b"value", &options).await.unwrap();
+
+        doc.delete("direct").await.unwrap();
+
+        assert!(matches!(
+            doc.get("direct", &mut Vec::new()).await,
+            Err(CacheError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_document_keys_without_sets_returns_unsupported() {
+        let doc = DocumentImpl::new(
+            Arc::new(MemoryDriver::new()),
+            None,
+            Keyspace::new("test", "db", 0, false),
+            Duration::from_secs(60),
+            false,
+        );
+
+        assert!(matches!(doc.keys().await, Err(CacheError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn test_document_list_without_sets_returns_unsupported() {
+        let doc = DocumentImpl::new(
+            Arc::new(MemoryDriver::new()),
+            None,
+            Keyspace::new("test", "db", 0, false),
+            Duration::from_secs(60),
+            false,
+        );
+
+        assert!(matches!(doc.list().await, Err(CacheError::Unsupported)));
     }
 }
