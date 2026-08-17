@@ -35,8 +35,15 @@ pub struct DocumentImpl {
     // enumeration requires the index and must refuse when this is absent.
     sets: Option<Arc<dyn Sets>>,
     keyspace: Keyspace,
+    layout: DocumentLayout,
     default_ttl: Duration,
     require_ttl: bool,
+}
+
+#[derive(Clone, Copy)]
+enum DocumentLayout {
+    Document,
+    Indexed,
 }
 
 impl DocumentImpl {
@@ -51,17 +58,54 @@ impl DocumentImpl {
         default_ttl: Duration,
         require_ttl: bool,
     ) -> Self {
+        Self::with_layout(
+            driver,
+            sets,
+            keyspace,
+            default_ttl,
+            require_ttl,
+            DocumentLayout::Document,
+        )
+    }
+
+    /// Builds the Document half of Indexed with the isolated `idx` key layout.
+    pub(crate) fn new_indexed(
+        driver: Arc<dyn Driver>,
+        sets: Option<Arc<dyn Sets>>,
+        keyspace: Keyspace,
+        default_ttl: Duration,
+        require_ttl: bool,
+    ) -> Self {
+        Self::with_layout(
+            driver,
+            sets,
+            keyspace,
+            default_ttl,
+            require_ttl,
+            DocumentLayout::Indexed,
+        )
+    }
+
+    fn with_layout(
+        driver: Arc<dyn Driver>,
+        sets: Option<Arc<dyn Sets>>,
+        keyspace: Keyspace,
+        default_ttl: Duration,
+        require_ttl: bool,
+        layout: DocumentLayout,
+    ) -> Self {
         Self {
             driver,
             sets,
             keyspace,
+            layout,
             default_ttl,
             require_ttl,
         }
     }
 
     /// Resolve TTL (same as Volatile)
-    fn resolve_ttl(&self, opts: &Options) -> Result<Duration> {
+    pub(crate) fn resolve_ttl(&self, opts: &Options) -> Result<Duration> {
         if let Some(ttl) = opts.ttl {
             return Ok(ttl);
         }
@@ -81,9 +125,26 @@ impl DocumentImpl {
         Ok(Duration::ZERO)
     }
 
-    /// Generate a new ID
-    fn new_id(&self) -> String {
-        Uuid::new_v4().to_string()
+    /// Resolves a caller-selected ID or generates the one used by every index.
+    pub(crate) fn resolve_id(&self, opts: &Options) -> String {
+        match &opts.id {
+            Some(id) => id.clone(),
+            None => Uuid::new_v4().to_string(),
+        }
+    }
+
+    fn entry_key(&self, id: &str) -> String {
+        match self.layout {
+            DocumentLayout::Document => self.keyspace.doc_entry(id),
+            DocumentLayout::Indexed => self.keyspace.idx_entry(id),
+        }
+    }
+
+    fn index_key(&self) -> String {
+        match self.layout {
+            DocumentLayout::Document => self.keyspace.doc_index(),
+            DocumentLayout::Indexed => self.keyspace.idx_index(),
+        }
     }
 }
 
@@ -92,36 +153,31 @@ impl Document for DocumentImpl {
     async fn create(&self, value: &[u8], opts: &Options) -> Result<String> {
         let ttl = self.resolve_ttl(opts)?;
 
-        // Use provided ID or generate one
-        let id = if let Some(ref custom_id) = opts.id {
-            custom_id.clone()
-        } else {
-            self.new_id()
-        };
+        let id = self.resolve_id(opts);
 
         // Index first when available. A failure between the two writes then
         // leaves a sweepable dangling member, never an invisible stored value.
         if let Some(sets) = &self.sets {
-            let index_key = self.keyspace.doc_index();
+            let index_key = self.index_key();
             sets.set_add(&index_key, &[&id]).await?;
         }
 
         // Then store the value
-        let entry_key = self.keyspace.doc_entry(&id);
+        let entry_key = self.entry_key(&id);
         self.driver.set(&entry_key, value, ttl).await?;
 
         Ok(id)
     }
 
     async fn get(&self, id: &str, dest: &mut Vec<u8>) -> Result<()> {
-        let entry_key = self.keyspace.doc_entry(id);
+        let entry_key = self.entry_key(id);
         *dest = self.driver.get(&entry_key).await?;
         Ok(())
     }
 
     async fn update(&self, id: &str, value: &[u8], opts: &Options) -> Result<()> {
         let ttl = self.resolve_ttl(opts)?;
-        let entry_key = self.keyspace.doc_entry(id);
+        let entry_key = self.entry_key(id);
 
         // Replace only if key exists (otherwise update fails)
         let ok = self.driver.replace(&entry_key, value, ttl).await?;
@@ -132,11 +188,11 @@ impl Document for DocumentImpl {
     }
 
     async fn delete(&self, id: &str) -> Result<()> {
-        let entry_key = self.keyspace.doc_entry(id);
+        let entry_key = self.entry_key(id);
         self.driver.delete(&[&entry_key]).await?;
 
         if let Some(sets) = &self.sets {
-            let index_key = self.keyspace.doc_index();
+            let index_key = self.index_key();
             sets.set_remove(&index_key, &[id]).await?;
         }
 
@@ -145,7 +201,7 @@ impl Document for DocumentImpl {
 
     async fn keys(&self) -> Result<Vec<String>> {
         let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
-        let index_key = self.keyspace.doc_index();
+        let index_key = self.index_key();
         sets.set_members(&index_key).await
     }
 
@@ -154,7 +210,7 @@ impl Document for DocumentImpl {
 
         let mut results = Vec::with_capacity(keys.len());
         for key in keys {
-            match self.driver.get(&self.keyspace.doc_entry(&key)).await {
+            match self.driver.get(&self.entry_key(&key)).await {
                 Ok(value) => results.push(value),
                 Err(_) => {
                     // Entry expired or disappeared, skip it
