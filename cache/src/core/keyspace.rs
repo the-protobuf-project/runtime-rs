@@ -18,8 +18,17 @@ pub struct Keyspace {
 }
 
 impl Keyspace {
-    /// Create a new keyspace with prefix and namespace
-    pub fn new(prefix: &str, namespace: &str, _db: usize, _embed_db: bool) -> Self {
+    /// Builds the collision-safe key prefix for one selected database.
+    ///
+    /// `prefix` separates applications and `namespace` identifies a named
+    /// database. When a backend has no native databases, `embed_db` adds the
+    /// selected numeric index as `db{index}`. Backends with native databases
+    /// must leave it false because the connection already enforces that
+    /// boundary and repeating the index would only change the wire keys.
+    ///
+    /// **Cost**: Local string construction only; no driver round trip.
+    /// **Side effects**: None.
+    pub fn new(prefix: &str, namespace: &str, db: usize, embed_db: bool) -> Self {
         let mut base = String::new();
 
         if !prefix.is_empty() {
@@ -32,9 +41,24 @@ impl Keyspace {
             base.push(':');
         }
 
+        if embed_db {
+            base.push_str(&format!("db{db}:"));
+        }
+
         base.push_str("cache:");
 
         Self { base }
+    }
+
+    /// Returns the prefix shared by every strategy in this database.
+    ///
+    /// A future database-drop operation can qualify its backend scan with this
+    /// head without reconstructing or partially duplicating keyspace rules.
+    ///
+    /// **Cost**: O(1), with no allocation or driver round trip.
+    /// **Side effects**: None.
+    pub fn head(&self) -> &str {
+        &self.base
     }
 
     // Document strategy keys
@@ -140,6 +164,32 @@ mod tests {
     fn test_keyspace_no_prefix() {
         let ks = Keyspace::new("", "mydb", 0, false);
         assert_eq!(ks.doc_entry("id"), "mydb:cache:doc:entry:id");
+    }
+
+    #[test]
+    fn test_keyspace_new_embedded_database_separates_indexes() {
+        let first = Keyspace::new("app", "", 2, true);
+        let second = Keyspace::new("app", "", 7, true);
+
+        assert_eq!(first.vol_entry("session"), "app:db2:cache:vol:session");
+        assert_eq!(second.vol_entry("session"), "app:db7:cache:vol:session");
+        assert_ne!(first.vol_entry("session"), second.vol_entry("session"));
+    }
+
+    #[test]
+    fn test_keyspace_new_native_database_omits_index() {
+        let keys = Keyspace::new("app", "", 7, false);
+
+        assert_eq!(keys.vol_entry("session"), "app:cache:vol:session");
+    }
+
+    #[test]
+    fn test_keyspace_head_returns_complete_database_prefix() {
+        let named = Keyspace::new("app", "orders", 0, false);
+        let embedded = Keyspace::new("app", "", 3, true);
+
+        assert_eq!(named.head(), "app:orders:cache:");
+        assert_eq!(embedded.head(), "app:db3:cache:");
     }
 
     #[test]
