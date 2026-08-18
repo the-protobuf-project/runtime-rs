@@ -35,7 +35,9 @@ pub enum Error {
     /// URL construction failed; wraps one of the URL-validation variants above.
     #[error("failed to build URL: {0}")]
     BuildUrl(Box<Error>),
-    /// [`crate::url_from_std`] was given a URL the `url` crate itself rejected.
+    /// URL construction was given a scheme/host pair the `url` crate itself rejected.
+    /// Produced by the crate-internal `build_full_url`, which parses `scheme://host` out of
+    /// [`crate::UrlOptions`] before applying the path and query parameters.
     #[error("failed to parse URL: {0}")]
     UrlParse(#[from] ::url::ParseError),
 
