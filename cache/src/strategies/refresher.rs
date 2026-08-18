@@ -1,6 +1,3 @@
-// Refresher is introduced before Provider lifecycle wiring consumes it.
-#![cfg_attr(not(test), allow(dead_code))]
-
 //! Bounded, drainable execution for stale background refreshes.
 //!
 //! Capacity is deliberately not a queue. When every slot is occupied, new work

@@ -1,7 +1,3 @@
-// Flight is introduced one reviewed milestone before AsideImpl consumes it.
-// Remove this temporary allowance when the strategy implementation lands.
-#![cfg_attr(not(test), allow(dead_code))]
-
 //! In-process single-flight coordination for read-through loads.
 //!
 //! A cold or expired hot key can attract many readers simultaneously. Without
