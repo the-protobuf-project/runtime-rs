@@ -120,7 +120,6 @@ impl Aside for AsideImpl {
 impl AsideImpl {
     /// Wires dependencies without performing I/O or allocating cache storage.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
         keyspace: Keyspace,

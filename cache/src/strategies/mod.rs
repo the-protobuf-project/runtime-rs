@@ -9,9 +9,9 @@
 
 pub mod aside;
 pub mod document;
-mod flight;
+pub(crate) mod flight;
 pub mod indexed;
-mod refresher;
+pub(crate) mod refresher;
 pub mod volatile;
 pub use aside::AsideImpl;
 pub use document::DocumentImpl;

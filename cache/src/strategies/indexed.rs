@@ -32,7 +32,6 @@ pub struct IndexedImpl {
 
 impl IndexedImpl {
     /// Wires Indexed without performing backend I/O.
-    #[allow(dead_code)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
