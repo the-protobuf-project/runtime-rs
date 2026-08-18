@@ -5,6 +5,16 @@
 /// [`std::error::Error::source`] walks the same causal chain Go's `errors.Unwrap` does.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A client-type string wasn't one of `graphql`, `http`, or `websocket`. Returned by
+    /// [`crate::ClientType`]'s [`std::str::FromStr`] impl, the Rust home of the error Go's
+    /// `NewConnection` returns for an unrecognized `ClientType` string.
+    #[error("client type not supported: {0}")]
+    UnsupportedClientType(String),
+    /// An `as_*_connection_type` helper was called on a [`crate::Network`] created with a
+    /// different [`crate::ClientType`]. The payload is the Go type name that was requested
+    /// (e.g. `"HTTPClient"`).
+    #[error("failed to cast to {0}")]
+    ClientCast(&'static str),
     /// A [`crate::UrlOptions::scheme`] value wasn't one of `http`, `https`, `ws`, or `wss`.
     #[error("invalid URL scheme: {0}. Must be 'http', 'https', 'ws', or 'wss'")]
     InvalidScheme(String),

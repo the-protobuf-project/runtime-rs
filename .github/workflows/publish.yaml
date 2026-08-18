@@ -1,9 +1,8 @@
 name: Publish to crates.io
 
-# Manual only — nothing in this repo ever publishes automatically. Publish
-# tpp-network-graphql and tpp-network first (and wait for them to be
-# indexed); tpp-runtime depends on tpp-network via the registry and its
-# publish/dry-run will fail until tpp-network is actually live.
+# Manual only — nothing in this repo ever publishes automatically. The two
+# crates are independent: neither depends on the other via the registry, so
+# they can be published in either order.
 on:
   workflow_dispatch:
     inputs:
@@ -12,9 +11,7 @@ on:
         required: true
         type: choice
         options:
-          - tpp-network-graphql
           - tpp-network
-          - tpp-runtime
           - runtime-cache
       dry_run:
         description: "Dry run only (no upload)"

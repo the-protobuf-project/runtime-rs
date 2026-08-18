@@ -17,6 +17,7 @@ use crate::transport::{HeaderCarrier, new_pooled_client};
 use crate::url::build_full_url;
 
 pub use batch::BatchOp;
+pub use helpers::{build_graphql_args, struct_to_map};
 pub use named::FieldArg;
 pub use subscription::Subscription;
 

@@ -11,23 +11,19 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 
 ## Crates
 
-4 crates. Each declares a `description` in its `Cargo.toml` and carries crate-level
+2 crates. Each declares a `description` in its `Cargo.toml` and carries crate-level
 `//!` docs; this table is generated from those and verified on every push.
 
 | Crate | Published as | Go source | Summary |
 | --- | --- | --- | --- |
 | [`cache`](cache) | `runtime-cache` | `runtime-go/cache` | Cache drivers and read-through/write-through strategies over pluggable backends |
 | [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions |
-| [`network-graphql`](network-graphql) | `tpp-network-graphql` | `runtime-go/network/graphql` | Predicate/filter/query-builder helpers for generated GraphQL CRUD clients |
-| [`runtime`](runtime) | `tpp-runtime` | `runtime-go/network/runtime` | Stable facade re-exporting network's public surface, plus Tx for atomic batched mutations |
 
 ## Installation
 
 ```bash
-cargo add runtime-cache        # Cache drivers and read-through/write-through strategies over pluggable backends
-cargo add tpp-network          # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
-cargo add tpp-network-graphql  # Predicate/filter/query-builder helpers for generated GraphQL CRUD clients
-cargo add tpp-runtime          # Stable facade re-exporting network's public surface, plus Tx for atomic batched mutations
+cargo add runtime-cache  # Cache drivers and read-through/write-through strategies over pluggable backends
+cargo add tpp-network    # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
 ```
 
 ## Documentation
@@ -36,8 +32,6 @@ Every crate's API docs, including usage examples, are on docs.rs:
 
 - [`runtime-cache`](https://docs.rs/runtime-cache)
 - [`tpp-network`](https://docs.rs/tpp-network)
-- [`tpp-network-graphql`](https://docs.rs/tpp-network-graphql)
-- [`tpp-runtime`](https://docs.rs/tpp-runtime)
 
 ## Development
 

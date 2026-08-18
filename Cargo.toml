@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["network", "network-graphql", "runtime", "cache"]
+members = ["network", "cache"]
 # Developer tooling, not a published crate: kept out of the workspace so it
 # never lands in the CI crate matrix, the release build, or Cargo.lock.
 exclude = ["tools/docgen"]
@@ -41,5 +41,4 @@ tokio-test = "0.4"
 wiremock = "0.6"
 
 network = { path = "network", package = "tpp-network", version = "0.1.0" }
-network-graphql = { path = "network-graphql", package = "tpp-network-graphql", version = "0.1.0" }
 cache = { path = "cache", package = "runtime-cache", version = "0.1.0" }
