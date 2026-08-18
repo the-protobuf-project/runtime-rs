@@ -10,6 +10,8 @@ use std::{
     time::Duration,
 };
 
+use futures::{StreamExt, TryStreamExt, stream};
+
 use crate::{
     CacheError, Result,
     core::{Document, Driver, Keyspace, Options, Sets},
@@ -26,8 +28,10 @@ use super::DocumentImpl;
 /// cost of hot index keys and ordered, non-transactional failure handling.
 pub(crate) struct IndexedImpl {
     document: DocumentImpl,
+    driver: Arc<dyn Driver>,
     sets: Option<Arc<dyn Sets>>,
     keyspace: Keyspace,
+    concurrency: usize,
 }
 
 impl IndexedImpl {
@@ -38,6 +42,7 @@ impl IndexedImpl {
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
+        concurrency: usize,
     ) -> Self {
         let document = DocumentImpl::new_indexed(
             driver.clone(),
@@ -48,8 +53,10 @@ impl IndexedImpl {
         );
         Self {
             document,
+            driver,
             sets,
             keyspace,
+            concurrency: concurrency.max(1),
         }
     }
 
@@ -135,6 +142,75 @@ impl IndexedImpl {
         let previous_refs: Vec<&str> = previous.iter().map(String::as_str).collect();
         sets.set_remove(&fields_key, &previous_refs).await
     }
+
+    /// Returns live IDs and best-effort sweeps expired members.
+    async fn ids_by_index(&self, field: &str, value: &str) -> Result<Vec<String>> {
+        let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
+        let index_key = self.keyspace.idx_by_field(field, value);
+        let members = sets.set_members(&index_key).await?;
+        if members.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let driver = self.driver.clone();
+        let keyspace = self.keyspace.clone();
+        let checked: Vec<(String, bool)> = stream::iter(members.into_iter().map(move |id| {
+            let driver = driver.clone();
+            let entry_key = keyspace.idx_entry(&id);
+            async move {
+                let exists = driver.exists(&entry_key).await?;
+                Ok::<_, CacheError>((id, exists))
+            }
+        }))
+        .buffered(self.concurrency)
+        .try_collect()
+        .await?;
+
+        let mut live = Vec::with_capacity(checked.len());
+        let mut stale = Vec::new();
+        for (id, exists) in checked {
+            if exists {
+                live.push(id);
+            } else {
+                stale.push(id);
+            }
+        }
+
+        if !stale.is_empty() {
+            let stale_refs: Vec<&str> = stale.iter().map(String::as_str).collect();
+            // A failed sweep must not turn a successful lookup into an error.
+            // The stale members name no live values and the next read retries.
+            let cleanup = sets.set_remove(&index_key, &stale_refs).await;
+            if cleanup.is_err() {
+                // Deliberately suppressed for the retryable reason above.
+            }
+        }
+
+        Ok(live)
+    }
+
+    /// Returns values for live secondary members, tolerating expiry races.
+    async fn by_index(&self, field: &str, value: &str) -> Result<Vec<Vec<u8>>> {
+        let ids = self.ids_by_index(field, value).await?;
+        let driver = self.driver.clone();
+        let keyspace = self.keyspace.clone();
+        let bodies: Vec<Option<Vec<u8>>> = stream::iter(ids.into_iter().map(move |id| {
+            let driver = driver.clone();
+            let entry_key = keyspace.idx_entry(&id);
+            async move {
+                match driver.get(&entry_key).await {
+                    Ok(body) => Ok(Some(body)),
+                    Err(CacheError::NotFound) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
+        }))
+        .buffered(self.concurrency)
+        .try_collect()
+        .await?;
+
+        Ok(bodies.into_iter().flatten().collect())
+    }
 }
 
 #[async_trait::async_trait]
@@ -203,6 +279,7 @@ mod tests {
             keyspace.clone(),
             Duration::from_secs(60),
             false,
+            16,
         );
         (indexed, driver, sets, keyspace)
     }
@@ -252,6 +329,7 @@ mod tests {
             keyspace.clone(),
             Duration::from_secs(60),
             false,
+            16,
         );
         let options = Options::default()
             .with_id("order-42")
@@ -267,7 +345,7 @@ mod tests {
     async fn test_indexed_create_without_indexes_uses_driver_without_sets() {
         let driver = Arc::new(MemoryDriver::new());
         let keyspace = Keyspace::new("test", "db", 0, false);
-        let indexed = IndexedImpl::new(driver, None, keyspace, Duration::from_secs(60), false);
+        let indexed = IndexedImpl::new(driver, None, keyspace, Duration::from_secs(60), false, 16);
         let options = Options::default().with_id("order-42");
 
         let id = indexed.create(b"value", &options).await.unwrap();
@@ -288,6 +366,7 @@ mod tests {
             keyspace.clone(),
             Duration::ZERO,
             true,
+            16,
         );
         let options = Options::default()
             .with_id("order-42")
@@ -376,7 +455,7 @@ mod tests {
     async fn test_indexed_update_without_sets_rejects_before_value_change() {
         let driver = Arc::new(MemoryDriver::new());
         let keyspace = Keyspace::new("test", "db", 0, false);
-        let indexed = IndexedImpl::new(driver, None, keyspace, Duration::from_secs(60), false);
+        let indexed = IndexedImpl::new(driver, None, keyspace, Duration::from_secs(60), false, 16);
         let create = Options::default().with_id("order-42");
         indexed.create(b"old", &create).await.unwrap();
         let update = Options::default().with_index("tenant", "acme");
@@ -387,6 +466,89 @@ mod tests {
 
         assert!(matches!(result, Err(CacheError::Unsupported)));
         assert_eq!(destination, b"old");
+    }
+
+    #[tokio::test]
+    async fn test_indexed_ids_by_index_returns_only_matching_live_ids() {
+        let (indexed, _, _, _) = indexed_with_sets();
+        for (id, tenant) in [("one", "acme"), ("two", "other"), ("three", "acme")] {
+            let options = Options::default().with_id(id).with_index("tenant", tenant);
+            indexed.create(id.as_bytes(), &options).await.unwrap();
+        }
+
+        let ids: HashSet<String> = indexed
+            .ids_by_index("tenant", "acme")
+            .await
+            .unwrap()
+            .into_iter()
+            .collect();
+
+        assert_eq!(ids, HashSet::from(["one".to_owned(), "three".to_owned()]));
+    }
+
+    #[tokio::test]
+    async fn test_indexed_ids_by_index_sweeps_expired_member() {
+        let (indexed, _, sets, keyspace) = indexed_with_sets();
+        let options = Options::default()
+            .with_id("expired")
+            .with_ttl(Duration::from_millis(10))
+            .with_index("tenant", "acme");
+        indexed.create(b"value", &options).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let ids = indexed.ids_by_index("tenant", "acme").await.unwrap();
+
+        assert!(ids.is_empty());
+        assert!(
+            sets.set_members(&keyspace.idx_by_field("tenant", "acme"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_indexed_by_index_returns_matching_values() {
+        let (indexed, _, _, _) = indexed_with_sets();
+        for (id, body) in [("one", b"first".as_slice()), ("two", b"second".as_slice())] {
+            let options = Options::default().with_id(id).with_index("tenant", "acme");
+            indexed.create(body, &options).await.unwrap();
+        }
+
+        let mut values = indexed.by_index("tenant", "acme").await.unwrap();
+        values.sort();
+
+        assert_eq!(values, vec![b"first".to_vec(), b"second".to_vec()]);
+    }
+
+    #[tokio::test]
+    async fn test_indexed_by_index_without_match_returns_empty_values() {
+        let (indexed, _, _, _) = indexed_with_sets();
+
+        let values = indexed.by_index("tenant", "missing").await.unwrap();
+
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_indexed_lookup_without_sets_returns_unsupported() {
+        let indexed = IndexedImpl::new(
+            Arc::new(MemoryDriver::new()),
+            None,
+            Keyspace::new("test", "db", 0, false),
+            Duration::from_secs(60),
+            false,
+            16,
+        );
+
+        assert!(matches!(
+            indexed.ids_by_index("tenant", "acme").await,
+            Err(CacheError::Unsupported)
+        ));
+        assert!(matches!(
+            indexed.by_index("tenant", "acme").await,
+            Err(CacheError::Unsupported)
+        ));
     }
 
     #[tokio::test]
