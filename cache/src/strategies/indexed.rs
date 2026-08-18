@@ -1,7 +1,3 @@
-// Indexed lookup and group deletion land in the following milestone. Until
-// then, this module is exercised through its Document write-path tests.
-#![cfg_attr(not(test), allow(dead_code))]
-
 //! Secondary-index filing over the shared Document algorithm.
 
 use std::{
@@ -14,7 +10,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Keyspace, Options, Sets},
+    core::{Document, Driver, Indexed, Keyspace, Options, Sets},
 };
 
 use super::DocumentImpl;
@@ -26,7 +22,7 @@ use super::DocumentImpl;
 /// field/value membership sets and a per-ID record used to undo those
 /// memberships. These extra writes enable lookup and group invalidation at the
 /// cost of hot index keys and ordered, non-transactional failure handling.
-pub(crate) struct IndexedImpl {
+pub struct IndexedImpl {
     document: DocumentImpl,
     driver: Arc<dyn Driver>,
     sets: Option<Arc<dyn Sets>>,
@@ -36,6 +32,7 @@ pub(crate) struct IndexedImpl {
 
 impl IndexedImpl {
     /// Wires Indexed without performing backend I/O.
+    #[allow(dead_code)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
@@ -211,6 +208,74 @@ impl IndexedImpl {
 
         Ok(bodies.into_iter().flatten().collect())
     }
+
+    /// Removes one live secondary group and every membership naming its IDs.
+    async fn delete_by_index(&self, field: &str, value: &str) -> Result<usize> {
+        let ids = self.ids_by_index(field, value).await?;
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
+
+        let record_sets = sets.clone();
+        let record_keyspace = self.keyspace.clone();
+        let records: Vec<(String, Vec<String>)> =
+            stream::iter(ids.iter().cloned().map(move |id| {
+                let sets = record_sets.clone();
+                let fields_key = record_keyspace.idx_fields(&id);
+                async move {
+                    let fields = sets.set_members(&fields_key).await?;
+                    Ok::<_, CacheError>((id, fields))
+                }
+            }))
+            .buffered(self.concurrency)
+            .try_collect()
+            .await?;
+
+        // Group IDs by secondary key so each shared index is updated once even
+        // when many deleted entries carry the same field/value membership.
+        let mut removals: HashMap<String, Vec<String>> = HashMap::new();
+        for (id, fields) in &records {
+            for pair in fields {
+                let (member_field, member_value) = Self::split_pair(pair);
+                let index_key = self.keyspace.idx_by_field(member_field, member_value);
+                removals.entry(index_key).or_default().push(id.clone());
+            }
+        }
+
+        for (index_key, members) in removals {
+            let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
+            sets.set_remove(&index_key, &member_refs).await?;
+        }
+
+        let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        sets.set_remove(&self.keyspace.idx_index(), &id_refs)
+            .await?;
+
+        // Rust capabilities may be separate handles, as MemoryDriver and
+        // MemorySets are. Clear set-backed field records through Sets instead
+        // of assuming Driver deletion reaches the same concrete object.
+        let cleanup_sets = sets.clone();
+        let cleanup_keyspace = self.keyspace.clone();
+        let cleared: Vec<()> = stream::iter(records.into_iter().map(move |(id, fields)| {
+            let sets = cleanup_sets.clone();
+            let fields_key = cleanup_keyspace.idx_fields(&id);
+            async move {
+                let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
+                sets.set_remove(&fields_key, &field_refs).await
+            }
+        }))
+        .buffered(self.concurrency)
+        .try_collect()
+        .await?;
+        drop(cleared);
+
+        let entry_keys: Vec<String> = ids.iter().map(|id| self.keyspace.idx_entry(id)).collect();
+        let entry_refs: Vec<&str> = entry_keys.iter().map(String::as_str).collect();
+        self.driver.delete(&entry_refs).await?;
+
+        Ok(ids.len())
+    }
 }
 
 #[async_trait::async_trait]
@@ -261,6 +326,21 @@ impl Document for IndexedImpl {
 
     async fn ttl(&self, id: &str) -> Result<Duration> {
         self.document.ttl(id).await
+    }
+}
+
+#[async_trait::async_trait]
+impl Indexed for IndexedImpl {
+    async fn by_index(&self, field: &str, value: &str) -> Result<Vec<Vec<u8>>> {
+        IndexedImpl::by_index(self, field, value).await
+    }
+
+    async fn ids_by_index(&self, field: &str, value: &str) -> Result<Vec<String>> {
+        IndexedImpl::ids_by_index(self, field, value).await
+    }
+
+    async fn delete_by_index(&self, field: &str, value: &str) -> Result<usize> {
+        IndexedImpl::delete_by_index(self, field, value).await
     }
 }
 
@@ -549,6 +629,106 @@ mod tests {
             indexed.by_index("tenant", "acme").await,
             Err(CacheError::Unsupported)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_indexed_delete_by_index_removes_group_and_preserves_others() {
+        let (indexed, _, sets, keyspace) = indexed_with_sets();
+        for (id, tenant) in [("one", "acme"), ("two", "acme"), ("three", "other")] {
+            let options = Options::default()
+                .with_id(id)
+                .with_index("tenant", tenant)
+                .with_index("status", "active");
+            indexed.create(id.as_bytes(), &options).await.unwrap();
+        }
+
+        let deleted = indexed.delete_by_index("tenant", "acme").await.unwrap();
+
+        assert_eq!(deleted, 2);
+        assert!(indexed.get("one", &mut Vec::new()).await.is_err());
+        assert!(indexed.get("two", &mut Vec::new()).await.is_err());
+        let mut remaining = Vec::new();
+        indexed.get("three", &mut remaining).await.unwrap();
+        assert_eq!(remaining, b"three");
+        assert!(
+            sets.set_members(&keyspace.idx_by_field("tenant", "acme"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            sets.set_members(&keyspace.idx_by_field("status", "active"))
+                .await
+                .unwrap(),
+            vec!["three".to_owned()]
+        );
+        assert_eq!(
+            sets.set_members(&keyspace.idx_index()).await.unwrap(),
+            vec!["three".to_owned()]
+        );
+        assert!(
+            sets.set_members(&keyspace.idx_fields("one"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            sets.set_members(&keyspace.idx_fields("two"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_indexed_delete_by_index_without_match_returns_zero() {
+        let (indexed, _, _, _) = indexed_with_sets();
+        let options = Options::default()
+            .with_id("one")
+            .with_index("tenant", "other");
+        indexed.create(b"value", &options).await.unwrap();
+
+        let deleted = indexed.delete_by_index("tenant", "missing").await.unwrap();
+        let mut destination = Vec::new();
+        indexed.get("one", &mut destination).await.unwrap();
+
+        assert_eq!(deleted, 0);
+        assert_eq!(destination, b"value");
+    }
+
+    #[tokio::test]
+    async fn test_indexed_delete_by_index_without_sets_returns_unsupported() {
+        let indexed = IndexedImpl::new(
+            Arc::new(MemoryDriver::new()),
+            None,
+            Keyspace::new("test", "db", 0, false),
+            Duration::from_secs(60),
+            false,
+            16,
+        );
+
+        let result = indexed.delete_by_index("tenant", "acme").await;
+
+        assert!(matches!(result, Err(CacheError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn test_indexed_public_trait_supports_lookup_and_group_deletion() {
+        let (indexed, _, _, _) = indexed_with_sets();
+        let options = Options::default()
+            .with_id("one")
+            .with_index("tenant", "acme");
+        indexed.create(b"value", &options).await.unwrap();
+        let contract: &dyn Indexed = &indexed;
+
+        assert_eq!(
+            contract.ids_by_index("tenant", "acme").await.unwrap(),
+            vec!["one".to_owned()]
+        );
+        assert_eq!(contract.by_index("tenant", "acme").await.unwrap(), vec![
+            b"value".to_vec()
+        ]);
+        assert_eq!(contract.delete_by_index("tenant", "acme").await.unwrap(), 1);
     }
 
     #[tokio::test]
