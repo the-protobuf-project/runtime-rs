@@ -34,4 +34,5 @@ http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+futures-util = { workspace = true }
 wiremock = { workspace = true }

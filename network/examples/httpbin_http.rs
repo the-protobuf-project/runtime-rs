@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1. Simple GET Request");
     let url = base_opts("/get", HashMap::new());
     let body = http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &url,
             Vec::new(),
@@ -77,7 +77,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     params.insert("lang".to_string(), "rust".to_string());
     let url = base_opts("/get", params);
     let body = http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &url,
             Vec::new(),
@@ -98,7 +98,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .into_bytes();
     let headers = headers_with_ua(&[("Content-Type", "application/json")]);
     let body = http
-        .request(HttpMethod::Post, &url, payload, &headers, 0, 0, None)
+        .request_sync(HttpMethod::Post, &url, payload, &headers, 0, 0, None)
         .await?;
     let json: serde_json::Value = serde_json::from_slice(&body)?;
     println!("   Success! Server saw JSON: {}\n", json["json"]);
@@ -108,7 +108,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("4. Automatic Retries (against an endpoint that always 500s)");
     let url = base_opts("/status/500", HashMap::new());
     match http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &url,
             Vec::new(),
@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     let start = std::time::Instant::now();
     match http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &url,
             Vec::new(),

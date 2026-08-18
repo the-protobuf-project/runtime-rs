@@ -48,7 +48,7 @@ pub fn build_full_url(url_options: &UrlOptions, path_index: i64) -> Result<Strin
 /// Converts a parsed [`url::Url`] into [`UrlOptions`]: scheme, host, and a single path
 /// (defaulting to `"/"`), with any query parameters copied into `params`. Lets generated clients
 /// connect using the standard library's URL-parsing output directly.
-pub fn url_options_from_std(u: &::url::Url) -> Result<UrlOptions> {
+pub fn url_from_std(u: &::url::Url) -> Result<UrlOptions> {
     let scheme: UrlScheme = u.scheme().parse()?;
     let host = u
         .host_str()
@@ -143,6 +143,32 @@ mod tests {
         assert!(matches!(
             build_full_url(&o, 5),
             Err(Error::PathIndexOutOfBounds { .. })
+        ));
+    }
+
+    #[test]
+    fn url_from_std_extracts_scheme_host_path_and_params() {
+        let parsed = ::url::Url::parse("https://api.example.com:8443/graphql?a=1&b=2").unwrap();
+        let opts = url_from_std(&parsed).unwrap();
+        assert_eq!(opts.scheme, UrlScheme::Https);
+        assert_eq!(opts.host, "api.example.com:8443");
+        assert_eq!(opts.paths, vec!["/graphql".to_string()]);
+        assert_eq!(opts.params.get("a").map(String::as_str), Some("1"));
+        assert_eq!(opts.params.get("b").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn url_from_std_defaults_empty_path_to_root() {
+        let parsed = ::url::Url::parse("http://example.com").unwrap();
+        assert_eq!(url_from_std(&parsed).unwrap().paths, vec!["/".to_string()]);
+    }
+
+    #[test]
+    fn url_from_std_rejects_a_non_network_scheme() {
+        let parsed = ::url::Url::parse("ftp://example.com/x").unwrap();
+        assert!(matches!(
+            url_from_std(&parsed),
+            Err(Error::InvalidScheme(ref s)) if s == "ftp"
         ));
     }
 

@@ -50,11 +50,11 @@ mod websocket;
 
 pub use error::{Error, Result};
 pub use graphql::{
-    BatchOp, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, FieldArg, GraphQLClient, Subscription,
-    build_graphql_args, struct_to_map,
+    BatchOp, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, FieldArg, GraphQLClient, GraphQLResult,
+    Subscription, build_graphql_args, scalars, struct_to_map,
 };
-pub use http::{HttpClient, HttpMethod};
+pub use http::{HttpClient, HttpMethod, HttpResponse};
 pub use network::{Client, Network};
 pub use options::{ClientType, ConnectionOptions, DEFAULT_TIMEOUT, Id, UrlOptions, UrlScheme};
-pub use url::{url_options_from_std, websocket_url};
+pub use url::{url_from_std, websocket_url};
 pub use websocket::{Message, WebSocketClient};
