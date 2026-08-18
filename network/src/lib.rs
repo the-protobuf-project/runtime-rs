@@ -1,11 +1,27 @@
-//! GraphQL, HTTP, and WebSocket clients, each constructed directly and configured with a shared
-//! [`ConnectionOptions`]:
+//! GraphQL, HTTP, and WebSocket clients behind a single factory ([`Network::new_connection`])
+//! with consistent connection options and optional connectivity verification.
+//!
+//! All three client types are created via [`Network::new_connection`] and configured with
+//! [`Network::with_opts`]:
 //!
 //! - [`GraphQLClient`]: queries, mutations, and subscriptions against a GraphQL endpoint.
 //! - [`HttpClient`]: GET, POST, PUT, PATCH, DELETE with retries and cancellation support.
 //! - [`WebSocketClient`]: full-duplex send/receive with optional auto-reconnect and keepalive.
 //!
-//! Each client is built with [`Default`] and configured with its own `connect` method:
+//! ```no_run
+//! # async fn example() -> network::Result<()> {
+//! use network::{ClientType, ConnectionOptions, Network};
+//!
+//! let mut net = Network::new_connection(ClientType::Http)?;
+//! net.with_opts(ConnectionOptions::default()).await?;
+//! let http = net.as_http_connection_type()?;
+//! # let _ = http;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! Each client is also usable on its own: build it with [`Default`] and call its `connect`
+//! method directly, skipping the [`Network`] wrapper.
 //!
 //! ```no_run
 //! # async fn example() -> network::Result<()> {
@@ -26,6 +42,7 @@
 mod error;
 pub mod graphql;
 mod http;
+mod network;
 mod options;
 mod transport;
 mod url;
@@ -33,9 +50,11 @@ mod websocket;
 
 pub use error::{Error, Result};
 pub use graphql::{
-    BatchOp, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, FieldArg, GraphQLClient, Subscription,
+    BatchOp, DEFAULT_GRAPHQL_CONNECTIVITY_QUERY, FieldArg, GraphQLClient, GraphQLResult,
+    Subscription, build_graphql_args, scalars, struct_to_map,
 };
-pub use http::{HttpClient, HttpMethod};
-pub use options::{ConnectionOptions, DEFAULT_TIMEOUT, Id, UrlOptions, UrlScheme};
-pub use url::{url_options_from_std, websocket_url};
+pub use http::{HttpClient, HttpMethod, HttpResponse};
+pub use network::{Client, Network};
+pub use options::{ClientType, ConnectionOptions, DEFAULT_TIMEOUT, Id, UrlOptions, UrlScheme};
+pub use url::{url_from_std, websocket_url};
 pub use websocket::{Message, WebSocketClient};

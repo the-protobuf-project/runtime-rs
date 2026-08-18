@@ -1,5 +1,7 @@
 mod request;
 
+pub use request::HttpResponse;
+
 use std::fmt;
 
 use crate::error::{Error, Result};

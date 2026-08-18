@@ -113,7 +113,7 @@ async fn request_retries_and_wraps_last_error() {
     http.connect(opts.clone()).await.unwrap();
 
     let err = http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &opts.url,
             Vec::new(),
@@ -161,7 +161,7 @@ async fn request_cancellation_stops_immediately() {
 
     let start = std::time::Instant::now();
     let err = http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &opts.url,
             Vec::new(),
@@ -194,7 +194,7 @@ async fn request_success_returns_body() {
     http.connect(opts.clone()).await.unwrap();
 
     let data = http
-        .request(
+        .request_sync(
             HttpMethod::Get,
             &opts.url,
             Vec::new(),
@@ -206,4 +206,122 @@ async fn request_success_returns_body() {
         .await
         .unwrap();
     assert_eq!(data, b"hello");
+}
+
+#[tokio::test]
+async fn request_returns_http_response_with_data_on_success() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/ok"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("payload"))
+        .mount(&server)
+        .await;
+
+    let mut http = HttpClient::default();
+    let mut opts = opts_for(&server, "/ok");
+    opts.skip_connectivity_check = true;
+    http.connect(opts.clone()).await.unwrap();
+
+    let resp = http
+        .request(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            0,
+            None,
+        )
+        .await;
+    assert_eq!(resp.data, b"payload");
+    assert!(resp.error.is_none());
+    assert_eq!(resp.into_result().unwrap(), b"payload");
+}
+
+#[tokio::test]
+async fn request_returns_http_response_with_error_on_failure() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/gone"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    let mut http = HttpClient::default();
+    let mut opts = opts_for(&server, "/gone");
+    opts.skip_connectivity_check = true;
+    http.connect(opts.clone()).await.unwrap();
+
+    let resp = http
+        .request(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            0,
+            None,
+        )
+        .await;
+    assert!(resp.data.is_empty());
+    // Go sets only one of Data/Error; the retry driver wraps the last attempt's failure.
+    assert!(matches!(resp.error, Some(Error::RetryExhausted { .. })));
+    assert!(resp.into_result().is_err());
+}
+
+#[tokio::test]
+async fn request_sync_matches_request_unpacked() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/same"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("same"))
+        .mount(&server)
+        .await;
+
+    let mut http = HttpClient::default();
+    let mut opts = opts_for(&server, "/same");
+    opts.skip_connectivity_check = true;
+    http.connect(opts.clone()).await.unwrap();
+
+    let via_request = http
+        .request(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            0,
+            None,
+        )
+        .await
+        .into_result()
+        .unwrap();
+    let via_sync = http
+        .request_sync(
+            HttpMethod::Get,
+            &opts.url,
+            Vec::new(),
+            &HashMap::new(),
+            0,
+            0,
+            None,
+        )
+        .await
+        .unwrap();
+    assert_eq!(via_request, via_sync);
+}
+
+#[test]
+fn graphql_scalar_aliases_name_the_expected_rust_types() {
+    use network::scalars;
+    let _: scalars::Boolean = true;
+    let _: scalars::Float = 1.5f64;
+    let _: scalars::Int = 32i32;
+    let _: scalars::String = "text".to_string();
+    let _: scalars::ID = network::Id::from("abc");
+    // GraphQLResult<T> is Result<T>: handing one to the other only compiles if they are the
+    // same type.
+    let aliased: network::GraphQLResult<u8> = Ok(1);
+    let as_result: network::Result<u8> = aliased;
+    assert!(as_result.is_ok());
 }

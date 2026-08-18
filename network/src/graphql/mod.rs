@@ -17,12 +17,43 @@ use crate::transport::{HeaderCarrier, new_pooled_client};
 use crate::url::build_full_url;
 
 pub use batch::BatchOp;
+pub use helpers::{build_graphql_args, struct_to_map};
 pub use named::FieldArg;
 pub use subscription::Subscription;
+
+/// GraphQL scalar type aliases: use `network::Boolean`, `network::Int`, `network::ID`, etc. in
+/// variables and selections without reaching for the underlying Rust primitive.
+///
+/// Go needs these because its GraphQL library defines its own scalar types that the client must
+/// use by name; here they alias the Rust primitives the JSON encoder already produces, so they
+/// are a naming convenience and a spelling of intent rather than a requirement.
+pub mod scalars {
+    /// `true` or `false`.
+    pub type Boolean = bool;
+    /// IEEE 754 double-precision.
+    pub type Float = f64;
+    /// A signed 32-bit integer, GraphQL's `Int`.
+    pub type Int = i32;
+    /// UTF-8 text. Aliases [`std::string::String`]; prefer the plain `String` unless you are
+    /// mirroring a GraphQL schema's spelling.
+    pub type String = std::string::String;
+    /// A unique identifier, serialized as a JSON string on the wire.
+    #[allow(clippy::upper_case_acronyms)]
+    pub type ID = crate::options::Id;
+}
 
 /// Sent to verify the GraphQL server is reachable during `connect`/`reconnect`. Override with
 /// [`ConnectionOptions::graphql_connectivity_query`] for strict servers that limit introspection.
 pub const DEFAULT_GRAPHQL_CONNECTIVITY_QUERY: &str = "query { __typename }";
+
+/// The result of a GraphQL operation.
+///
+/// Go declares this as a `struct { Response interface{}; Error error }` because a channel can
+/// carry only one value, so the payload and the error have to travel together in one untyped
+/// box. Rust's `Result` is that pair, typed: the operation methods are generic, so `Response`
+/// becomes the `T` the caller asked for instead of an `interface{}` they must assert on. This
+/// alias keeps Go's name available for code being ported across.
+pub type GraphQLResult<T> = Result<T>;
 
 /// A GraphQL API client. Create with [`Default`] and configure with [`GraphQLClient::connect`].
 /// It embeds [`ConnectionOptions`] (URL, timeout, headers, skip-connectivity-check, GraphQL

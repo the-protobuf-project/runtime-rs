@@ -10,15 +10,99 @@ use crate::url::build_full_url;
 
 const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// The result of an HTTP request: the raw body bytes and an error (from a transport failure or a
+/// non-2xx status).
+///
+/// Go returns this over a channel, because a channel carries one value and the body and the error
+/// have to travel together. Here it is what [`crate::HttpClient::request`] resolves to; most callers want
+/// [`crate::HttpClient::request_sync`], which unpacks it into a `Result`.
+#[derive(Debug, Default)]
+pub struct HttpResponse {
+    /// The response body. Empty when `error` is set.
+    pub data: Vec<u8>,
+    /// The failure, if the request did not succeed.
+    pub error: Option<Error>,
+}
+
+impl HttpResponse {
+    /// Unpacks into a `Result`, discarding the empty body on the error path.
+    pub fn into_result(self) -> Result<Vec<u8>> {
+        match self.error {
+            Some(error) => Err(error),
+            None => Ok(self.data),
+        }
+    }
+}
+
 impl super::HttpClient {
-    /// Performs an HTTP request with optional retries. Builds the URL from `url_options` and
-    /// `path_index`, sends the request, and retries up to `max_retries` times with
+    /// Performs an HTTP request with optional retries, resolving to an [`HttpResponse`]. Builds
+    /// the URL from `url_options` and `path_index`, sends the request, and retries up to
+    /// `max_retries` times with
     /// [`ConnectionOptions::retry_delay`](crate::ConnectionOptions::retry_delay) between attempts.
     /// Each attempt gets its own fresh timeout window (mirroring a per-attempt deadline rather than
     /// one deadline for the whole retry sequence). `cancel`, when provided, aborts the request and
     /// any pending retries.
     #[allow(clippy::too_many_arguments)] // mirrors runtime-go/network's HTTPClient.Request signature
     pub async fn request(
+        &self,
+        method: HttpMethod,
+        url_options: &UrlOptions,
+        body: Vec<u8>,
+        headers: &HashMap<String, String>,
+        path_index: i64,
+        max_retries: usize,
+        cancel: Option<&CancellationToken>,
+    ) -> HttpResponse {
+        match self
+            .exec_with_retries(
+                method,
+                url_options,
+                body,
+                headers,
+                path_index,
+                max_retries,
+                cancel,
+            )
+            .await
+        {
+            Ok(data) => HttpResponse { data, error: None },
+            Err(error) => HttpResponse {
+                data: Vec::new(),
+                error: Some(error),
+            },
+        }
+    }
+
+    /// [`crate::HttpClient::request`] with the [`HttpResponse`] already unpacked into a `Result`. This is
+    /// the form most call sites want.
+    #[allow(clippy::too_many_arguments)] // mirrors runtime-go/network's HTTPClient.RequestSync signature
+    pub async fn request_sync(
+        &self,
+        method: HttpMethod,
+        url_options: &UrlOptions,
+        body: Vec<u8>,
+        headers: &HashMap<String, String>,
+        path_index: i64,
+        max_retries: usize,
+        cancel: Option<&CancellationToken>,
+    ) -> Result<Vec<u8>> {
+        self.request(
+            method,
+            url_options,
+            body,
+            headers,
+            path_index,
+            max_retries,
+            cancel,
+        )
+        .await
+        .into_result()
+    }
+
+    /// Drives the retry loop shared by [`crate::HttpClient::request`] and
+    /// [`crate::HttpClient::request_sync`].
+    #[allow(clippy::too_many_arguments)] // mirrors runtime-go/network's HTTPClient.Request signature
+    async fn exec_with_retries(
         &self,
         method: HttpMethod,
         url_options: &UrlOptions,

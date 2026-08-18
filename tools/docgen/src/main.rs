@@ -41,7 +41,7 @@ const CI_WORKFLOW: &str = "ci.yaml";
 
 /// One crate in the workspace.
 struct Crate {
-    /// Directory relative to the workspace root, e.g. `network-graphql`.
+    /// Directory relative to the workspace root, e.g. `network`.
     rel: String,
     /// Published package name, e.g. `tpp-network`.
     package: String,

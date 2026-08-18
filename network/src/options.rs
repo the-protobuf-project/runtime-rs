@@ -6,6 +6,45 @@ use std::time::Duration;
 
 use crate::error::Error;
 
+/// Identifies which kind of network client [`crate::Network::new_connection`] creates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ClientType {
+    /// GraphQL client for queries, mutations, and subscriptions.
+    #[default]
+    GraphQL,
+    /// HTTP client for REST-style requests.
+    Http,
+    /// WebSocket client for full-duplex messaging.
+    WebSocket,
+}
+
+impl fmt::Display for ClientType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::GraphQL => "graphql",
+            Self::Http => "http",
+            Self::WebSocket => "websocket",
+        })
+    }
+}
+
+impl FromStr for ClientType {
+    type Err = Error;
+
+    /// Parses the wire names Go uses for its `ClientType` constants. This is where an
+    /// unsupported client type is rejected: Go's `NewConnection` takes a bare string and errors
+    /// on anything outside the three constants, whereas [`ClientType`] is a closed enum, so the
+    /// same failure surfaces one step earlier — here — rather than inside `new_connection`.
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "graphql" => Ok(Self::GraphQL),
+            "http" => Ok(Self::Http),
+            "websocket" => Ok(Self::WebSocket),
+            other => Err(Error::UnsupportedClientType(other.to_string())),
+        }
+    }
+}
+
 /// The protocol part of a URL.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum UrlScheme {
