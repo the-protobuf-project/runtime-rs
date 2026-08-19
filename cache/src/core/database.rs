@@ -5,11 +5,12 @@ use std::{sync::Arc, time::Duration};
 use futures::future::BoxFuture;
 use tokio::sync::{Mutex, watch};
 
+use crate::strategies::document::default_new_id;
 use crate::strategies::{AsideImpl, DocumentImpl, IndexedImpl, VolatileImpl};
 use crate::strategies::{flight::Flight, refresher::Refresher};
 use crate::{CacheError, Result};
 
-use super::{Aside, Capabilities, Document, Driver, Indexed, Keyspace, Loader, Volatile};
+use super::{Aside, Capabilities, Document, Driver, Indexed, Keyspace, Loader, NewId, Volatile};
 
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
@@ -44,6 +45,11 @@ pub struct DatabaseSpec {
     pub concurrency: usize,
     /// Whether an implicit permanent write is rejected.
     pub require_ttl: bool,
+    /// Generates IDs for Document and Indexed creates that supply none.
+    ///
+    /// One instance is shared by both strategies. `None` uses UUID v4, the
+    /// existing Rust default.
+    pub new_id: Option<NewId>,
     /// Cleanup for resources derived by this database selection.
     pub release: Option<Release>,
 }
@@ -59,6 +65,7 @@ impl Default for DatabaseSpec {
             default_stale: Duration::ZERO,
             concurrency: 0,
             require_ttl: false,
+            new_id: None,
             release: None,
         }
     }
@@ -195,15 +202,20 @@ pub fn build_database(
     };
     let keyspace = Keyspace::new(&spec.prefix, &spec.namespace, spec.database, spec.embed_db);
     let sets = capabilities.sets();
+    let new_id = match spec.new_id {
+        Some(new_id) => new_id,
+        None => default_new_id(),
+    };
     let flight = Arc::new(Flight::new(FLIGHT_BUDGET, FLIGHT_TIMEOUT));
     let refresher = Arc::new(Refresher::new(REFRESH_BUDGET, LOAD_TIMEOUT));
 
-    let document: Arc<dyn Document> = Arc::new(DocumentImpl::new(
+    let document: Arc<dyn Document> = Arc::new(DocumentImpl::new_with_id(
         driver.clone(),
         sets.clone(),
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
+        new_id.clone(),
     ));
     let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new(
         driver.clone(),
@@ -211,13 +223,14 @@ pub fn build_database(
         spec.default_ttl,
         spec.require_ttl,
     ));
-    let indexed: Arc<dyn Indexed> = Arc::new(IndexedImpl::new(
+    let indexed: Arc<dyn Indexed> = Arc::new(IndexedImpl::new_with_id(
         driver.clone(),
         sets,
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
         concurrency,
+        new_id,
     ));
 
     DB {
@@ -313,6 +326,69 @@ mod tests {
             db.indexed.ids_by_index("tenant", "acme").await,
             Err(CacheError::Unsupported)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_database_build_shares_custom_id_generator_across_strategies() {
+        let sequence = Arc::new(AtomicUsize::new(1));
+        let next = sequence.clone();
+        let db = build_database(
+            Arc::new(MemoryDriver::new()),
+            Capabilities::new(),
+            DatabaseSpec {
+                new_id: Some(Arc::new(move || {
+                    format!("generated-{}", next.fetch_add(1, Ordering::SeqCst))
+                })),
+                ..DatabaseSpec::default()
+            },
+        );
+
+        let document_id = db
+            .document
+            .create(b"document", &Options::default())
+            .await
+            .unwrap();
+        let indexed_id = db
+            .indexed
+            .create(b"indexed", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(document_id, "generated-1");
+        assert_eq!(indexed_id, "generated-2");
+        assert_eq!(sequence.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_database_build_preserves_caller_selected_id_without_generation() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let generated = calls.clone();
+        let db = build_database(
+            Arc::new(MemoryDriver::new()),
+            Capabilities::new(),
+            DatabaseSpec {
+                new_id: Some(Arc::new(move || {
+                    generated.fetch_add(1, Ordering::SeqCst);
+                    "unused".to_owned()
+                })),
+                ..DatabaseSpec::default()
+            },
+        );
+
+        let document_id = db
+            .document
+            .create(b"document", &Options::default().with_id("document-id"))
+            .await
+            .unwrap();
+        let indexed_id = db
+            .indexed
+            .create(b"indexed", &Options::default().with_id("indexed-id"))
+            .await
+            .unwrap();
+
+        assert_eq!(document_id, "document-id");
+        assert_eq!(indexed_id, "indexed-id");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

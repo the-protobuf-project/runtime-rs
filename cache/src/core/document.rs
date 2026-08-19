@@ -1,8 +1,15 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use crate::Result;
 
 use super::Options;
+
+/// Generates an ID for Document or Indexed creation when none is supplied.
+///
+/// A database shares one generator across both strategies, matching the Go
+/// core builder. Implementations must be thread-safe because creates may run
+/// concurrently.
+pub type NewId = Arc<dyn Fn() -> String + Send + Sync + 'static>;
 
 /// Document is ephemeral storage for whole values, enumerable
 #[async_trait::async_trait]

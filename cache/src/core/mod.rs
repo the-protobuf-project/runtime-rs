@@ -16,7 +16,7 @@ pub mod volatile;
 pub use aside::{Aside, Loader};
 pub use capabilities::Capabilities;
 pub use database::{DB, DatabaseSpec, Release, build_database};
-pub use document::Document;
+pub use document::{Document, NewId};
 pub use driver::{Driver, ErrMiss};
 pub use indexed::Indexed;
 pub use keyspace::{IDGenerator, Keyspace, check_namespace};
