@@ -23,6 +23,7 @@ bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
+redis = { version = "1.6", features = ["tokio-comp", "connection-manager"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
