@@ -16,6 +16,16 @@ pub enum CacheError {
     #[error("cache: too many concurrent loads")]
     Overloaded,
 
+    /// A database drop removed earlier batches before a later delete failed.
+    #[error("cache: database drop failed after deleting {deleted} keys: {source}")]
+    PartialDelete {
+        /// Number of unique keys successfully deleted before the failure.
+        deleted: usize,
+        /// Original Driver failure from the first unsuccessful batch.
+        #[source]
+        source: Box<CacheError>,
+    },
+
     #[error("cache: {0}")]
     Internal(String),
 }

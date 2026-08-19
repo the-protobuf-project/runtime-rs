@@ -5,11 +5,13 @@ pub mod capabilities;
 pub mod database;
 pub mod document;
 pub mod driver;
+mod drop;
 pub mod indexed;
 pub mod keyspace;
 pub mod memory_driver;
 pub mod options;
 pub mod options_builder;
+pub mod scanner;
 pub mod sets;
 pub mod volatile;
 
@@ -18,10 +20,12 @@ pub use capabilities::Capabilities;
 pub use database::{DB, DatabaseSpec, Release, build_database};
 pub use document::{Document, NewId};
 pub use driver::{Driver, ErrMiss};
+pub use drop::drop_database;
 pub use indexed::Indexed;
 pub use keyspace::{IDGenerator, Keyspace, check_namespace};
 pub use memory_driver::MemoryDriver;
 pub use options::Options;
+pub use scanner::Scanner;
 pub use sets::{MemorySets, Sets};
 pub use volatile::Volatile;
 
@@ -53,7 +57,8 @@ pub trait Provider: Send + Sync {
     /// Deletes keys belonging to a named database and returns the count.
     ///
     /// **Cost**: Normally a non-atomic keyspace walk. Backends without a cursor
-    /// return `Unsupported`. **Side effects**: Deletes matching cache keys.
+    /// return `Unsupported`. **Side effects**: Deletes matching cache keys. If
+    /// a later batch fails, `PartialDelete` reports the earlier deletion count.
     async fn drop_database(&self, name: &str) -> Result<usize>;
 
     /// Returns the stable backend name used in diagnostics.
