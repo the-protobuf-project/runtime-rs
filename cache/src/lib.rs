@@ -1,6 +1,7 @@
 //! Cache module providing abstraction over cache backends (Redis, Memcached, etc.)
 
 pub mod core;
+pub mod drivers;
 pub mod error;
 pub mod strategies;
 
