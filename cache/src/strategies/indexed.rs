@@ -10,10 +10,12 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Indexed, Keyspace, Options, Sets},
+    core::{Document, Driver, Indexed, Keyspace, NewId, Options, Sets},
 };
 
 use super::DocumentImpl;
+#[cfg(test)]
+use super::document::default_new_id;
 
 /// Document storage that records caller-selected secondary memberships.
 ///
@@ -31,7 +33,8 @@ pub struct IndexedImpl {
 }
 
 impl IndexedImpl {
-    /// Wires Indexed without performing backend I/O.
+    /// Wires Indexed with the default generator for focused strategy tests.
+    #[cfg(test)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
@@ -40,12 +43,34 @@ impl IndexedImpl {
         require_ttl: bool,
         concurrency: usize,
     ) -> Self {
+        Self::new_with_id(
+            driver,
+            sets,
+            keyspace,
+            default_ttl,
+            require_ttl,
+            concurrency,
+            default_new_id(),
+        )
+    }
+
+    /// Wires Indexed with the database's shared ID generator.
+    pub(crate) fn new_with_id(
+        driver: Arc<dyn Driver>,
+        sets: Option<Arc<dyn Sets>>,
+        keyspace: Keyspace,
+        default_ttl: Duration,
+        require_ttl: bool,
+        concurrency: usize,
+        new_id: NewId,
+    ) -> Self {
         let document = DocumentImpl::new_indexed(
             driver.clone(),
             sets.clone(),
             keyspace.clone(),
             default_ttl,
             require_ttl,
+            new_id,
         );
         Self {
             document,

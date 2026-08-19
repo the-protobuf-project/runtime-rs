@@ -4,7 +4,7 @@ pub mod core;
 pub mod error;
 pub mod strategies;
 
-pub use core::{DB, DatabaseSpec, Provider, Release, build_database};
+pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database};
 pub use error::{CacheError, Result};
 
 #[derive(Debug)]

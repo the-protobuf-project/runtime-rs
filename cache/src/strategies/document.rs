@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Keyspace, Options, Sets},
+    core::{Document, Driver, Keyspace, NewId, Options, Sets},
 };
 
 /// Stores whole encoded values, with optional enumeration through server Sets.
@@ -38,6 +38,7 @@ pub struct DocumentImpl {
     layout: DocumentLayout,
     default_ttl: Duration,
     require_ttl: bool,
+    new_id: NewId,
 }
 
 #[derive(Clone, Copy)]
@@ -58,12 +59,32 @@ impl DocumentImpl {
         default_ttl: Duration,
         require_ttl: bool,
     ) -> Self {
+        Self::new_with_id(
+            driver,
+            sets,
+            keyspace,
+            default_ttl,
+            require_ttl,
+            default_new_id(),
+        )
+    }
+
+    /// Wires a Document with the database's shared ID generator.
+    pub(crate) fn new_with_id(
+        driver: Arc<dyn Driver>,
+        sets: Option<Arc<dyn Sets>>,
+        keyspace: Keyspace,
+        default_ttl: Duration,
+        require_ttl: bool,
+        new_id: NewId,
+    ) -> Self {
         Self::with_layout(
             driver,
             sets,
             keyspace,
             default_ttl,
             require_ttl,
+            new_id,
             DocumentLayout::Document,
         )
     }
@@ -75,6 +96,7 @@ impl DocumentImpl {
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
+        new_id: NewId,
     ) -> Self {
         Self::with_layout(
             driver,
@@ -82,6 +104,7 @@ impl DocumentImpl {
             keyspace,
             default_ttl,
             require_ttl,
+            new_id,
             DocumentLayout::Indexed,
         )
     }
@@ -92,6 +115,7 @@ impl DocumentImpl {
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
+        new_id: NewId,
         layout: DocumentLayout,
     ) -> Self {
         Self {
@@ -101,6 +125,7 @@ impl DocumentImpl {
             layout,
             default_ttl,
             require_ttl,
+            new_id,
         }
     }
 
@@ -129,7 +154,7 @@ impl DocumentImpl {
     pub(crate) fn resolve_id(&self, opts: &Options) -> String {
         match &opts.id {
             Some(id) => id.clone(),
-            None => Uuid::new_v4().to_string(),
+            None => (self.new_id)(),
         }
     }
 
@@ -146,6 +171,11 @@ impl DocumentImpl {
             DocumentLayout::Indexed => self.keyspace.idx_index(),
         }
     }
+}
+
+/// Returns the existing Rust default while allowing DB construction to share it.
+pub(crate) fn default_new_id() -> NewId {
+    Arc::new(|| Uuid::new_v4().to_string())
 }
 
 #[async_trait::async_trait]
