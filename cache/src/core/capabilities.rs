@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::Sets;
+use super::{Scanner, Sets};
 
 /// Optional behavior a backend can provide beyond the required Driver trait.
 ///
@@ -21,6 +21,7 @@ use super::Sets;
 #[derive(Clone, Default)]
 pub struct Capabilities {
     sets: Option<Arc<dyn Sets>>,
+    scanner: Option<Arc<dyn Scanner>>,
 }
 
 impl Capabilities {
@@ -48,6 +49,23 @@ impl Capabilities {
     pub fn sets(&self) -> Option<Arc<dyn Sets>> {
         self.sets.clone()
     }
+
+    /// Declares cursor-based keyspace pattern scanning support.
+    ///
+    /// **Cost**: O(1); stores one reference-counted capability handle.
+    /// **Side effects**: Replaces any previously declared Scanner capability.
+    pub fn with_scanner(mut self, scanner: Arc<dyn Scanner>) -> Self {
+        self.scanner = Some(scanner);
+        self
+    }
+
+    /// Returns the declared Scanner capability, if the backend has one.
+    ///
+    /// **Cost**: O(1); cloning increments an atomic reference count.
+    /// **Side effects**: None on the backend.
+    pub fn scanner(&self) -> Option<Arc<dyn Scanner>> {
+        self.scanner.clone()
+    }
 }
 
 #[cfg(test)]
@@ -55,9 +73,19 @@ mod tests {
     use super::*;
     use crate::core::MemorySets;
 
+    struct EmptyScanner;
+
+    #[async_trait::async_trait]
+    impl Scanner for EmptyScanner {
+        async fn scan(&self, _pattern: &str) -> crate::Result<Vec<String>> {
+            Ok(Vec::new())
+        }
+    }
+
     #[test]
     fn test_capabilities_new_has_no_optional_capabilities() {
         assert!(Capabilities::new().sets().is_none());
+        assert!(Capabilities::new().scanner().is_none());
     }
 
     #[test]
@@ -65,5 +93,12 @@ mod tests {
         let capabilities = Capabilities::new().with_sets(Arc::new(MemorySets::new()));
 
         assert!(capabilities.sets().is_some());
+    }
+
+    #[test]
+    fn test_capabilities_with_scanner_exposes_declared_capability() {
+        let capabilities = Capabilities::new().with_scanner(Arc::new(EmptyScanner));
+
+        assert!(capabilities.scanner().is_some());
     }
 }
