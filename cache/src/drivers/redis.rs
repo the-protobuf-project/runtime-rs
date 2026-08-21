@@ -22,7 +22,7 @@ use redis::{
 use tokio::sync::RwLock;
 
 use crate::{
-    CacheError, Config, Result,
+    CacheError, Config, DialTimeout, Result,
     core::{
         Capabilities, DB, DatabaseSpec, Driver, Keyspace, Provider, Release, Scanner, Sets,
         build_database, check_known, check_namespace, drop_database,
@@ -62,8 +62,8 @@ pub struct RedisConfig {
     pub password: String,
     /// Numeric Redis database selected when each connection is established.
     pub database: usize,
-    /// Bound for initial and reconnect attempts; zero uses redis-rs defaults.
-    pub connection_timeout: Duration,
+    /// Policy for bounding initial and reconnect connection attempts.
+    pub dial_timeout: DialTimeout,
 }
 
 impl Clone for RedisConfig {
@@ -73,7 +73,7 @@ impl Clone for RedisConfig {
             username: self.username.clone(),
             password: self.password.clone(),
             database: self.database,
-            connection_timeout: self.connection_timeout,
+            dial_timeout: self.dial_timeout,
         }
     }
 }
@@ -85,7 +85,7 @@ impl Default for RedisConfig {
             username: String::new(),
             password: String::new(),
             database: 0,
-            connection_timeout: Duration::ZERO,
+            dial_timeout: DialTimeout::Default,
         }
     }
 }
@@ -203,12 +203,7 @@ impl RedisClient {
             .set_redis_settings(redis_settings);
         let redis_client = redis::Client::open(connection_info)
             .map_err(|error| internal("configure connection", error))?;
-        let timeout = if config.connection_timeout.is_zero() {
-            None
-        } else {
-            Some(config.connection_timeout)
-        };
-        let manager_config = ConnectionManagerConfig::new().set_connection_timeout(timeout);
+        let manager_config = connection_manager_config(config.dial_timeout)?;
         let manager = ConnectionManager::new_with_config(redis_client, manager_config)
             .await
             .map_err(|error| internal("connect", error))?;
@@ -509,7 +504,11 @@ impl RedisPrimitives {
         }
         let response = self.command("set", command).await?;
         match response {
-            Value::Nil => Ok(false),
+            Value::Nil if condition.is_some() => Ok(false),
+            Value::Nil => Err(internal(
+                "set reply",
+                "unexpected nil response from unconditional SET",
+            )),
             value => {
                 let _: String = decode("set reply", value)?;
                 Ok(true)
@@ -727,6 +726,23 @@ fn parse_address(address: &str) -> Result<(String, u16)> {
     Ok((host.to_owned(), port))
 }
 
+/// Resolves the public timeout policy into redis-rs manager configuration.
+///
+/// `Default` deliberately avoids calling the setter, preserving future redis-rs
+/// default changes. `Disabled` is the only branch that installs `None`.
+fn connection_manager_config(timeout: DialTimeout) -> Result<ConnectionManagerConfig> {
+    match timeout {
+        DialTimeout::Default => Ok(ConnectionManagerConfig::new()),
+        DialTimeout::Disabled => Ok(ConnectionManagerConfig::new().set_connection_timeout(None)),
+        DialTimeout::After(duration) if duration.is_zero() => Err(CacheError::Internal(
+            "redis: dial timeout must be positive; use Default or Disabled".to_owned(),
+        )),
+        DialTimeout::After(duration) => {
+            Ok(ConnectionManagerConfig::new().set_connection_timeout(Some(duration)))
+        }
+    }
+}
+
 /// Converts a Rust duration to Redis milliseconds without shortening a lease.
 ///
 /// Any positive fractional millisecond rounds up. Rounding down could turn a
@@ -889,7 +905,30 @@ mod tests {
 
         assert!(config.address.is_empty());
         assert_eq!(config.database, 0);
-        assert!(config.connection_timeout.is_zero());
+        assert_eq!(config.dial_timeout, DialTimeout::Default);
+    }
+
+    #[test]
+    fn test_redis_dial_timeout_resolves_all_explicit_policies() {
+        let default = connection_manager_config(DialTimeout::Default).unwrap();
+        let disabled = connection_manager_config(DialTimeout::Disabled).unwrap();
+        let custom = connection_manager_config(DialTimeout::After(Duration::from_secs(3))).unwrap();
+
+        assert_eq!(
+            default.connection_timeout(),
+            ConnectionManagerConfig::new().connection_timeout()
+        );
+        assert_eq!(disabled.connection_timeout(), None);
+        assert_eq!(custom.connection_timeout(), Some(Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn test_redis_dial_timeout_rejects_zero_after_duration() {
+        let result = connection_manager_config(DialTimeout::After(Duration::ZERO));
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message.contains("Default or Disabled"))
+        );
     }
 
     #[tokio::test]
@@ -964,6 +1003,17 @@ mod tests {
             packed(add),
             packed(replace)
         ]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_driver_unconditional_set_rejects_nil_reply() {
+        let (driver, _) = primitives([Ok(Value::Nil)]);
+
+        let result = driver.set("key", b"value", Duration::ZERO).await;
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message.contains("unconditional SET"))
+        );
     }
 
     #[tokio::test]
