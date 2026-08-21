@@ -1,11 +1,13 @@
 //! Cache module providing abstraction over cache backends (Redis, Memcached, etc.)
 
 pub mod core;
+mod dial_timeout;
 pub mod drivers;
 pub mod error;
 pub mod strategies;
 
 pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database};
+pub use dial_timeout::DialTimeout;
 pub use error::{CacheError, Result};
 
 #[derive(Debug)]
