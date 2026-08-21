@@ -1,13 +1,17 @@
-//! Low-level storage driver interface
+//! Minimal, backend-neutral storage primitives.
 //!
-//! A Driver is the minimal contract a backend must provide.
-//! Each method is a single round-trip against one key, with no strategy.
+//! Drivers translate these operations into backend commands. Cross-key policy,
+//! key qualification, TTL defaults, serialization, and indexing belong to the
+//! strategy layer.
 
 use crate::Result;
 use std::time::Duration;
 
-/// ErrMiss indicates a key was not found in storage
-/// (Driver's sentinel, different from cache::ErrNotFound)
+/// Legacy marker for a low-level storage miss.
+///
+/// Current [`Driver`] implementations report misses as
+/// [`crate::CacheError::NotFound`]. This public marker remains for source
+/// compatibility and should not be returned by new drivers.
 #[derive(Debug)]
 pub struct ErrMiss;
 
@@ -19,38 +23,54 @@ impl std::fmt::Display for ErrMiss {
 
 impl std::error::Error for ErrMiss {}
 
-/// Driver is the storage abstraction a backend must provide.
+/// Atomic, single-command storage operations required by cache strategies.
 ///
-/// Every method is a single round-trip. Anything requiring two keys or
-/// cross-key decisions is a strategy, not a driver method.
-///
-/// All methods must be safe for concurrent use by many tasks.
+/// Each asynchronous method represents one logical backend round trip and must
+/// be safe for concurrent calls. Optional functionality such as Sets, scanning,
+/// bulk access, and TTL inspection is exposed through separate capability
+/// traits, keeping limited backends useful without silent emulation.
 #[async_trait::async_trait]
 pub trait Driver: Send + Sync {
-    /// Name identifies the backend: "redis", "memcache", etc.
+    /// Returns the stable backend identity used for diagnostics.
+    ///
+    /// This is a local lookup with no I/O or side effects.
     fn name(&self) -> &str;
 
-    /// Get returns the stored bytes, or Err(ErrMiss)
+    /// Returns the stored bytes, or `NotFound` for a missing/expired key.
+    ///
+    /// **Cost**: One read round trip. **Side effects**: None.
     async fn get(&self, key: &str) -> Result<Vec<u8>>;
 
-    /// Set writes unconditionally. ttl of zero means no expiry.
+    /// Writes unconditionally, replacing both value and lease.
+    ///
+    /// A zero TTL means no expiry. **Cost**: One write round trip.
     async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<()>;
 
-    /// Add writes only if the key is absent.
-    /// Returns Ok(true) if written, Ok(false) if key already existed.
+    /// Writes only when no live value exists.
+    ///
+    /// Returns `true` when written and `false` on a conditional conflict. A
+    /// zero TTL means no expiry. **Cost**: One conditional-write round trip.
     async fn add(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool>;
 
-    /// Replace writes only if the key exists.
-    /// Returns Ok(true) if written, Ok(false) if key didn't exist.
+    /// Replaces only an existing live value and its lease.
+    ///
+    /// Returns `true` when written and `false` when absent. A zero TTL means no
+    /// expiry. **Cost**: One conditional-write round trip.
     async fn replace(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool>;
 
-    /// Delete removes keys. Removing absent keys is not an error.
+    /// Removes all supplied keys; absent keys are harmless.
+    ///
+    /// **Cost**: One batched delete round trip. Empty input is permitted.
     async fn delete(&self, keys: &[&str]) -> Result<()>;
 
-    /// Exists reports whether a key is live (without fetching its value).
-    /// Important for sweeping indexes.
+    /// Reports whether a live key exists without returning its value.
+    ///
+    /// **Cost**: One read round trip. Strategies use this to sweep indexes.
     async fn exists(&self, key: &str) -> Result<bool>;
 
-    /// Touch extends a lease without rewriting the value.
+    /// Replaces the lease without transferring or rewriting the value.
+    ///
+    /// A zero TTL makes a live entry permanent. Missing/expired entries return
+    /// `NotFound`. **Cost**: One write round trip.
     async fn touch(&self, key: &str, ttl: Duration) -> Result<()>;
 }

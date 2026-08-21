@@ -20,7 +20,9 @@ use super::{Scanner, Sets};
 /// runtime assertions, but operation paths perform no repeated discovery.
 #[derive(Clone, Default)]
 pub struct Capabilities {
+    /// Server-side unordered collections for enumeration and secondary indexes.
     sets: Option<Arc<dyn Sets>>,
+    /// Cursor-based whole-keyspace traversal for administrative deletion.
     scanner: Option<Arc<dyn Scanner>>,
 }
 
