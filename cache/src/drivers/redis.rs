@@ -1,4 +1,15 @@
-//! Standalone Redis client and cache primitives.
+//! Standalone Redis client, Provider, and low-level cache primitives.
+//!
+//! The module owns transport concerns only: connection setup, reconnecting
+//! command execution, native Redis database selection, and direct command
+//! mappings. Core strategies continue to own key layout, TTL policy, value
+//! framing, indexing decisions, and load coordination.
+//!
+//! One [`RedisClient`](crate::drivers::redis::RedisClient) uses a multiplexed
+//! connection manager. Named databases share that manager and separate keys with
+//! [`Keyspace`](crate::core::Keyspace); selecting a different native Redis
+//! index derives another client whose lifetime belongs to the returned
+//! [`DB`](crate::core::DB).
 
 use std::{collections::HashSet, fmt::Display, sync::Arc, time::Duration};
 
@@ -11,16 +22,19 @@ use redis::{
 use tokio::sync::RwLock;
 
 use crate::{
-    CacheError, Result,
-    core::{Driver, Scanner, Sets},
+    CacheError, Config, Result,
+    core::{
+        Capabilities, DB, DatabaseSpec, Driver, Keyspace, Provider, Release, Scanner, Sets,
+        build_database, check_known, check_namespace, drop_database,
+    },
 };
 
 /// Address used when [`RedisConfig::address`] is empty.
 pub const DEFAULT_REDIS_ADDRESS: &str = "localhost:6379";
 
-#[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+/// Cursor count hint shared by Redis keyspace scans.
 const SCAN_BATCH: usize = 256;
-#[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+/// Stable backend identity exposed through Driver and Provider metadata.
 const BACKEND: &str = "redis";
 
 /// Connection settings for one standalone Redis client.
@@ -29,6 +43,16 @@ const BACKEND: &str = "redis";
 /// than a separate pool. Cloned command handles can run concurrently without a
 /// global operation lock. Cluster/ring adoption is intentionally outside this
 /// first backend boundary.
+///
+/// **Use case**: Configure an application-owned connection to one standalone
+/// Redis server. Explicit addresses are recommended in deployed environments;
+/// an empty address selects [`DEFAULT_REDIS_ADDRESS`] for local convenience.
+///
+/// **Scalability**: Commands multiplex over one reconnecting connection. There
+/// is no configurable connection pool in this initial implementation.
+///
+/// **Security**: The type deliberately does not implement `Debug`, preventing
+/// accidental password disclosure through routine configuration logging.
 pub struct RedisConfig {
     /// Redis address in `host:port` or `[ipv6]:port` form.
     pub address: String,
@@ -66,19 +90,42 @@ impl Default for RedisConfig {
     }
 }
 
+/// Internal seam for executing an already-constructed Redis command.
+///
+/// Production uses [`ManagedExecutor`]. Tests substitute a scripted executor
+/// so exact RESP commands and failures can be checked without a Redis service.
+/// The seam contains no cache semantics and must not manufacture misses.
 #[async_trait]
 trait CommandExecutor: Send + Sync {
+    /// Executes one command and returns its untyped Redis protocol value.
+    ///
+    /// **Cost**: Exactly one Redis round trip.
     async fn execute(&self, command: Cmd) -> RedisResult<Value>;
+
+    /// Stops future command admission and releases the owned transport handle.
+    ///
+    /// In-flight command snapshots may still complete. Closing is local and
+    /// idempotent; it does not send a Redis command.
     async fn close(&self);
 }
 
+/// Lifecycle wrapper around redis-rs's reconnecting connection manager.
+///
+/// The optional manager distinguishes an open client from a closed one. The
+/// asynchronous lock protects only that state transition; it must never remain
+/// held during network I/O or all supposedly multiplexed commands would become
+/// serialized.
 struct ManagedExecutor {
+    /// Present while the client admits commands; removed exactly once on close.
     manager: RwLock<Option<ConnectionManager>>,
 }
 
 #[async_trait]
 impl CommandExecutor for ManagedExecutor {
     async fn execute(&self, command: Cmd) -> RedisResult<Value> {
+        // Clone while holding the read lock, then release the guard before I/O.
+        // ConnectionManager clones address the same multiplexed connection, so
+        // an in-flight snapshot remains valid if close races after this point.
         let mut manager = match self.manager.read().await.as_ref() {
             Some(manager) => manager.clone(),
             None => {
@@ -92,6 +139,8 @@ impl CommandExecutor for ManagedExecutor {
     }
 
     async fn close(&self) {
+        // `take` makes repeated close calls harmless and rejects later execute
+        // calls without affecting snapshots already running.
         self.manager.write().await.take();
     }
 }
@@ -102,9 +151,20 @@ impl CommandExecutor for ManagedExecutor {
 /// reachability failures surface during startup rather than the first cache
 /// request. Cache DBs built from this client share its reconnecting manager but
 /// do not close it; the caller remains responsible for [`RedisClient::close`].
+///
+/// **Trade-offs**: Multiplexing is lightweight for ordinary cache commands but
+/// is not intended for blocking Redis operations. Selecting another native
+/// index requires another client because Redis binds an index per connection.
+///
+/// **Scalability**: Clones of its internal executor can issue concurrent
+/// commands without a global I/O lock. Reconnection is handled by redis-rs.
+///
+/// **Best for**: A long-lived application client shared by one or more cache
+/// Providers and DBs on a standalone Redis server.
 pub struct RedisClient {
-    #[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+    /// Normalized settings retained so another native index can be derived.
     config: RedisConfig,
+    /// Shared transport and close state used by every primitive adapter.
     executor: Arc<dyn CommandExecutor>,
 }
 
@@ -114,6 +174,9 @@ impl RedisClient {
     /// **Cost**: Connection/authentication plus one PING round trip.
     /// **Concurrency**: The returned handle supports concurrent commands.
     /// **Side effects**: Opens a reconnecting network connection.
+    /// **When to use**: Once during application startup, before constructing a
+    /// [`RedisProvider`]. Connection, authentication, PING, and invalid address
+    /// failures are returned without exposing credentials.
     pub async fn connect(mut config: RedisConfig) -> Result<Self> {
         let address = if config.address.is_empty() {
             DEFAULT_REDIS_ADDRESS.to_owned()
@@ -165,10 +228,16 @@ impl RedisClient {
     /// **Cost**: Local handle release; no Redis round trip.
     /// **Concurrency**: In-flight snapshots may finish; later commands fail.
     /// **Side effects**: Drops the transport after its last snapshot is gone.
+    /// **When to use**: During application shutdown, after every DB borrowing
+    /// the root client has been closed or stopped.
     pub async fn close(&self) {
         self.executor.close().await;
     }
 
+    /// Verifies that the selected Redis database is currently reachable.
+    ///
+    /// **Cost**: One PING round trip. **Side effects**: None on stored data.
+    /// Provider selection uses this so failures surface before returning a DB.
     async fn ping(&self) -> Result<()> {
         let value = self
             .executor
@@ -179,32 +248,237 @@ impl RedisClient {
         Ok(())
     }
 
-    #[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+    /// Creates a capability adapter sharing this client's transport.
+    ///
+    /// The adapter does not own or close the client. Building it is local and
+    /// only increments the executor's reference count.
     pub(crate) fn primitives(&self) -> Arc<RedisPrimitives> {
         Arc::new(RedisPrimitives {
             executor: self.executor.clone(),
         })
     }
 
-    #[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+    /// Copies normalized settings for metadata or derived-index selection.
+    ///
+    /// The copy may contain credentials and therefore remains crate-private.
+    /// It performs no I/O and does not expose the settings through `Debug`.
     pub(crate) fn config(&self) -> RedisConfig {
         self.config.clone()
     }
 
     #[cfg(test)]
+    /// Constructs a client around an in-process executor for unit tests.
     fn with_executor(config: RedisConfig, executor: Arc<dyn CommandExecutor>) -> Self {
         Self { config, executor }
     }
 }
 
+/// Internal factory for a verified client on a derived Redis index.
+///
+/// Provider tests replace this boundary to observe copied configuration and
+/// lifecycle behavior without opening network connections.
+#[async_trait]
+trait RedisConnector: Send + Sync {
+    /// Connects and PING-verifies a client for the supplied configuration.
+    ///
+    /// **Cost**: Connection setup plus the PING performed by
+    /// [`RedisClient::connect`]. A returned client is ready for DB construction.
+    async fn connect(&self, config: RedisConfig) -> Result<Arc<RedisClient>>;
+}
+
+/// Production connector delegating derived selection to [`RedisClient`].
+struct DefaultRedisConnector;
+
+#[async_trait]
+impl RedisConnector for DefaultRedisConnector {
+    async fn connect(&self, config: RedisConfig) -> Result<Arc<RedisClient>> {
+        Ok(Arc::new(RedisClient::connect(config).await?))
+    }
+}
+
+/// Redis implementation of the cache [`Provider`] boundary.
+///
+/// Named databases reuse the caller-owned root client and separate keys by
+/// namespace. Selecting another native Redis index derives a client owned by
+/// the returned [`DB`], whose explicit close releases only that derived handle.
+/// All databases receive Redis Driver, Sets, and Scanner capabilities.
+///
+/// **Trade-offs**: Native indexes avoid repeating the index in every key, but
+/// selecting a different index establishes another connection. Named databases
+/// share one Redis index and require a cursor scan for administrative deletion.
+///
+/// **Scalability**: All DBs borrowing the root client share its multiplexed
+/// connection. Each simultaneously used non-root native index adds one derived
+/// connection manager until its DB is explicitly closed.
+///
+/// **Best for**: Constructing the four cache strategies after the caller has
+/// explicitly selected either a key-namespaced or native Redis database.
+pub struct RedisProvider {
+    /// Caller-owned root client; the Provider and borrowed DBs never close it.
+    client: Arc<RedisClient>,
+    /// Strategy defaults and optional named-database allowlist.
+    config: Config,
+    /// Factory used only when selecting an index different from the root.
+    connector: Arc<dyn RedisConnector>,
+}
+
+impl RedisProvider {
+    /// Binds cache policy to a caller-owned Redis client.
+    ///
+    /// **Cost**: Local allocation only; selection performs reachability checks.
+    /// **Concurrency**: Returned providers and DB strategies share the client's
+    /// multiplexed manager safely.
+    /// **Side effects**: Does not connect, ping, or take ownership of the client.
+    /// **When to use**: After constructing the caller-owned root client and
+    /// before selecting a named or numeric cache database.
+    pub fn new(client: Arc<RedisClient>, config: Config) -> Self {
+        Self {
+            client,
+            config,
+            connector: Arc::new(DefaultRedisConnector),
+        }
+    }
+
+    /// Wires one selected client into every core strategy and capability.
+    ///
+    /// Driver, Sets, and Scanner are three trait-object views of one primitive,
+    /// keeping all commands on the selected client. `release` is present only
+    /// when this DB owns a derived client. Construction is local and performs
+    /// no Redis round trip.
+    fn database(
+        &self,
+        client: Arc<RedisClient>,
+        namespace: String,
+        database: usize,
+        release: Option<Release>,
+    ) -> DB {
+        let primitives = client.primitives();
+        let driver: Arc<dyn Driver> = primitives.clone();
+        let sets: Arc<dyn Sets> = primitives.clone();
+        let scanner: Arc<dyn Scanner> = primitives;
+        let capabilities = Capabilities::new().with_sets(sets).with_scanner(scanner);
+        build_database(driver, capabilities, DatabaseSpec {
+            prefix: self.config.prefix.clone(),
+            namespace,
+            database,
+            embed_db: false,
+            default_ttl: self.config.default_ttl,
+            default_stale: self.config.default_stale,
+            concurrency: self.config.concurrency,
+            require_ttl: self.config.require_ttl,
+            release,
+            ..DatabaseSpec::default()
+        })
+    }
+
+    #[cfg(test)]
+    /// Installs a deterministic derived-client factory for Provider tests.
+    fn with_connector(
+        client: Arc<RedisClient>,
+        config: Config,
+        connector: Arc<dyn RedisConnector>,
+    ) -> Self {
+        Self {
+            client,
+            config,
+            connector,
+        }
+    }
+}
+
+#[async_trait]
+impl Provider for RedisProvider {
+    /// Selects a named key namespace on the root client's native Redis index.
+    ///
+    /// Validation and allowlist checks happen before I/O. A successful call
+    /// performs one PING, then constructs strategies locally. The returned DB
+    /// borrows the root transport, so DB close drains background work but does
+    /// not close the caller-owned client.
+    async fn set_database(&self, name: &str) -> Result<DB> {
+        check_namespace(name)?;
+        check_known(name, &self.config.databases)?;
+        self.client.ping().await?;
+        let database = self.client.config().database;
+        Ok(self.database(self.client.clone(), name.to_owned(), database, None))
+    }
+
+    /// Selects a native Redis database index.
+    ///
+    /// The current index costs one PING and reuses the root client. Another
+    /// index copies the normalized connection settings, connects and PINGs a
+    /// derived client, and installs an async release owned by the returned DB.
+    /// A failed derivation returns no DB and leaves the root client untouched.
+    async fn select_index(&self, index: usize) -> Result<DB> {
+        let current = self.client.config();
+        if current.database == index {
+            self.client.ping().await?;
+            return Ok(self.database(self.client.clone(), String::new(), index, None));
+        }
+
+        let mut derived_config = current;
+        derived_config.database = index;
+        let derived = self.connector.connect(derived_config).await?;
+        let released = derived.clone();
+        // Strategies keep their executor alive, so DB close must explicitly
+        // close the derived handle after core drains background refresh work.
+        let release: Release = Box::new(move || {
+            Box::pin(async move {
+                released.close().await;
+                Ok(())
+            })
+        });
+        Ok(self.database(derived, String::new(), index, Some(release)))
+    }
+
+    /// Deletes keys under one named namespace on the root client's index.
+    ///
+    /// **Cost**: One complete cursor walk plus bounded DEL batches.
+    /// **Side effects**: Permanently deletes matching cache keys; the operation
+    /// is non-atomic and can report a partial count on failure.
+    /// **Safety**: Core escapes the literal head and validates every scanned
+    /// key. Like Go, administrative deletion does not enforce the allowlist.
+    async fn drop_database(&self, name: &str) -> Result<usize> {
+        check_namespace(name)?;
+        let current = self.client.config();
+        let keyspace = Keyspace::new(&self.config.prefix, name, current.database, false);
+        let primitives = self.client.primitives();
+        drop_database(primitives.as_ref(), primitives.as_ref(), keyspace.head()).await
+    }
+
+    /// Returns the stable Redis identity without backend I/O.
+    fn backend(&self) -> &str {
+        BACKEND
+    }
+}
+
 /// Redis implementation of the low-level cache primitives.
-#[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+///
+/// This adapter deliberately contains no Keyspace or strategy policy. Every
+/// non-empty operation maps to one Redis command and therefore one round trip.
+/// One instance can be viewed as Driver, Sets, and Scanner while sharing the
+/// same executor.
+///
+/// **Trade-offs**: Direct commands preserve atomic Redis primitives, but the
+/// Scanner must collect a full matching key list to satisfy the current Go-
+/// aligned contract. Higher-level batching and validation remain in core.
+///
+/// **Scalability**: Ordinary commands multiplex concurrently. SCAN uses a 256
+/// count hint and may require many small round trips instead of blocking Redis
+/// with `KEYS`.
+///
+/// **Use case**: Backend adapter supplied only by [`RedisProvider`]; callers use
+/// the strategy traits exposed by [`DB`] rather than constructing it directly.
 pub(crate) struct RedisPrimitives {
+    /// Shared command transport; closing remains the client's responsibility.
     executor: Arc<dyn CommandExecutor>,
 }
 
 impl RedisPrimitives {
-    #[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+    /// Executes one Redis command and adds safe backend/operation context.
+    ///
+    /// Concrete Redis errors cannot fit the closed cache error enum, so they
+    /// become `Internal`; command values remain untyped until the caller checks
+    /// the reply shape. Credentials are never included in this context.
     async fn command(&self, operation: &str, command: Cmd) -> Result<Value> {
         self.executor
             .execute(command)
@@ -212,7 +486,12 @@ impl RedisPrimitives {
             .map_err(|error| internal(operation, error))
     }
 
-    #[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+    /// Implements unconditional, NX, and XX writes with one atomic SET.
+    ///
+    /// A zero TTL omits PX and means permanent storage. A positive TTL is
+    /// converted with checked millisecond ceiling. Redis nil is the normal
+    /// false result for an unmet NX/XX condition; other reply shapes are
+    /// validated instead of being treated as success silently.
     async fn write(
         &self,
         key: &str,
@@ -241,10 +520,15 @@ impl RedisPrimitives {
 
 #[async_trait]
 impl Driver for RedisPrimitives {
+    /// Identifies this adapter locally; no Redis round trip or side effect.
     fn name(&self) -> &str {
         BACKEND
     }
 
+    /// Reads bytes with GET in one round trip.
+    ///
+    /// Redis nil is the cache miss sentinel. Transport and protocol failures
+    /// remain errors so an outage cannot masquerade as absent application data.
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         let mut command = redis::cmd("GET");
         command.arg(key);
@@ -254,19 +538,33 @@ impl Driver for RedisPrimitives {
         }
     }
 
+    /// Writes bytes unconditionally with one SET round trip.
+    ///
+    /// Zero TTL stores permanently; positive TTL emits PX milliseconds. This
+    /// changes the value and replaces any previous lease for the key.
     async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<()> {
         self.write(key, value, ttl, None).await?;
         Ok(())
     }
 
+    /// Creates an absent key atomically with SET NX in one round trip.
+    ///
+    /// Returns false without modifying Redis when the key already exists.
     async fn add(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
         self.write(key, value, ttl, Some("NX")).await
     }
 
+    /// Replaces an existing key atomically with SET XX in one round trip.
+    ///
+    /// Returns false without modifying Redis when the key is absent.
     async fn replace(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
         self.write(key, value, ttl, Some("XX")).await
     }
 
+    /// Removes all supplied keys with one DEL round trip.
+    ///
+    /// Missing keys are harmless. Empty input is a local no-op, avoiding an
+    /// invalid Redis command and preserving the Driver contract.
     async fn delete(&self, keys: &[&str]) -> Result<()> {
         if keys.is_empty() {
             return Ok(());
@@ -277,6 +575,7 @@ impl Driver for RedisPrimitives {
         Ok(())
     }
 
+    /// Tests key liveness with EXISTS in one round trip and no mutation.
     async fn exists(&self, key: &str) -> Result<bool> {
         let mut command = redis::cmd("EXISTS");
         command.arg(key);
@@ -284,6 +583,13 @@ impl Driver for RedisPrimitives {
         Ok(count > 0)
     }
 
+    /// Changes an existing key's lease without rewriting its value.
+    ///
+    /// Positive TTL uses one PEXPIRE command. Permanent Touch uses one Lua
+    /// round trip because PERSIST alone returns the same zero for a missing key
+    /// and an already-permanent key. The script returns `-1` only for absence,
+    /// preserving the Driver's required `NotFound` distinction and correcting
+    /// GO-004 without adding a check-then-mutate race.
     async fn touch(&self, key: &str, ttl: Duration) -> Result<()> {
         let result = if ttl.is_zero() {
             let mut command = redis::cmd("EVAL");
@@ -309,6 +615,10 @@ impl Driver for RedisPrimitives {
 
 #[async_trait]
 impl Sets for RedisPrimitives {
+    /// Adds members with one SADD round trip.
+    ///
+    /// Redis sets deduplicate members. Empty input is a local no-op because
+    /// Redis requires at least one member argument.
     async fn set_add(&self, key: &str, members: &[&str]) -> Result<()> {
         if members.is_empty() {
             return Ok(());
@@ -319,6 +629,9 @@ impl Sets for RedisPrimitives {
         Ok(())
     }
 
+    /// Removes members with one SREM round trip.
+    ///
+    /// Missing members and sets are harmless; empty input performs no I/O.
     async fn set_remove(&self, key: &str, members: &[&str]) -> Result<()> {
         if members.is_empty() {
             return Ok(());
@@ -332,6 +645,10 @@ impl Sets for RedisPrimitives {
         Ok(())
     }
 
+    /// Returns all members with one SMEMBERS round trip and no mutation.
+    ///
+    /// A missing Redis set decodes to an empty vector, matching the capability
+    /// contract. Large sets motivate a future SetScanner capability.
     async fn set_members(&self, key: &str) -> Result<Vec<String>> {
         let mut command = redis::cmd("SMEMBERS");
         command.arg(key);
@@ -344,6 +661,13 @@ impl Sets for RedisPrimitives {
 
 #[async_trait]
 impl Scanner for RedisPrimitives {
+    /// Walks keys matching Redis glob syntax using cursor-based SCAN.
+    ///
+    /// **Cost**: One or more SCAN round trips with a count hint of 256.
+    /// **Side effects**: None. Results are accumulated because the current
+    /// Scanner contract returns one vector.
+    /// **Concurrency**: Redis may repeat keys while the keyspace changes, so
+    /// this adapter deduplicates results while preserving first-seen order.
     async fn scan(&self, pattern: &str) -> Result<Vec<String>> {
         let mut cursor = 0_u64;
         let mut unique = HashSet::new();
@@ -371,6 +695,11 @@ impl Scanner for RedisPrimitives {
     }
 }
 
+/// Parses the deliberately narrow standalone address forms accepted publicly.
+///
+/// Hostnames/IPv4 use `host:port`; IPv6 must use `[address]:port` so the final
+/// colon is unambiguous. Empty hosts, missing ports, zero, and out-of-range
+/// ports fail locally before credentials or network state are touched.
 fn parse_address(address: &str) -> Result<(String, u16)> {
     let (host, port) = if let Some(rest) = address.strip_prefix('[') {
         let (host, port) = rest.split_once("]:").ok_or_else(|| {
@@ -398,7 +727,11 @@ fn parse_address(address: &str) -> Result<(String, u16)> {
     Ok((host.to_owned(), port))
 }
 
-#[allow(dead_code, reason = "consumed by the Redis provider milestone")]
+/// Converts a Rust duration to Redis milliseconds without shortening a lease.
+///
+/// Any positive fractional millisecond rounds up. Rounding down could turn a
+/// positive TTL into zero, whose meaning differs dangerously between SET and
+/// PEXPIRE. Values outside Redis's integer range return an error.
 fn ttl_millis(ttl: Duration) -> Result<u64> {
     let whole = ttl.as_millis();
     let rounded = if ttl.subsec_nanos() % 1_000_000 == 0 {
@@ -412,10 +745,15 @@ fn ttl_millis(ttl: Duration) -> Result<u64> {
         .map_err(|_| CacheError::Internal("redis: TTL exceeds millisecond range".to_owned()))
 }
 
+/// Decodes one raw protocol value and attaches operation context on mismatch.
 fn decode<T: FromRedisValue>(operation: &str, value: Value) -> Result<T> {
     redis::from_redis_value(value).map_err(|error| internal(operation, error))
 }
 
+/// Converts a backend failure without exposing connection configuration.
+///
+/// The closed cache error enum cannot retain redis-rs's concrete error type, so
+/// the message records the backend and safe operation name for diagnostics.
 fn internal(operation: &str, error: impl Display) -> CacheError {
     CacheError::Internal(format!("redis: {operation}: {error}"))
 }
@@ -431,6 +769,10 @@ mod tests {
 
     use super::*;
 
+    /// Records packed commands and returns queued protocol replies.
+    ///
+    /// This verifies the private primitive layer without weakening its
+    /// visibility or requiring a network service in unit tests.
     struct ScriptedExecutor {
         responses: Mutex<VecDeque<RedisResult<Value>>>,
         commands: Mutex<Vec<Vec<u8>>>,
@@ -471,6 +813,42 @@ mod tests {
         }
     }
 
+    /// Records derived-index configuration and returns queued fake clients.
+    ///
+    /// Provider lifecycle tests use it to distinguish the borrowed root from a
+    /// DB-owned derived client deterministically.
+    struct ScriptedConnector {
+        clients: Mutex<VecDeque<Result<Arc<RedisClient>>>>,
+        configs: Mutex<Vec<RedisConfig>>,
+    }
+
+    impl ScriptedConnector {
+        fn new(clients: impl IntoIterator<Item = Result<Arc<RedisClient>>>) -> Self {
+            Self {
+                clients: Mutex::new(clients.into_iter().collect()),
+                configs: Mutex::new(Vec::new()),
+            }
+        }
+
+        async fn configs(&self) -> Vec<RedisConfig> {
+            self.configs.lock().await.clone()
+        }
+    }
+
+    #[async_trait]
+    impl RedisConnector for ScriptedConnector {
+        async fn connect(&self, config: RedisConfig) -> Result<Arc<RedisClient>> {
+            self.configs.lock().await.push(config);
+            match self.clients.lock().await.pop_front() {
+                Some(result) => result,
+                None => Err(CacheError::Internal(
+                    "redis: missing scripted connection".to_owned(),
+                )),
+            }
+        }
+    }
+
+    /// Builds one primitive adapter and retains its observable test executor.
     fn primitives(
         responses: impl IntoIterator<Item = RedisResult<Value>>,
     ) -> (RedisPrimitives, Arc<ScriptedExecutor>) {
@@ -483,8 +861,26 @@ mod tests {
         )
     }
 
+    /// Produces the exact RESP bytes used for command assertions.
     fn packed(command: Cmd) -> Vec<u8> {
         command.get_packed_command()
+    }
+
+    /// Builds a fake client bound to one native index without network I/O.
+    fn client(
+        database: usize,
+        responses: impl IntoIterator<Item = RedisResult<Value>>,
+    ) -> (Arc<RedisClient>, Arc<ScriptedExecutor>) {
+        let executor = Arc::new(ScriptedExecutor::new(responses));
+        let client = Arc::new(RedisClient::with_executor(
+            RedisConfig {
+                address: DEFAULT_REDIS_ADDRESS.to_owned(),
+                database,
+                ..RedisConfig::default()
+            },
+            executor.clone(),
+        ));
+        (client, executor)
     }
 
     #[test]
@@ -716,5 +1112,133 @@ mod tests {
             parse_address("[::1]:6380").unwrap(),
             ("::1".to_owned(), 6380)
         );
+    }
+
+    #[test]
+    fn test_redis_provider_new_reports_backend_without_io() {
+        let (client, _) = client(0, []);
+        let provider = RedisProvider::new(client, Config::default());
+
+        assert_eq!(provider.backend(), "redis");
+    }
+
+    #[tokio::test]
+    async fn test_redis_provider_set_database_validates_pings_and_wires_sets() {
+        let (client, executor) = client(4, [
+            Ok(Value::SimpleString("PONG".to_owned())),
+            Ok(Value::Array(Vec::new())),
+        ]);
+        let provider = RedisProvider::new(client, Config {
+            prefix: "app".to_owned(),
+            databases: vec!["orders".to_owned()],
+            ..Config::default()
+        });
+
+        let database = provider.set_database("orders").await.unwrap();
+        let keys = database.document.keys().await.unwrap();
+
+        assert_eq!(database.name, "orders");
+        assert_eq!(database.index, 4);
+        assert_eq!(database.backend, "redis");
+        assert!(keys.is_empty());
+        let mut members = redis::cmd("SMEMBERS");
+        members.arg("app:orders:cache:doc:index");
+        assert_eq!(executor.commands().await, vec![
+            packed(redis::cmd("PING")),
+            packed(members)
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_provider_set_database_rejects_invalid_or_unknown_name_before_io() {
+        let (client, executor) = client(0, []);
+        let provider = RedisProvider::new(client, Config {
+            databases: vec!["orders".to_owned()],
+            ..Config::default()
+        });
+
+        assert!(provider.set_database("bad:name").await.is_err());
+        assert!(provider.set_database("users").await.is_err());
+        assert!(executor.commands().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_redis_provider_select_current_index_reuses_root_without_releasing_it() {
+        let (client, executor) = client(3, [Ok(Value::SimpleString("PONG".to_owned()))]);
+        let provider = RedisProvider::new(client, Config::default());
+
+        let database = provider.select_index(3).await.unwrap();
+        database.close().await.unwrap();
+
+        assert_eq!(database.index, 3);
+        assert!(database.name.is_empty());
+        assert!(!executor.closed.load(Ordering::SeqCst));
+        assert_eq!(executor.commands().await, vec![packed(redis::cmd("PING"))]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_provider_select_other_index_derives_and_releases_client() {
+        let (root, root_executor) = client(2, []);
+        let (derived, derived_executor) = client(7, []);
+        let connector = Arc::new(ScriptedConnector::new([Ok(derived)]));
+        let provider = RedisProvider::with_connector(root, Config::default(), connector.clone());
+
+        let database = provider.select_index(7).await.unwrap();
+        database.close().await.unwrap();
+
+        assert_eq!(database.index, 7);
+        assert!(database.name.is_empty());
+        assert!(derived_executor.closed.load(Ordering::SeqCst));
+        assert!(!root_executor.closed.load(Ordering::SeqCst));
+        let configs = connector.configs().await;
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].database, 7);
+    }
+
+    #[tokio::test]
+    async fn test_redis_provider_select_other_index_propagates_connection_failure() {
+        let (root, _) = client(0, []);
+        let connector = Arc::new(ScriptedConnector::new([Err(CacheError::Internal(
+            "redis: derived connection failed".to_owned(),
+        ))]));
+        let provider = RedisProvider::with_connector(root, Config::default(), connector);
+
+        let result = provider.select_index(9).await;
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message.contains("derived connection failed"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redis_provider_drop_database_scans_literal_head_and_deletes_matches() {
+        let key = "app:orders:cache:vol:session";
+        let (client, executor) = client(0, [
+            Ok(Value::Array(vec![
+                Value::BulkString(b"0".to_vec()),
+                Value::Array(vec![Value::BulkString(key.as_bytes().to_vec())]),
+            ])),
+            Ok(Value::Int(1)),
+        ]);
+        let provider = RedisProvider::new(client, Config {
+            prefix: "app".to_owned(),
+            ..Config::default()
+        });
+
+        let deleted = provider.drop_database("orders").await.unwrap();
+
+        assert_eq!(deleted, 1);
+        let mut scan = redis::cmd("SCAN");
+        scan.arg(0_u64)
+            .arg("MATCH")
+            .arg("app:orders:cache:*")
+            .arg("COUNT")
+            .arg(256_usize);
+        let mut delete = redis::cmd("DEL");
+        delete.arg(&[key]);
+        assert_eq!(executor.commands().await, vec![
+            packed(scan),
+            packed(delete)
+        ]);
     }
 }
