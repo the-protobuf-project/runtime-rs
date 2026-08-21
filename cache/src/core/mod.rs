@@ -22,7 +22,7 @@ pub use document::{Document, NewId};
 pub use driver::{Driver, ErrMiss};
 pub use drop::drop_database;
 pub use indexed::Indexed;
-pub use keyspace::{IDGenerator, Keyspace, check_namespace};
+pub use keyspace::{IDGenerator, Keyspace, check_known, check_namespace};
 pub use memory_driver::MemoryDriver;
 pub use options::Options;
 pub use scanner::Scanner;

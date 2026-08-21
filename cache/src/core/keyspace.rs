@@ -118,6 +118,25 @@ pub fn check_namespace(name: &str) -> crate::Result<()> {
     Ok(())
 }
 
+/// Validates a database name against an optional configured allowlist.
+///
+/// An empty allowlist permits every already-valid namespace. This check is
+/// local and has no backend round trip or side effects. Providers use it after
+/// [`check_namespace`] and before contacting storage, so a rejected selection
+/// cannot open or mutate backend state.
+///
+/// Returns an error containing the requested and configured names when a
+/// non-empty allowlist has no exact match. Administrative database deletion may
+/// intentionally omit this check so stale configuration names can be removed.
+pub fn check_known(name: &str, known: &[String]) -> crate::Result<()> {
+    if known.is_empty() || known.iter().any(|candidate| candidate == name) {
+        return Ok(());
+    }
+    Err(crate::CacheError::Internal(format!(
+        "database '{name}' is not one of the configured databases {known:?}"
+    )))
+}
+
 /// UUID generator for unique IDs
 pub struct IDGenerator;
 
@@ -207,5 +226,12 @@ mod tests {
         assert!(check_namespace("valid_name").is_ok());
         assert!(check_namespace("").is_err()); // Empty
         assert!(check_namespace("bad:name").is_err()); // Contains colon
+    }
+
+    #[test]
+    fn test_keyspace_check_known_enforces_nonempty_allowlist() {
+        assert!(check_known("orders", &[]).is_ok());
+        assert!(check_known("orders", &["orders".to_owned()]).is_ok());
+        assert!(check_known("users", &["orders".to_owned()]).is_err());
     }
 }
