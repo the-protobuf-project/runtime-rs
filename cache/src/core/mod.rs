@@ -1,4 +1,7 @@
-//! Core cache abstractions and interfaces
+//! Backend-neutral cache contracts, capabilities, and database construction.
+//!
+//! Core defines what strategies and providers expose. Storage protocols live
+//! in `drivers`, while cross-operation behavior lives in `strategies`.
 
 pub mod aside;
 pub mod capabilities;

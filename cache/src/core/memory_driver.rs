@@ -1,6 +1,8 @@
-//! In-memory driver for testing and learning
+//! Process-local Driver implementation for tests and examples.
 //!
-//! This is the simplest Driver implementation - all data in a HashMap with TTL.
+//! Values live in a lock-protected map and expire lazily when accessed. This
+//! preserves Driver semantics without external services, but provides neither
+//! persistence nor coordination across processes.
 
 use super::Driver;
 use crate::Result;
@@ -9,31 +11,38 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Entry stores the value and expiry time
+/// Stored bytes paired with an optional monotonic expiry deadline.
 struct Entry {
+    /// Owned payload returned by `get`.
     value: Vec<u8>,
+    /// `None` denotes a permanent entry.
     expires_at: Option<Instant>,
 }
 
 impl Entry {
-    /// Check if this entry has expired
+    /// Compares the deadline with the current monotonic clock.
     fn is_expired(&self) -> bool {
         match self.expires_at {
             Some(expiry) => Instant::now() >= expiry,
-            None => false, // No expiry
+            None => false,
         }
     }
 }
 
-/// MemoryDriver stores all data in memory using a HashMap
-/// Suitable for testing, learning, and single-process caches
+/// Concurrent, process-local key/value implementation of [`Driver`].
+///
+/// **Trade-offs**: Operations are fast and deterministic, but all tasks share
+/// one map lock and expired entries are retained until overwritten/deleted.
+/// **Best for**: Unit tests, examples, and small single-process caches.
 pub struct MemoryDriver {
+    /// Shared storage; individual clones are performed while holding a read lock.
     data: Arc<RwLock<HashMap<String, Entry>>>,
+    /// Stable diagnostic backend name.
     name: String,
 }
 
 impl MemoryDriver {
-    /// Create a new in-memory driver
+    /// Creates an empty driver with backend name `memory`.
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(HashMap::new())),
@@ -77,13 +86,10 @@ impl Driver for MemoryDriver {
         };
 
         let mut data = self.data.write().await;
-        data.insert(
-            key.to_string(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.insert(key.to_string(), Entry {
+            value: value.to_vec(),
+            expires_at,
+        });
         Ok(())
     }
 
@@ -103,13 +109,10 @@ impl Driver for MemoryDriver {
             return Ok(false); // Key exists, so Add fails
         }
 
-        data.insert(
-            key.to_string(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.insert(key.to_string(), Entry {
+            value: value.to_vec(),
+            expires_at,
+        });
         Ok(true)
     }
 
@@ -131,13 +134,10 @@ impl Driver for MemoryDriver {
             return Ok(false); // Key doesn't exist, so Replace fails
         }
 
-        data.insert(
-            key.to_string(),
-            Entry {
-                value: value.to_vec(),
-                expires_at,
-            },
-        );
+        data.insert(key.to_string(), Entry {
+            value: value.to_vec(),
+            expires_at,
+        });
         Ok(true)
     }
 

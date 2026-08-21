@@ -1,4 +1,4 @@
-//! Keyspace management for strategy key separation
+//! Central key construction and database-namespace validation.
 //!
 //! Four strategies share one backend storage, so each needs its own key segment.
 //! This module builds qualified key names that prevent collisions.
@@ -12,8 +12,14 @@
 //! app:orders:cache:idx:entry:user-456            Indexed entry
 //! app:orders:cache:aside:entry:product-789       Aside entry
 
+/// Immutable prefix builder shared by every strategy in one selected database.
+///
+/// Centralizing all key formats prevents strategy collisions and ensures
+/// administrative deletion uses exactly the same database boundary as normal
+/// operations. Clones are cheap apart from cloning the base string.
 #[derive(Clone, Debug)]
 pub struct Keyspace {
+    /// Fully qualified database head ending in `cache:`.
     base: String,
 }
 
@@ -61,48 +67,60 @@ impl Keyspace {
         &self.base
     }
 
-    // Document strategy keys
+    /// Qualifies a Document value ID.
     pub fn doc_entry(&self, id: &str) -> String {
         format!("{}doc:entry:{}", self.base, id)
     }
 
+    /// Returns the shared Document enumeration-set key.
     pub fn doc_index(&self) -> String {
         format!("{}doc:index", self.base)
     }
 
-    // Volatile strategy keys
+    /// Qualifies a caller-provided Volatile key.
     pub fn vol_entry(&self, key: &str) -> String {
         format!("{}vol:{}", self.base, key)
     }
 
-    // Indexed strategy keys
+    /// Qualifies an Indexed value ID.
     pub fn idx_entry(&self, id: &str) -> String {
         format!("{}idx:entry:{}", self.base, id)
     }
 
+    /// Returns the shared Indexed enumeration-set key.
     pub fn idx_index(&self) -> String {
         format!("{}idx:index", self.base)
     }
 
+    /// Returns the membership-set key for one secondary field/value pair.
     pub fn idx_by_field(&self, field: &str, value: &str) -> String {
         format!("{}idx:by:{}:{}", self.base, field, value)
     }
 
+    /// Returns the field-metadata set key for one Indexed entry.
     pub fn idx_fields(&self, id: &str) -> String {
         format!("{}idx:fields:{}", self.base, id)
     }
 
-    // Aside strategy keys
+    /// Qualifies an Aside value-frame ID.
     pub fn aside_entry(&self, id: &str) -> String {
         format!("{}aside:entry:{}", self.base, id)
     }
 
+    /// Qualifies the reserved distributed-lock key for an Aside ID.
+    ///
+    /// Current coordination is process-local; this format is reserved for a
+    /// future fenced lock capability and does not itself acquire a lock.
     pub fn aside_lock(&self, id: &str) -> String {
         format!("{}aside:lock:{}", self.base, id)
     }
 }
 
-/// Validate a namespace name - no colons allowed
+/// Validates one named database segment before key construction.
+///
+/// Names must be non-empty and cannot contain `:`, because colons delimit
+/// independently controlled keyspace segments. This is a local validation with
+/// no allocation on success, backend I/O, or side effects.
 pub fn check_namespace(name: &str) -> crate::Result<()> {
     if name.is_empty() {
         return Err(crate::CacheError::Internal(
@@ -137,11 +155,16 @@ pub fn check_known(name: &str, known: &[String]) -> crate::Result<()> {
     )))
 }
 
-/// UUID generator for unique IDs
+/// Legacy process-local fallback ID generator.
+///
+/// IDs combine wall-clock nanoseconds with an atomic counter. This avoids
+/// collisions within a normally progressing process but is not a UUID and does
+/// not promise global uniqueness across hosts or clock resets. New databases
+/// use the shared UUID-based generator configured by `DatabaseSpec` instead.
 pub struct IDGenerator;
 
 impl IDGenerator {
-    /// Generate a new unique ID
+    /// Produces a timestamp/counter ID without backend I/O.
     pub fn new_id() -> String {
         use std::sync::atomic::{AtomicU64, Ordering};
         use std::time::{SystemTime, UNIX_EPOCH};

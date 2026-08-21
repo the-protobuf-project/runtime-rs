@@ -12,12 +12,19 @@ use crate::{CacheError, Result};
 
 use super::{Aside, Capabilities, Document, Driver, Indexed, Keyspace, Loader, NewId, Volatile};
 
+/// Maximum runtime allowed for one Aside loader execution.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
+/// Lease used to remember a Loader-reported absence.
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+/// Maximum time DB close waits for admitted refreshes to finish.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum background refreshes admitted per selected database.
 const REFRESH_BUDGET: usize = 64;
+/// Maximum distinct in-flight Aside IDs tracked per selected database.
 const FLIGHT_BUDGET: usize = 2048;
+/// Maximum wait for the owner of a shared Aside load.
 const FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Multi-entry read/delete fan-out used when configuration supplies zero.
 const DEFAULT_CONCURRENCY: usize = 16;
 
 /// Asynchronous cleanup for resources derived while selecting one database.
@@ -71,23 +78,37 @@ impl Default for DatabaseSpec {
     }
 }
 
+/// Loader-independent dependencies shared by every Aside view from a DB.
 struct AsideFactory {
+    /// Required storage primitives for value frames.
     driver: Arc<dyn Driver>,
+    /// Database-qualified Aside key builder.
     keyspace: Keyspace,
+    /// Freshness lease used when an operation supplies none.
     default_ttl: Duration,
+    /// Stale-serving window used when an operation supplies none.
     default_stale: Duration,
+    /// Rejects operations that resolve to implicit permanence.
     require_ttl: bool,
+    /// Per-ID foreground load coordinator shared across Loader views.
     flight: Arc<Flight>,
+    /// Bounded background refresh coordinator shared across Loader views.
     refresher: Arc<Refresher>,
 }
 
+/// Mutable state guarding one idempotent asynchronous close sequence.
 struct CloseState {
+    /// One-shot backend cleanup, moved into the first close task.
     release: Option<Release>,
+    /// Published close result receiver shared by every caller after the first.
     receiver: Option<watch::Receiver<Option<Result<()>>>>,
 }
 
+/// Background work and cleanup state owned by one selected database.
 struct Lifecycle {
+    /// Refreshes that must drain before derived resources are released.
     refresher: Arc<Refresher>,
+    /// Serializes close initialization without holding a lock while awaiting it.
     state: Mutex<CloseState>,
 }
 
@@ -110,7 +131,9 @@ pub struct DB {
     pub name: String,
     /// Selected backend or emulated database index.
     pub index: usize,
+    /// Loader-independent dependencies for constructing Aside views.
     aside: AsideFactory,
+    /// Close-only ownership kept private so callers cannot bypass ordering.
     lifecycle: Lifecycle,
 }
 
@@ -175,6 +198,7 @@ impl DB {
     }
 }
 
+/// Preserves both independent cleanup failures when drain and release fail.
 fn combine_close_results(drained: Result<()>, released: Result<()>) -> Result<()> {
     match (drained, released) {
         (Ok(()), Ok(())) => Ok(()),
@@ -190,6 +214,10 @@ fn combine_close_results(drained: Result<()>, released: Result<()>) -> Result<()
 /// Capabilities are resolved from the explicit bundle once here. One Flight
 /// and one Refresher belong to the returned database and are shared by every
 /// Aside view.
+///
+/// **Cost**: Local allocations and reference-count increments only; no Driver
+/// round trip. **Side effects**: Takes ownership of `spec.release` and creates
+/// coordination state that the returned [`DB`] must close.
 pub fn build_database(
     driver: Arc<dyn Driver>,
     capabilities: Capabilities,

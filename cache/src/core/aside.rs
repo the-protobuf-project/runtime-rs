@@ -1,3 +1,5 @@
+//! Public read-through cache contract and asynchronous Loader type.
+
 use std::sync::Arc;
 
 use futures::future::BoxFuture;

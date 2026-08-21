@@ -6,6 +6,7 @@ use crate::{CacheError, Result};
 
 use super::{Driver, Scanner};
 
+/// Maximum keys sent through one Driver delete operation.
 const DROP_BATCH: usize = 256;
 
 /// Deletes every key under one literal keyspace head.
@@ -54,7 +55,10 @@ pub async fn drop_database(
     Ok(deleted)
 }
 
-/// Embeds a literal keyspace head into the Scanner's glob-style contract.
+/// Escapes glob metacharacters before appending the only wildcard we control.
+///
+/// Treating `head` literally prevents a configured prefix such as `app:*` from
+/// expanding deletion into adjacent application namespaces.
 fn prefix_pattern(head: &str) -> String {
     let mut pattern = String::with_capacity(head.len() + 1);
     for character in head.chars() {

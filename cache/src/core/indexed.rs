@@ -1,3 +1,5 @@
+//! Public contract for documents with secondary field/value membership.
+
 use crate::Result;
 
 use super::Document;
