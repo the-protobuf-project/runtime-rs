@@ -1,5 +1,5 @@
 [package]
-name = "runtime-cache"
+name = "tpp-cache"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -12,6 +12,9 @@ categories = ["caching", "asynchronous"]
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/cache"
+
+[lib]
+name = "cache"
 
 [dependencies]
 tokio = { workspace = true }

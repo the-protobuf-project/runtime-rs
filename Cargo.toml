@@ -65,5 +65,5 @@ tokio-test = "0.4"
 wiremock = "0.6"
 
 network = { path = "network", package = "tpp-network", version = "0.1.0" }
-cache = { path = "cache", package = "runtime-cache", version = "0.1.0" }
+cache = { path = "cache", package = "tpp-cache", version = "0.1.0" }
 agents = { path = "agents", package = "tpp-agents", version = "0.1.0" }

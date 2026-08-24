@@ -1,8 +1,9 @@
 name: Publish to crates.io
 
-# Manual only — nothing in this repo ever publishes automatically. The two
-# crates are independent: neither depends on the other via the registry, so
-# they can be published in either order.
+# Manual only — nothing in this repo ever publishes automatically.
+#
+# Order matters for one pair: tpp-grpc depends on tpp-agents, so a release that
+# bumps both publishes tpp-agents first. The rest are independent.
 on:
   workflow_dispatch:
     inputs:
@@ -12,7 +13,9 @@ on:
         type: choice
         options:
           - tpp-network
-          - runtime-cache
+          - tpp-cache
+          - tpp-agents
+          - tpp-grpc
       dry_run:
         description: "Dry run only (no upload)"
         required: true
