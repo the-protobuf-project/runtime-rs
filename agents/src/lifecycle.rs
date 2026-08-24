@@ -63,11 +63,8 @@ impl Runtime {
         // A service that failed after it mounted is its own problem, not the shutdown's —
         // but it is the one failure nothing else would ever report, so it is logged here.
         for (protocol, handle) in tasks {
-            match tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await {
-                Ok(Ok(Err(err))) => {
-                    tracing::error!(%protocol, error = %err, "agents: service stopped with an error");
-                }
-                Ok(Ok(Ok(()))) | Ok(Err(_)) | Err(_) => {}
+            if let Ok(Ok(Err(err))) = tokio::time::timeout(SHUTDOWN_TIMEOUT, handle).await {
+                tracing::error!(%protocol, error = %err, "agents: service stopped with an error");
             }
         }
 
