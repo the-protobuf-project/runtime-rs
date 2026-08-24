@@ -2692,6 +2692,7 @@ dependencies = [
  "a2a-server-lf",
  "async-trait",
  "axum",
+ "chrono",
  "futures",
  "http",
  "reqwest",
@@ -2704,6 +2705,7 @@ dependencies = [
  "tonic",
  "tower-http",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -24,6 +24,9 @@ pub struct Service {
     pub(super) capabilities: Capabilities,
     pub(super) headers: Vec<HeaderMapping>,
     pub(super) serve_agent_card: bool,
+    pub(super) provider: Option<a2a::AgentProvider>,
+    pub(super) documentation_url: Option<String>,
+    pub(super) icon_url: Option<String>,
 }
 
 impl Service {
@@ -49,6 +52,9 @@ impl Service {
             capabilities: Capabilities::default(),
             headers: Vec::new(),
             serve_agent_card: true,
+            provider: None,
+            documentation_url: None,
+            icon_url: None,
         }
     }
 

@@ -34,7 +34,7 @@ pub struct GrpcError {
 /// ```
 pub fn handle_error(status: &tonic::Status) -> CallToolResult {
     let error = GrpcError {
-        code: crate::mcp::status_name(status.code()).to_string(),
+        code: crate::shared::status_name(status.code()).to_string(),
         message: status.message().to_string(),
         details: Vec::new(),
     };
@@ -42,28 +42,5 @@ pub fn handle_error(status: &tonic::Status) -> CallToolResult {
         Ok(payload) => error_result(payload),
         // The message is the part a reader needs; losing the envelope beats losing both.
         Err(_) => error_result(error.message),
-    }
-}
-
-/// The canonical `SCREAMING_SNAKE` name for a gRPC code, as MCP error payloads carry it.
-pub fn status_name(code: tonic::Code) -> &'static str {
-    match code {
-        tonic::Code::Ok => "OK",
-        tonic::Code::Cancelled => "CANCELLED",
-        tonic::Code::Unknown => "UNKNOWN",
-        tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
-        tonic::Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
-        tonic::Code::NotFound => "NOT_FOUND",
-        tonic::Code::AlreadyExists => "ALREADY_EXISTS",
-        tonic::Code::PermissionDenied => "PERMISSION_DENIED",
-        tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
-        tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
-        tonic::Code::Aborted => "ABORTED",
-        tonic::Code::OutOfRange => "OUT_OF_RANGE",
-        tonic::Code::Unimplemented => "UNIMPLEMENTED",
-        tonic::Code::Internal => "INTERNAL",
-        tonic::Code::Unavailable => "UNAVAILABLE",
-        tonic::Code::DataLoss => "DATA_LOSS",
-        tonic::Code::Unauthenticated => "UNAUTHENTICATED",
     }
 }

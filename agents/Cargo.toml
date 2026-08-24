@@ -22,7 +22,7 @@ default = ["mcp", "a2a"]
 # thing, so the two protocol modules are features instead — same "pay for what
 # you use", stated the way Cargo states it.
 mcp = ["dep:rmcp", "dep:serde", "dep:serde_json"]
-a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json"]
+a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json", "dep:uuid", "dep:chrono"]
 
 
 
@@ -53,6 +53,8 @@ a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-serv
 
 futures = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]

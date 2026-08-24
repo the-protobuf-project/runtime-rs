@@ -1,8 +1,9 @@
 //! What the two protocol modules would otherwise copy.
 //!
-//! Both MCP and A2A face the same problem: a request arrives over HTTP carrying headers, and
-//! the work behind it is a gRPC call that wants metadata. Neither protocol has an opinion
-//! about which headers cross that boundary, so the answer lives here once.
+//! Both MCP and A2A face the same problem twice over: a request arrives over HTTP carrying
+//! headers and the work behind it is a gRPC call that wants metadata, and a failed call comes
+//! back as a gRPC status that has to be rendered into whichever wire format the protocol
+//! speaks. Neither protocol has an opinion about either, so both answers live here once.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -114,4 +115,30 @@ pub fn with_header_forwarding(router: Router, mappings: Vec<HeaderMapping>) -> R
             }
         },
     ))
+}
+
+/// The canonical `SCREAMING_SNAKE` `google.rpc.Code` name for a gRPC code.
+///
+/// MCP puts it in an error payload and A2A prefixes a status message with it; both want the
+/// name rather than the number, because it is read by a model as often as by a program.
+pub fn status_name(code: tonic::Code) -> &'static str {
+    match code {
+        tonic::Code::Ok => "OK",
+        tonic::Code::Cancelled => "CANCELLED",
+        tonic::Code::Unknown => "UNKNOWN",
+        tonic::Code::InvalidArgument => "INVALID_ARGUMENT",
+        tonic::Code::DeadlineExceeded => "DEADLINE_EXCEEDED",
+        tonic::Code::NotFound => "NOT_FOUND",
+        tonic::Code::AlreadyExists => "ALREADY_EXISTS",
+        tonic::Code::PermissionDenied => "PERMISSION_DENIED",
+        tonic::Code::ResourceExhausted => "RESOURCE_EXHAUSTED",
+        tonic::Code::FailedPrecondition => "FAILED_PRECONDITION",
+        tonic::Code::Aborted => "ABORTED",
+        tonic::Code::OutOfRange => "OUT_OF_RANGE",
+        tonic::Code::Unimplemented => "UNIMPLEMENTED",
+        tonic::Code::Internal => "INTERNAL",
+        tonic::Code::Unavailable => "UNAVAILABLE",
+        tonic::Code::DataLoss => "DATA_LOSS",
+        tonic::Code::Unauthenticated => "UNAUTHENTICATED",
+    }
 }

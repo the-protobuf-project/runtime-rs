@@ -42,10 +42,11 @@ mod service;
 mod tool;
 mod transport;
 
+pub use crate::shared::status_name;
 pub use cache::{CacheHint, CacheHints, CacheScope};
 pub use completion::EnumCompletions;
 pub use elicitation::{ElicitField, elicit, elicit_schema, merge_elicit_result};
-pub use error::{GrpcError, handle_error, status_name};
+pub use error::{GrpcError, handle_error};
 pub use extras::{ExtraProperty, extract_extras};
 pub use interceptor::{Interceptors, ToolHandler, ToolInterceptor};
 pub use progress::ProgressSink;

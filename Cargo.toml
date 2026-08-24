@@ -36,6 +36,7 @@ http = "1.4"
 bytes = "1"
 async-trait = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # gRPC and the transports the hybrid server speaks. tonic is the repo the gRPC
 # organisation points at for Rust: github.com/grpc/grpc-rust redirects here.

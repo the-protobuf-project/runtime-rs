@@ -132,3 +132,9 @@ pub fn config(port: u16) -> Config {
         ..Default::default()
     }
 }
+
+/// A do-nothing agent, for tests about placement and cards rather than behaviour.
+#[cfg(feature = "a2a")]
+pub fn echo_agent() -> impl agents::a2a::Executor {
+    agents::a2a::TextAgent::new(|text: String| async move { Ok(text) })
+}
