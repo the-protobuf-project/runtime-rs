@@ -1848,6 +1848,7 @@ dependencies = [
  "tokio-util",
  "tower-service",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -2695,6 +2696,7 @@ dependencies = [
  "http",
  "reqwest",
  "rmcp",
+ "serde",
  "serde_json",
  "thiserror 2.0.20",
  "tokio",

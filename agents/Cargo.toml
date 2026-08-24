@@ -21,8 +21,10 @@ default = ["mcp", "a2a"]
 # Go compiles a subpackage only when something imports it. Cargo has no such
 # thing, so the two protocol modules are features instead — same "pay for what
 # you use", stated the way Cargo states it.
-mcp = ["dep:rmcp"]
+mcp = ["dep:rmcp", "dep:serde", "dep:serde_json"]
 a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json"]
+
+
 
 [dependencies]
 tokio = { workspace = true }
@@ -40,6 +42,7 @@ rmcp = { version = "3.1", optional = true, features = [
     "macros",
     "transport-streamable-http-server",
     "transport-io",
+    "elicitation",
 ] }
 
 # a2a-grpc and a2a-pb are not published to crates.io, so the whole workspace is
@@ -49,6 +52,7 @@ a2a = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-lf", rev = 
 a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-server-lf", rev = "9d70cfd6bca55f8b3801be9d64f036f2ac9d4c42", optional = true }
 
 futures = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
 [dev-dependencies]
