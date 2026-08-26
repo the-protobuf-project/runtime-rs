@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{Scanner, Sets};
+use super::{Leases, Scanner, Sets};
 
 /// Optional behavior a backend can provide beyond the required Driver trait.
 ///
@@ -22,6 +22,8 @@ use super::{Scanner, Sets};
 pub struct Capabilities {
     /// Server-side unordered collections for enumeration and secondary indexes.
     sets: Option<Arc<dyn Sets>>,
+    /// Remaining-expiry reporting for live entries.
+    leases: Option<Arc<dyn Leases>>,
     /// Cursor-based whole-keyspace traversal for administrative deletion.
     scanner: Option<Arc<dyn Scanner>>,
 }
@@ -52,6 +54,23 @@ impl Capabilities {
         self.sets.clone()
     }
 
+    /// Declares remaining-expiry reporting support.
+    ///
+    /// **Cost**: O(1); stores one reference-counted capability handle.
+    /// **Side effects**: Replaces any previously declared Leases capability.
+    pub fn with_leases(mut self, leases: Arc<dyn Leases>) -> Self {
+        self.leases = Some(leases);
+        self
+    }
+
+    /// Returns the declared Leases capability, if the backend can report TTL.
+    ///
+    /// **Cost**: O(1); cloning increments an atomic reference count.
+    /// **Side effects**: None on the backend.
+    pub fn leases(&self) -> Option<Arc<dyn Leases>> {
+        self.leases.clone()
+    }
+
     /// Declares cursor-based keyspace pattern scanning support.
     ///
     /// **Cost**: O(1); stores one reference-counted capability handle.
@@ -73,7 +92,7 @@ impl Capabilities {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::MemorySets;
+    use crate::core::{MemoryDriver, MemorySets};
 
     struct EmptyScanner;
 
@@ -87,6 +106,7 @@ mod tests {
     #[test]
     fn test_capabilities_new_has_no_optional_capabilities() {
         assert!(Capabilities::new().sets().is_none());
+        assert!(Capabilities::new().leases().is_none());
         assert!(Capabilities::new().scanner().is_none());
     }
 
@@ -95,6 +115,13 @@ mod tests {
         let capabilities = Capabilities::new().with_sets(Arc::new(MemorySets::new()));
 
         assert!(capabilities.sets().is_some());
+    }
+
+    #[test]
+    fn test_capabilities_with_leases_exposes_declared_capability() {
+        let capabilities = Capabilities::new().with_leases(Arc::new(MemoryDriver::new()));
+
+        assert!(capabilities.leases().is_some());
     }
 
     #[test]

@@ -230,6 +230,7 @@ pub fn build_database(
     };
     let keyspace = Keyspace::new(&spec.prefix, &spec.namespace, spec.database, spec.embed_db);
     let sets = capabilities.sets();
+    let leases = capabilities.leases();
     let new_id = match spec.new_id {
         Some(new_id) => new_id,
         None => default_new_id(),
@@ -240,13 +241,15 @@ pub fn build_database(
     let document: Arc<dyn Document> = Arc::new(DocumentImpl::new_with_id(
         driver.clone(),
         sets.clone(),
+        leases.clone(),
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
         new_id.clone(),
     ));
-    let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new(
+    let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new_with_leases(
         driver.clone(),
+        leases.clone(),
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
@@ -254,6 +257,7 @@ pub fn build_database(
     let indexed: Arc<dyn Indexed> = Arc::new(IndexedImpl::new_with_id(
         driver.clone(),
         sets,
+        leases,
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
@@ -354,6 +358,49 @@ mod tests {
             db.indexed.ids_by_index("tenant", "acme").await,
             Err(CacheError::Unsupported)
         ));
+        assert!(matches!(
+            db.document.ttl("document").await,
+            Err(CacheError::Unsupported)
+        ));
+        assert!(matches!(
+            db.volatile.ttl("volatile").await,
+            Err(CacheError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_database_build_wires_leases_to_all_ttl_strategies() {
+        let driver = Arc::new(MemoryDriver::new());
+        let capabilities = Capabilities::new()
+            .with_sets(Arc::new(MemorySets::new()))
+            .with_leases(driver.clone());
+        let db = build_database(driver, capabilities, DatabaseSpec {
+            default_ttl: Duration::from_secs(1),
+            ..DatabaseSpec::default()
+        });
+        db.volatile
+            .set("session", b"volatile", &Options::default())
+            .await
+            .unwrap();
+        db.document
+            .create(b"document", &Options::default().with_id("document-id"))
+            .await
+            .unwrap();
+        db.indexed
+            .create(b"indexed", &Options::default().with_id("indexed-id"))
+            .await
+            .unwrap();
+
+        let volatile_ttl = db.volatile.ttl("session").await.unwrap();
+        let document_ttl = db.document.ttl("document-id").await.unwrap();
+        let indexed_ttl = db.indexed.ttl("indexed-id").await.unwrap();
+
+        assert!(volatile_ttl > Duration::ZERO);
+        assert!(document_ttl > Duration::ZERO);
+        assert!(indexed_ttl > Duration::ZERO);
+        assert!(volatile_ttl <= Duration::from_secs(1));
+        assert!(document_ttl <= Duration::from_secs(1));
+        assert!(indexed_ttl <= Duration::from_secs(1));
     }
 
     #[tokio::test]

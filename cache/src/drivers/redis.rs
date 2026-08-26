@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 use crate::{
     CacheError, Config, DialTimeout, Result,
     core::{
-        Capabilities, DB, DatabaseSpec, Driver, Keyspace, Provider, Release, Scanner, Sets,
+        Capabilities, DB, DatabaseSpec, Driver, Keyspace, Leases, Provider, Release, Scanner, Sets,
         build_database, check_known, check_namespace, drop_database,
     },
 };
@@ -336,7 +336,7 @@ impl RedisProvider {
 
     /// Wires one selected client into every core strategy and capability.
     ///
-    /// Driver, Sets, and Scanner are three trait-object views of one primitive,
+    /// Driver, Sets, Leases, and Scanner are trait-object views of one primitive,
     /// keeping all commands on the selected client. `release` is present only
     /// when this DB owns a derived client. Construction is local and performs
     /// no Redis round trip.
@@ -350,8 +350,12 @@ impl RedisProvider {
         let primitives = client.primitives();
         let driver: Arc<dyn Driver> = primitives.clone();
         let sets: Arc<dyn Sets> = primitives.clone();
+        let leases: Arc<dyn Leases> = primitives.clone();
         let scanner: Arc<dyn Scanner> = primitives;
-        let capabilities = Capabilities::new().with_sets(sets).with_scanner(scanner);
+        let capabilities = Capabilities::new()
+            .with_sets(sets)
+            .with_leases(leases)
+            .with_scanner(scanner);
         build_database(driver, capabilities, DatabaseSpec {
             prefix: self.config.prefix.clone(),
             namespace,
@@ -450,8 +454,8 @@ impl Provider for RedisProvider {
 ///
 /// This adapter deliberately contains no Keyspace or strategy policy. Every
 /// non-empty operation maps to one Redis command and therefore one round trip.
-/// One instance can be viewed as Driver, Sets, and Scanner while sharing the
-/// same executor.
+/// One instance can be viewed as Driver, Sets, Leases, and Scanner while
+/// sharing the same executor.
 ///
 /// **Trade-offs**: Direct commands preserve atomic Redis primitives, but the
 /// Scanner must collect a full matching key list to satisfy the current Go-
@@ -608,6 +612,38 @@ impl Driver for RedisPrimitives {
             Ok(())
         } else {
             Err(CacheError::NotFound)
+        }
+    }
+}
+
+#[async_trait]
+impl Leases for RedisPrimitives {
+    /// Reports remaining expiry with one PTTL round trip.
+    ///
+    /// Redis `-2` is missing and `-1` is permanent. A live sub-millisecond
+    /// result can be zero, so it is rounded up to one millisecond to preserve
+    /// the cache contract's exclusive zero/permanent sentinel.
+    async fn ttl(&self, key: &str) -> Result<Duration> {
+        let mut command = redis::cmd("PTTL");
+        command.arg(key);
+        let ttl: i64 = decode("ttl reply", self.command("ttl", command).await?)?;
+        match ttl {
+            -2 => Err(CacheError::NotFound),
+            -1 => Ok(Duration::ZERO),
+            0 => Ok(Duration::from_millis(1)),
+            milliseconds if milliseconds > 0 => {
+                let milliseconds = u64::try_from(milliseconds).map_err(|error| {
+                    internal(
+                        "ttl reply",
+                        format!("positive PTTL does not fit u64: {error}"),
+                    )
+                })?;
+                Ok(Duration::from_millis(milliseconds))
+            }
+            sentinel => Err(internal(
+                "ttl reply",
+                format!("unexpected Redis PTTL sentinel {sentinel}"),
+            )),
         }
     }
 }
@@ -1089,6 +1125,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_redis_leases_pttl_maps_duration_permanent_and_missing() {
+        let (driver, executor) = primitives([
+            Ok(Value::Int(275)),
+            Ok(Value::Int(0)),
+            Ok(Value::Int(-1)),
+            Ok(Value::Int(-2)),
+        ]);
+
+        assert_eq!(
+            Leases::ttl(&driver, "leased").await.unwrap(),
+            Duration::from_millis(275)
+        );
+        assert_eq!(
+            Leases::ttl(&driver, "sub-millisecond").await.unwrap(),
+            Duration::from_millis(1)
+        );
+        assert_eq!(
+            Leases::ttl(&driver, "permanent").await.unwrap(),
+            Duration::ZERO
+        );
+        assert!(matches!(
+            Leases::ttl(&driver, "missing").await,
+            Err(CacheError::NotFound)
+        ));
+
+        let mut leased = redis::cmd("PTTL");
+        leased.arg("leased");
+        let mut sub_millisecond = redis::cmd("PTTL");
+        sub_millisecond.arg("sub-millisecond");
+        let mut permanent = redis::cmd("PTTL");
+        permanent.arg("permanent");
+        let mut missing = redis::cmd("PTTL");
+        missing.arg("missing");
+        assert_eq!(executor.commands().await, vec![
+            packed(leased),
+            packed(sub_millisecond),
+            packed(permanent),
+            packed(missing)
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_leases_pttl_rejects_unknown_negative_sentinel() {
+        let (driver, _) = primitives([Ok(Value::Int(-3))]);
+
+        let result = Leases::ttl(&driver, "key").await;
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message.contains("sentinel -3"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_redis_sets_commands_and_empty_noops() {
         let (driver, executor) = primitives([
             Ok(Value::Int(2)),
@@ -1173,10 +1262,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_redis_provider_set_database_validates_pings_and_wires_sets() {
+    async fn test_redis_provider_set_database_validates_pings_and_wires_capabilities() {
         let (client, executor) = client(4, [
             Ok(Value::SimpleString("PONG".to_owned())),
             Ok(Value::Array(Vec::new())),
+            Ok(Value::Int(125)),
         ]);
         let provider = RedisProvider::new(client, Config {
             prefix: "app".to_owned(),
@@ -1186,16 +1276,21 @@ mod tests {
 
         let database = provider.set_database("orders").await.unwrap();
         let keys = database.document.keys().await.unwrap();
+        let ttl = database.document.ttl("entry").await.unwrap();
 
         assert_eq!(database.name, "orders");
         assert_eq!(database.index, 4);
         assert_eq!(database.backend, "redis");
         assert!(keys.is_empty());
+        assert_eq!(ttl, Duration::from_millis(125));
         let mut members = redis::cmd("SMEMBERS");
         members.arg("app:orders:cache:doc:index");
+        let mut ttl = redis::cmd("PTTL");
+        ttl.arg("app:orders:cache:doc:entry:entry");
         assert_eq!(executor.commands().await, vec![
             packed(redis::cmd("PING")),
-            packed(members)
+            packed(members),
+            packed(ttl)
         ]);
     }
 

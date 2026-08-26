@@ -5,19 +5,22 @@
 
 use crate::{
     Result,
-    core::{Driver, Keyspace, Options, Volatile},
+    core::{Driver, Keyspace, Leases, Options, Volatile},
 };
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Thin key qualification and TTL-policy layer over one Driver.
 ///
 /// Volatile performs no enumeration bookkeeping and is the lowest-write-cost
 /// strategy. It is appropriate when callers already know keys. TTL reporting
-/// and scanning remain unsupported until their optional capabilities are wired
-/// into this implementation.
+/// is available when DB construction supplies the optional Leases capability;
+/// scanning remains unsupported.
 pub struct VolatileImpl {
     /// Required single-key storage primitives.
-    driver: std::sync::Arc<dyn Driver>,
+    driver: Arc<dyn Driver>,
+    /// Optional remaining-expiry reporting capability.
+    leases: Option<Arc<dyn Leases>>,
     /// Qualifies caller keys into the Volatile strategy segment.
     keyspace: Keyspace,
     /// Lease used when operation options do not select one.
@@ -27,17 +30,32 @@ pub struct VolatileImpl {
 }
 
 impl VolatileImpl {
-    /// Wires a Volatile strategy without performing backend I/O.
+    /// Wires a Volatile strategy without optional capabilities or backend I/O.
+    ///
+    /// Direct construction leaves TTL reporting unsupported. Prefer DB/provider
+    /// construction when the backend declares the optional Leases capability.
     ///
     /// **Cost**: Local ownership moves only. **Side effects**: None.
     pub fn new(
-        driver: std::sync::Arc<dyn Driver>,
+        driver: Arc<dyn Driver>,
+        keyspace: Keyspace,
+        default_ttl: Duration,
+        require_ttl: bool,
+    ) -> Self {
+        Self::new_with_leases(driver, None, keyspace, default_ttl, require_ttl)
+    }
+
+    /// Wires the optional remaining-expiry capability resolved by DB creation.
+    pub(crate) fn new_with_leases(
+        driver: Arc<dyn Driver>,
+        leases: Option<Arc<dyn Leases>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
     ) -> Self {
         Self {
             driver,
+            leases,
             keyspace,
             default_ttl,
             require_ttl,
@@ -93,9 +111,9 @@ impl Volatile for VolatileImpl {
         self.driver.touch(&full_key, ttl).await
     }
 
-    async fn ttl(&self, _key: &str) -> Result<Duration> {
-        // Lease reporting is not part of Driver and no capability is wired yet.
-        Err(crate::CacheError::Unsupported)
+    async fn ttl(&self, key: &str) -> Result<Duration> {
+        let leases = self.leases.as_ref().ok_or(crate::CacheError::Unsupported)?;
+        leases.ttl(&self.keyspace.vol_entry(key)).await
     }
 
     async fn scan(&self, _pattern: &str) -> Result<Vec<String>> {

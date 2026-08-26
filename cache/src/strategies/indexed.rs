@@ -15,7 +15,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Indexed, Keyspace, NewId, Options, Sets},
+    core::{Document, Driver, Indexed, Keyspace, Leases, NewId, Options, Sets},
 };
 
 use super::DocumentImpl;
@@ -56,6 +56,7 @@ impl IndexedImpl {
         Self::new_with_id(
             driver,
             sets,
+            None,
             keyspace,
             default_ttl,
             require_ttl,
@@ -71,6 +72,7 @@ impl IndexedImpl {
     pub(crate) fn new_with_id(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
+        leases: Option<Arc<dyn Leases>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -80,6 +82,7 @@ impl IndexedImpl {
         let document = DocumentImpl::new_indexed(
             driver.clone(),
             sets.clone(),
+            leases,
             keyspace.clone(),
             default_ttl,
             require_ttl,

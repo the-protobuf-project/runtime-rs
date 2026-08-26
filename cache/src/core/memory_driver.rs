@@ -4,7 +4,7 @@
 //! preserves Driver semantics without external services, but provides neither
 //! persistence nor coordination across processes.
 
-use super::Driver;
+use super::{Driver, Leases};
 use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -180,5 +180,71 @@ impl Driver for MemoryDriver {
         } else {
             Err(crate::CacheError::NotFound)
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Leases for MemoryDriver {
+    /// Reports a live entry's lease from the process monotonic clock.
+    ///
+    /// Permanent entries return zero. Missing and expired entries return
+    /// `NotFound`; checking the lease does not eagerly remove expired storage.
+    async fn ttl(&self, key: &str) -> Result<Duration> {
+        let data = self.data.read().await;
+        let entry = data.get(key).ok_or(crate::CacheError::NotFound)?;
+        let Some(expires_at) = entry.expires_at else {
+            return Ok(Duration::ZERO);
+        };
+        let now = Instant::now();
+        if expires_at <= now {
+            return Err(crate::CacheError::NotFound);
+        }
+        Ok(expires_at.duration_since(now))
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_driver_ttl_reports_positive_permanent_and_missing() {
+        let driver = MemoryDriver::new();
+        driver
+            .set("leased", b"value", Duration::from_secs(1))
+            .await
+            .unwrap();
+        driver
+            .set("permanent", b"value", Duration::ZERO)
+            .await
+            .unwrap();
+
+        let remaining = Leases::ttl(&driver, "leased").await.unwrap();
+
+        assert!(remaining > Duration::ZERO);
+        assert!(remaining <= Duration::from_secs(1));
+        assert_eq!(
+            Leases::ttl(&driver, "permanent").await.unwrap(),
+            Duration::ZERO
+        );
+        assert!(matches!(
+            Leases::ttl(&driver, "missing").await,
+            Err(crate::CacheError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memory_driver_ttl_expired_returns_not_found() {
+        let driver = MemoryDriver::new();
+        driver
+            .set("expired", b"value", Duration::from_millis(1))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(matches!(
+            Leases::ttl(&driver, "expired").await,
+            Err(crate::CacheError::NotFound)
+        ));
     }
 }

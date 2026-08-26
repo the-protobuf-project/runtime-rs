@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Keyspace, NewId, Options, Sets},
+    core::{Document, Driver, Keyspace, Leases, NewId, Options, Sets},
 };
 
 /// Stores whole encoded values, with optional enumeration through server Sets.
@@ -37,6 +37,8 @@ pub struct DocumentImpl {
     /// Direct entry operations need only Driver. Enumeration refuses with
     /// `Unsupported` when this handle is absent.
     sets: Option<Arc<dyn Sets>>,
+    /// Optional remaining-expiry reporting capability.
+    leases: Option<Arc<dyn Leases>>,
     /// Selected database's centralized key builder.
     keyspace: Keyspace,
     /// Chooses Document or Indexed key families for the shared algorithm.
@@ -64,6 +66,9 @@ enum DocumentLayout {
 impl DocumentImpl {
     /// Wires a Document strategy to its driver and optional Sets capability.
     ///
+    /// Direct construction leaves TTL reporting unsupported. Prefer DB/provider
+    /// construction when the backend declares the optional Leases capability.
+    ///
     /// **Cost**: Local construction only; no driver round trip.
     /// **Side effects**: None. Backend data is touched only by trait methods.
     pub fn new(
@@ -76,6 +81,7 @@ impl DocumentImpl {
         Self::new_with_id(
             driver,
             sets,
+            None,
             keyspace,
             default_ttl,
             require_ttl,
@@ -83,12 +89,13 @@ impl DocumentImpl {
         )
     }
 
-    /// Wires a Document with the database's shared ID generator.
+    /// Wires a Document with database capabilities and its shared ID generator.
     ///
     /// **Cost**: Local reference ownership only. **Side effects**: None.
     pub(crate) fn new_with_id(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
+        leases: Option<Arc<dyn Leases>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -97,6 +104,7 @@ impl DocumentImpl {
         Self::with_layout(
             driver,
             sets,
+            leases,
             keyspace,
             default_ttl,
             require_ttl,
@@ -112,6 +120,7 @@ impl DocumentImpl {
     pub(crate) fn new_indexed(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
+        leases: Option<Arc<dyn Leases>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -120,6 +129,7 @@ impl DocumentImpl {
         Self::with_layout(
             driver,
             sets,
+            leases,
             keyspace,
             default_ttl,
             require_ttl,
@@ -132,6 +142,7 @@ impl DocumentImpl {
     fn with_layout(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
+        leases: Option<Arc<dyn Leases>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -141,6 +152,7 @@ impl DocumentImpl {
         Self {
             driver,
             sets,
+            leases,
             keyspace,
             layout,
             default_ttl,
@@ -281,9 +293,9 @@ impl Document for DocumentImpl {
         Ok(results)
     }
 
-    async fn ttl(&self, _id: &str) -> Result<Duration> {
-        // Driver has no lease-reporting primitive in the current core contract.
-        Err(crate::CacheError::Unsupported)
+    async fn ttl(&self, id: &str) -> Result<Duration> {
+        let leases = self.leases.as_ref().ok_or(CacheError::Unsupported)?;
+        leases.ttl(&self.entry_key(id)).await
     }
 }
 
