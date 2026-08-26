@@ -4,7 +4,7 @@ use std::collections::HashSet;
 
 use crate::{CacheError, Result};
 
-use super::{Driver, Scanner};
+use super::{Driver, Scanner, scanner::escape_glob_literal};
 
 /// Maximum keys sent through one Driver delete operation.
 const DROP_BATCH: usize = 256;
@@ -60,13 +60,7 @@ pub async fn drop_database(
 /// Treating `head` literally prevents a configured prefix such as `app:*` from
 /// expanding deletion into adjacent application namespaces.
 fn prefix_pattern(head: &str) -> String {
-    let mut pattern = String::with_capacity(head.len() + 1);
-    for character in head.chars() {
-        if matches!(character, '*' | '?' | '[' | ']' | '\\') {
-            pattern.push('\\');
-        }
-        pattern.push(character);
-    }
+    let mut pattern = escape_glob_literal(head);
     pattern.push('*');
     pattern
 }

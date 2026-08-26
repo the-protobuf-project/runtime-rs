@@ -1267,6 +1267,12 @@ mod tests {
             Ok(Value::SimpleString("PONG".to_owned())),
             Ok(Value::Array(Vec::new())),
             Ok(Value::Int(125)),
+            Ok(Value::Array(vec![
+                Value::BulkString(b"0".to_vec()),
+                Value::Array(vec![Value::BulkString(
+                    b"app:orders:cache:vol:session:one".to_vec(),
+                )]),
+            ])),
         ]);
         let provider = RedisProvider::new(client, Config {
             prefix: "app".to_owned(),
@@ -1277,20 +1283,31 @@ mod tests {
         let database = provider.set_database("orders").await.unwrap();
         let keys = database.document.keys().await.unwrap();
         let ttl = database.document.ttl("entry").await.unwrap();
+        let volatile_keys = database.volatile.scan("session:*").await.unwrap();
 
         assert_eq!(database.name, "orders");
         assert_eq!(database.index, 4);
         assert_eq!(database.backend, "redis");
         assert!(keys.is_empty());
         assert_eq!(ttl, Duration::from_millis(125));
+        assert_eq!(volatile_keys, [
+            "app:orders:cache:vol:session:one".to_owned()
+        ]);
         let mut members = redis::cmd("SMEMBERS");
         members.arg("app:orders:cache:doc:index");
         let mut ttl = redis::cmd("PTTL");
         ttl.arg("app:orders:cache:doc:entry:entry");
+        let mut scan = redis::cmd("SCAN");
+        scan.arg(0_u64)
+            .arg("MATCH")
+            .arg("app:orders:cache:vol:session:*")
+            .arg("COUNT")
+            .arg(256_usize);
         assert_eq!(executor.commands().await, vec![
             packed(redis::cmd("PING")),
             packed(members),
-            packed(ttl)
+            packed(ttl),
+            packed(scan)
         ]);
     }
 

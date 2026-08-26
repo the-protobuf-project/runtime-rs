@@ -12,6 +12,8 @@
 //! app:orders:cache:idx:entry:user-456            Indexed entry
 //! app:orders:cache:aside:entry:product-789       Aside entry
 
+use super::scanner::escape_glob_literal;
+
 /// Immutable prefix builder shared by every strategy in one selected database.
 ///
 /// Centralizing all key formats prevents strategy collisions and ensures
@@ -80,6 +82,27 @@ impl Keyspace {
     /// Qualifies a caller-provided Volatile key.
     pub fn vol_entry(&self, key: &str) -> String {
         format!("{}vol:{}", self.base, key)
+    }
+
+    /// Returns the literal backend prefix shared by every Volatile key.
+    ///
+    /// This is used to validate Scanner output after a best-effort cursor walk.
+    /// **Cost**: O(n) local string construction. **Side effects**: None.
+    pub(crate) fn vol_prefix(&self) -> String {
+        format!("{}vol:", self.base)
+    }
+
+    /// Qualifies a caller glob inside the selected Volatile keyspace.
+    ///
+    /// The fixed database and strategy prefix is escaped as literal text while
+    /// the caller glob remains dynamic. This prevents configured glob syntax
+    /// from broadening the scan beyond the intended namespace.
+    ///
+    /// **Cost**: O(prefix + glob) local construction. **Side effects**: None.
+    pub(crate) fn vol_pattern(&self, glob: &str) -> String {
+        let mut pattern = escape_glob_literal(&self.vol_prefix());
+        pattern.push_str(glob);
+        pattern
     }
 
     /// Qualifies an Indexed value ID.
@@ -200,6 +223,21 @@ mod tests {
             "app:orders:cache:vol:session-abc"
         );
         assert_eq!(ks.doc_index(), "app:orders:cache:doc:index");
+    }
+
+    #[test]
+    fn test_keyspace_vol_pattern_qualifies_glob_and_escapes_fixed_prefix() {
+        let ordinary = Keyspace::new("app", "orders", 0, false);
+        let metacharacters = Keyspace::new("app*", "orders?", 0, false);
+
+        assert_eq!(
+            ordinary.vol_pattern("session:*-??"),
+            "app:orders:cache:vol:session:*-??"
+        );
+        assert_eq!(
+            metacharacters.vol_pattern("session:*"),
+            "app\\*:orders\\?:cache:vol:session:*"
+        );
     }
 
     #[test]

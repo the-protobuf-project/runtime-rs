@@ -231,6 +231,7 @@ pub fn build_database(
     let keyspace = Keyspace::new(&spec.prefix, &spec.namespace, spec.database, spec.embed_db);
     let sets = capabilities.sets();
     let leases = capabilities.leases();
+    let scanner = capabilities.scanner();
     let new_id = match spec.new_id {
         Some(new_id) => new_id,
         None => default_new_id(),
@@ -247,9 +248,10 @@ pub fn build_database(
         spec.require_ttl,
         new_id.clone(),
     ));
-    let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new_with_leases(
+    let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new_with_capabilities(
         driver.clone(),
         leases.clone(),
+        scanner,
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
@@ -364,6 +366,10 @@ mod tests {
         ));
         assert!(matches!(
             db.volatile.ttl("volatile").await,
+            Err(CacheError::Unsupported)
+        ));
+        assert!(matches!(
+            db.volatile.scan("*").await,
             Err(CacheError::Unsupported)
         ));
     }
