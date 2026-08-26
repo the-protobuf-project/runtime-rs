@@ -1,13 +1,13 @@
-//! Document strategy: enumerable storage with index
+//! Enumerable ID-addressed storage over Driver and optional Sets.
 //!
 //! Stores whole values and, when the backend supports Sets, maintains an index
 //! so they can be listed. Direct entry operations remain available without
 //! Sets, while enumeration reports `Unsupported`.
 //!
 //! Trade-offs:
-//! - With Sets, every Create/Delete also touches the index
-//! - Reading keys() walks the index (O(entries))
-//! - Does NOT shard - the index is one hot key on all backends
+//! - With Sets, every Create/Delete also touches the index.
+//! - Reading `keys` walks the index in O(entries).
+//! - The shared enumeration set is one hot key and is not sharded.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,24 +26,38 @@ use crate::{
 /// the Go strategy and keeps a backend such as Memcached useful without
 /// pretending it can enumerate values.
 ///
-/// The enumeration index is a shared hot key and can retain members for expired
-/// values until a read sweeps them. Prefer Volatile when enumeration is not
-/// needed.
+/// The enumeration index is a shared hot key. The current Rust implementation
+/// does not sweep expired members during `keys` or `list`, so it can retain
+/// stale IDs. Prefer Volatile when enumeration is not needed.
 pub struct DocumentImpl {
+    /// Stores and conditionally replaces encoded entry values.
     driver: Arc<dyn Driver>,
-    // Sets is optional because direct entry operations need only Driver. Only
-    // enumeration requires the index and must refuse when this is absent.
+    /// Optional enumeration index capability.
+    ///
+    /// Direct entry operations need only Driver. Enumeration refuses with
+    /// `Unsupported` when this handle is absent.
     sets: Option<Arc<dyn Sets>>,
+    /// Selected database's centralized key builder.
     keyspace: Keyspace,
+    /// Chooses Document or Indexed key families for the shared algorithm.
     layout: DocumentLayout,
+    /// Lease used when operation options do not select one.
     default_ttl: Duration,
+    /// Rejects writes that resolve to implicit permanence.
     require_ttl: bool,
+    /// Database-wide ID source shared with Indexed.
     new_id: NewId,
 }
 
+/// Key-family selection for the shared ID-addressed implementation.
+///
+/// Indexed delegates its base value operations to DocumentImpl but must never
+/// collide with ordinary Document entries or enumeration membership.
 #[derive(Clone, Copy)]
 enum DocumentLayout {
+    /// Uses `doc:*` entry and enumeration keys.
     Document,
+    /// Uses `idx:*` entry and enumeration keys.
     Indexed,
 }
 
@@ -70,6 +84,8 @@ impl DocumentImpl {
     }
 
     /// Wires a Document with the database's shared ID generator.
+    ///
+    /// **Cost**: Local reference ownership only. **Side effects**: None.
     pub(crate) fn new_with_id(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
@@ -90,6 +106,9 @@ impl DocumentImpl {
     }
 
     /// Builds the Document half of Indexed with the isolated `idx` key layout.
+    ///
+    /// This is the only path that selects `DocumentLayout::Indexed`, ensuring
+    /// all delegated operations use Indexed keys consistently.
     pub(crate) fn new_indexed(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
@@ -109,6 +128,7 @@ impl DocumentImpl {
         )
     }
 
+    /// Central constructor that binds the algorithm to exactly one key family.
     fn with_layout(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
@@ -129,7 +149,11 @@ impl DocumentImpl {
         }
     }
 
-    /// Resolve TTL (same as Volatile)
+    /// Resolves a write lease using the cache-wide TTL priority contract.
+    ///
+    /// Explicit TTL wins, followed by explicit permanence, configured default,
+    /// required-TTL rejection, and finally implicit permanence. This is local
+    /// validation and performs no Driver I/O.
     pub(crate) fn resolve_ttl(&self, opts: &Options) -> Result<Duration> {
         if let Some(ttl) = opts.ttl {
             return Ok(ttl);
@@ -158,6 +182,7 @@ impl DocumentImpl {
         }
     }
 
+    /// Qualifies an ID through the key family selected at construction.
     fn entry_key(&self, id: &str) -> String {
         match self.layout {
             DocumentLayout::Document => self.keyspace.doc_entry(id),
@@ -165,6 +190,7 @@ impl DocumentImpl {
         }
     }
 
+    /// Returns the enumeration-set key for the selected key family.
     fn index_key(&self) -> String {
         match self.layout {
             DocumentLayout::Document => self.keyspace.doc_index(),
@@ -173,7 +199,11 @@ impl DocumentImpl {
     }
 }
 
-/// Returns the existing Rust default while allowing DB construction to share it.
+/// Returns the UUID-v4 Rust default as a thread-safe shared ID source.
+///
+/// DB construction calls this once and gives the same handle to Document and
+/// Indexed. Callers needing Go's sortable ULID representation can install a
+/// custom `DatabaseSpec::new_id` generator.
 pub(crate) fn default_new_id() -> NewId {
     Arc::new(|| Uuid::new_v4().to_string())
 }
@@ -192,7 +222,7 @@ impl Document for DocumentImpl {
             sets.set_add(&index_key, &[&id]).await?;
         }
 
-        // Then store the value
+        // Store only after publishing the sweepable enumeration member.
         let entry_key = self.entry_key(&id);
         self.driver.set(&entry_key, value, ttl).await?;
 
@@ -209,7 +239,7 @@ impl Document for DocumentImpl {
         let ttl = self.resolve_ttl(opts)?;
         let entry_key = self.entry_key(id);
 
-        // Replace only if key exists (otherwise update fails)
+        // Driver Replace keeps Update from creating an unindexed new entry.
         let ok = self.driver.replace(&entry_key, value, ttl).await?;
         if !ok {
             return Err(crate::CacheError::NotFound);
@@ -242,17 +272,17 @@ impl Document for DocumentImpl {
         for key in keys {
             match self.driver.get(&self.entry_key(&key)).await {
                 Ok(value) => results.push(value),
-                Err(_) => {
-                    // Entry expired or disappeared, skip it
-                    // In real code, might want to clean up the index
-                }
+                // Listing is a non-transactional snapshot. The current
+                // algorithm suppresses any per-entry read failure after the
+                // index read; it does not sweep that member here.
+                Err(_) => {}
             }
         }
         Ok(results)
     }
 
     async fn ttl(&self, _id: &str) -> Result<Duration> {
-        // Most drivers don't report TTL
+        // Driver has no lease-reporting primitive in the current core contract.
         Err(crate::CacheError::Unsupported)
     }
 }

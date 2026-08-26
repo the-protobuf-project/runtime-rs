@@ -15,7 +15,9 @@ use tokio::sync::{Mutex, Semaphore, watch};
 
 use crate::{CacheError, Result};
 
+/// Watch state is empty while work runs and contains one cloneable final result.
 type SharedResult = Option<Result<Vec<u8>>>;
+/// Per-ID receivers for work that is currently joinable.
 type Calls = HashMap<String, watch::Receiver<SharedResult>>;
 
 /// Collapses concurrent work by key and bounds work across distinct keys.
@@ -25,8 +27,11 @@ type Calls = HashMap<String, watch::Receiver<SharedResult>>;
 /// Tokio task, so cancellation of the caller that happened to arrive first does
 /// not cancel a result awaited by other callers.
 pub(crate) struct Flight {
+    /// Transient in-flight calls; never contains cached application storage.
     calls: Arc<Mutex<Calls>>,
+    /// Permits only new distinct IDs; joiners do not acquire one.
     budget: Arc<Semaphore>,
+    /// Independent lifetime bound for each detached work future.
     timeout: Duration,
 }
 
@@ -47,6 +52,10 @@ impl Flight {
     ///
     /// The closure, rather than a pre-created future, is accepted so a joining
     /// caller does not even construct work that will never run.
+    ///
+    /// **Failure behavior**: A full distinct-ID budget returns `Overloaded`.
+    /// Timeout and an unexpectedly closed result channel return `Internal`.
+    /// Dropping any waiter does not cancel detached shared work.
     pub(crate) async fn run<W, F>(&self, key: &str, work: W) -> Result<Vec<u8>>
     where
         W: FnOnce() -> F + Send + 'static,

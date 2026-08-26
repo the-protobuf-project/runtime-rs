@@ -1,7 +1,7 @@
-//! Volatile strategy: TTL-first storage with no index
+//! Direct TTL-oriented key/value strategy with no enumeration index.
 //!
-//! This is the simplest strategy - just Set/Get/Delete without tracking.
-//! No enumeration, no hot keys, scales with cluster shards.
+//! Each caller key maps through Keyspace to one Driver key. There is no shared
+//! metadata hot key, so unrelated entries can scale with backend shards.
 
 use crate::{
     Result,
@@ -9,16 +9,27 @@ use crate::{
 };
 use std::time::Duration;
 
-/// VolatileImpl is ephemeral key-value storage with TTL
+/// Thin key qualification and TTL-policy layer over one Driver.
+///
+/// Volatile performs no enumeration bookkeeping and is the lowest-write-cost
+/// strategy. It is appropriate when callers already know keys. TTL reporting
+/// and scanning remain unsupported until their optional capabilities are wired
+/// into this implementation.
 pub struct VolatileImpl {
+    /// Required single-key storage primitives.
     driver: std::sync::Arc<dyn Driver>,
+    /// Qualifies caller keys into the Volatile strategy segment.
     keyspace: Keyspace,
+    /// Lease used when operation options do not select one.
     default_ttl: Duration,
+    /// Rejects writes that resolve to implicit permanence.
     require_ttl: bool,
 }
 
 impl VolatileImpl {
-    /// Create a new Volatile strategy
+    /// Wires a Volatile strategy without performing backend I/O.
+    ///
+    /// **Cost**: Local ownership moves only. **Side effects**: None.
     pub fn new(
         driver: std::sync::Arc<dyn Driver>,
         keyspace: Keyspace,
@@ -33,14 +44,17 @@ impl VolatileImpl {
         }
     }
 
-    /// Resolve TTL: use provided, fallback to default, or error if require_ttl
+    /// Resolves a write lease using the cache-wide priority contract.
+    ///
+    /// The order is explicit TTL, explicit permanence, configured default,
+    /// required-TTL rejection, then implicit permanence. This performs no I/O.
     fn resolve_ttl(&self, opts: &Options) -> Result<Duration> {
         if let Some(ttl) = opts.ttl {
             return Ok(ttl);
         }
 
         if opts.permanent {
-            return Ok(Duration::ZERO); // No expiry
+            return Ok(Duration::ZERO); // Explicit permanence.
         }
 
         if !self.default_ttl.is_zero() {
@@ -51,7 +65,7 @@ impl VolatileImpl {
             return Err(crate::CacheError::NoTTL);
         }
 
-        Ok(Duration::ZERO) // No expiry by default
+        Ok(Duration::ZERO) // Implicit permanence when allowed.
     }
 }
 
@@ -80,13 +94,12 @@ impl Volatile for VolatileImpl {
     }
 
     async fn ttl(&self, _key: &str) -> Result<Duration> {
-        // Most drivers don't report TTL, so this returns Unsupported
-        // A Redis driver could implement it with PTTL
+        // Lease reporting is not part of Driver and no capability is wired yet.
         Err(crate::CacheError::Unsupported)
     }
 
     async fn scan(&self, _pattern: &str) -> Result<Vec<String>> {
-        // Scan is best-effort, backends may refuse it
+        // Scanner is a DB/provider capability and is not wired into Volatile.
         Err(crate::CacheError::Unsupported)
     }
 }

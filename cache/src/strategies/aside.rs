@@ -1,4 +1,4 @@
-//! Internal envelope used by the read-through Aside strategy.
+//! Read-through strategy, stale refresh coordination, and stored envelope.
 //!
 //! This deliberately mirrors `runtime-go/cache/core/envelope.go`. The backend
 //! understands only bytes and one hard expiry, while Aside also needs to know
@@ -27,11 +27,14 @@ use super::refresher::Refresher;
 /// therefore belongs in Drop rather than after an await; otherwise that ID could
 /// remain marked forever and never refresh again.
 struct RefreshClaim {
+    /// Per-Aside-view set of IDs with an admitted background refresh.
     refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Owned claim removed exactly once; `None` means cleanup already ran.
     id: Option<String>,
 }
 
 impl RefreshClaim {
+    /// Takes ownership of an already-inserted refresh claim.
     fn new(refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>, id: String) -> Self {
         Self {
             refreshing,
@@ -60,10 +63,9 @@ impl Drop for RefreshClaim {
 
 /// Read-through caching over a caller-provided Loader.
 ///
-/// The Provider will eventually expose this through [`crate::core::Aside`]
-/// rather than letting callers assemble coordination resources independently.
-/// In particular, `flight` must be shared by every Aside view of one database,
-/// matching the Go build architecture.
+/// [`crate::core::DB::aside`] constructs this view and shares its Flight and
+/// Refresher with every other Aside view of the selected database. The Loader
+/// and duplicate-refresh set remain view-specific.
 ///
 /// Aside prevents source stampedes by collapsing same-ID loads, remembers
 /// authoritative absence briefly, and can return stale values immediately while
@@ -74,15 +76,25 @@ impl Drop for RefreshClaim {
 /// Best for read-heavy values whose authority is a slower database or service.
 #[derive(Clone)]
 pub struct AsideImpl {
+    /// Required one-key storage primitives for framed values and void markers.
     driver: Arc<dyn Driver>,
+    /// Generates every Aside entry key within the selected database.
     keyspace: Keyspace,
+    /// Caller-owned authoritative source invoked on misses and refreshes.
     loader: Loader,
+    /// Fresh lease used when operation options do not select one.
     default_ttl: Duration,
+    /// Stale-serving window used when operation options do not select one.
     default_stale: Duration,
+    /// Rejects an implicitly permanent load before invoking the Loader.
     require_ttl: bool,
+    /// Database-wide per-ID foreground load coordinator.
     flight: Arc<Flight>,
+    /// Database-wide non-queuing budget for background refresh tasks.
     refresher: Arc<Refresher>,
+    /// View-local claims preventing duplicate stale refresh admission by ID.
     refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>,
+    /// Lease for best-effort Loader `NotFound` markers; zero disables them.
     negative_ttl: Duration,
 }
 
@@ -118,7 +130,11 @@ impl Aside for AsideImpl {
 }
 
 impl AsideImpl {
-    /// Wires dependencies without performing I/O or allocating cache storage.
+    /// Wires one Loader-specific view without backend I/O.
+    ///
+    /// `flight` and `refresher` must come from the owning DB so separate Loader
+    /// views share its concurrency and shutdown boundaries. The constructor
+    /// allocates only the view-local duplicate-refresh claim set.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
@@ -148,8 +164,8 @@ impl AsideImpl {
     /// Reads and decodes one Aside entry.
     ///
     /// **Cost**: Exactly one Driver GET and no index operations.
-    /// **Side effects**: None. A stale value is only classified here; scheduling
-    /// its refresh belongs to a later orchestration milestone.
+    /// **Side effects**: None. A stale value is only classified here; the
+    /// caller decides whether to request a background refresh.
     async fn read(&self, id: &str) -> Result<StoredEntry> {
         let key = self.keyspace.aside_entry(id);
         let frame = self.driver.get(&key).await?;
@@ -363,6 +379,7 @@ fn fresh_until_millis(now: SystemTime, fresh_for: Duration) -> Result<i64> {
     unix_millis(deadline)
 }
 
+/// Converts an absolute time to the signed millisecond shape used by Go.
 fn unix_millis(time: SystemTime) -> Result<i64> {
     let since_epoch = time.duration_since(UNIX_EPOCH).map_err(|error| {
         CacheError::Internal(format!(
@@ -390,19 +407,29 @@ struct Envelope {
         deserialize_with = "deserialize_present_raw_value",
         skip_serializing_if = "Option::is_none"
     )]
+    /// Present encoded JSON value; `Some("null")` remains a legitimate value.
     value: Option<Box<RawValue>>,
 
     #[serde(rename = "f", default, skip_serializing_if = "is_zero")]
+    /// Unix-millisecond fresh deadline; zero means fresh until hard expiry.
     fresh: i64,
 
     #[serde(rename = "x", default, skip_serializing_if = "is_false")]
+    /// Authoritative absence marker, which takes precedence over other fields.
     void: bool,
 }
 
 /// The result of decoding one Aside envelope.
 #[derive(Debug, Eq, PartialEq)]
 enum StoredEntry {
-    Value { body: Vec<u8>, stale: bool },
+    /// Encoded application value and its freshness classification at read time.
+    Value {
+        /// Original Loader JSON bytes extracted from the envelope.
+        body: Vec<u8>,
+        /// Whether the supplied clock is strictly past the fresh deadline.
+        stale: bool,
+    },
+    /// Remembered Loader-reported absence.
     Void,
 }
 
@@ -433,6 +460,7 @@ fn pack_void() -> Result<Vec<u8>> {
     })
 }
 
+/// Serializes one envelope while translating codec failures into cache errors.
 fn encode(envelope: &Envelope) -> Result<Vec<u8>> {
     serde_json::to_vec(envelope)
         .map_err(|error| invalid_envelope(format!("cannot encode envelope: {error}")))
@@ -462,10 +490,12 @@ fn unpack(frame: &[u8], now_ms: i64) -> Result<StoredEntry> {
     })
 }
 
+/// Serde omission predicate matching Go's `omitempty` integer behavior.
 fn is_zero(value: &i64) -> bool {
     *value == 0
 }
 
+/// Serde omission predicate matching Go's `omitempty` boolean behavior.
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -482,6 +512,7 @@ where
     Box::<RawValue>::deserialize(deserializer).map(Some)
 }
 
+/// Adds stable strategy context to envelope encoding and decoding failures.
 fn invalid_envelope(reason: String) -> CacheError {
     CacheError::Internal(format!("invalid Aside envelope: {reason}"))
 }
@@ -564,13 +595,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(destination, br#""loaded""#);
-        assert_eq!(
-            aside.read("item").await.unwrap(),
-            StoredEntry::Value {
-                body: br#""loaded""#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
+            body: br#""loaded""#.to_vec(),
+            stale: false,
+        });
     }
 
     #[tokio::test]
@@ -648,13 +676,10 @@ mod tests {
         assert_eq!(destination, br#""v1""#);
         assert!(started.elapsed() < Duration::from_millis(40));
         refresher.drain(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(
-            aside.read("item").await.unwrap(),
-            StoredEntry::Value {
-                body: br#""v2""#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
+            body: br#""v2""#.to_vec(),
+            stale: false,
+        });
     }
 
     #[tokio::test]
@@ -674,13 +699,10 @@ mod tests {
 
         aside.refresh("item", &Options::default()).await.unwrap();
 
-        assert_eq!(
-            aside.read("item").await.unwrap(),
-            StoredEntry::Value {
-                body: br#""new""#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
+            body: br#""new""#.to_vec(),
+            stale: false,
+        });
     }
 
     #[tokio::test]
@@ -717,13 +739,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, br#"{"id":"item-1"}"#);
-        assert_eq!(
-            aside.read("item-1").await.unwrap(),
-            StoredEntry::Value {
-                body: br#"{"id":"item-1"}"#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(aside.read("item-1").await.unwrap(), StoredEntry::Value {
+            body: br#"{"id":"item-1"}"#.to_vec(),
+            stale: false,
+        });
     }
 
     #[tokio::test]
@@ -805,13 +824,10 @@ mod tests {
         aside.load_and_store("item", &opts).await.unwrap();
         tokio::time::sleep(Duration::from_millis(25)).await;
 
-        assert_eq!(
-            aside.read("item").await.unwrap(),
-            StoredEntry::Value {
-                body: br#""value""#.to_vec(),
-                stale: true,
-            }
-        );
+        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
+            body: br#""value""#.to_vec(),
+            stale: true,
+        });
     }
 
     #[tokio::test]
@@ -875,13 +891,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            aside.read("item").await.unwrap(),
-            StoredEntry::Value {
-                body: br#""v2""#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
+            body: br#""v2""#.to_vec(),
+            stale: false,
+        });
     }
 
     #[tokio::test]
@@ -1063,13 +1076,10 @@ mod tests {
 
         let entry = aside.read("id").await.unwrap();
 
-        assert_eq!(
-            entry,
-            StoredEntry::Value {
-                body: br#"{"name":"value"}"#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(entry, StoredEntry::Value {
+            body: br#"{"name":"value"}"#.to_vec(),
+            stale: false,
+        });
     }
 
     #[tokio::test]
@@ -1085,13 +1095,10 @@ mod tests {
 
         let entry = aside.read("id").await.unwrap();
 
-        assert_eq!(
-            entry,
-            StoredEntry::Value {
-                body: br#""old""#.to_vec(),
-                stale: true,
-            }
-        );
+        assert_eq!(entry, StoredEntry::Value {
+            body: br#""old""#.to_vec(),
+            stale: true,
+        });
     }
 
     #[tokio::test]
@@ -1225,39 +1232,30 @@ mod tests {
     fn test_aside_freshness_without_stale_uses_ttl_as_hard_expiry() {
         let value = freshness(Duration::from_secs(10), Duration::ZERO).unwrap();
 
-        assert_eq!(
-            value,
-            Freshness {
-                fresh_for: Duration::ZERO,
-                hard_ttl: Duration::from_secs(10),
-            }
-        );
+        assert_eq!(value, Freshness {
+            fresh_for: Duration::ZERO,
+            hard_ttl: Duration::from_secs(10),
+        });
     }
 
     #[test]
     fn test_aside_freshness_with_stale_extends_hard_expiry() {
         let value = freshness(Duration::from_secs(10), Duration::from_secs(5)).unwrap();
 
-        assert_eq!(
-            value,
-            Freshness {
-                fresh_for: Duration::from_secs(10),
-                hard_ttl: Duration::from_secs(15),
-            }
-        );
+        assert_eq!(value, Freshness {
+            fresh_for: Duration::from_secs(10),
+            hard_ttl: Duration::from_secs(15),
+        });
     }
 
     #[test]
     fn test_aside_freshness_permanent_ignores_stale_window() {
         let value = freshness(Duration::ZERO, Duration::from_secs(5)).unwrap();
 
-        assert_eq!(
-            value,
-            Freshness {
-                fresh_for: Duration::ZERO,
-                hard_ttl: Duration::ZERO,
-            }
-        );
+        assert_eq!(value, Freshness {
+            fresh_for: Duration::ZERO,
+            hard_ttl: Duration::ZERO,
+        });
     }
 
     #[test]
@@ -1289,13 +1287,10 @@ mod tests {
 
         let decoded = unpack(&frame, 199).unwrap();
 
-        assert_eq!(
-            decoded,
-            StoredEntry::Value {
-                body: br#"{"name":"value"}"#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(decoded, StoredEntry::Value {
+            body: br#"{"name":"value"}"#.to_vec(),
+            stale: false,
+        });
     }
 
     #[test]
@@ -1304,13 +1299,10 @@ mod tests {
 
         let decoded = unpack(&frame, 200).unwrap();
 
-        assert_eq!(
-            decoded,
-            StoredEntry::Value {
-                body: br#""value""#.to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(decoded, StoredEntry::Value {
+            body: br#""value""#.to_vec(),
+            stale: false,
+        });
     }
 
     #[test]
@@ -1319,13 +1311,10 @@ mod tests {
 
         let decoded = unpack(&frame, 201).unwrap();
 
-        assert_eq!(
-            decoded,
-            StoredEntry::Value {
-                body: br#""value""#.to_vec(),
-                stale: true,
-            }
-        );
+        assert_eq!(decoded, StoredEntry::Value {
+            body: br#""value""#.to_vec(),
+            stale: true,
+        });
     }
 
     #[test]
@@ -1334,13 +1323,10 @@ mod tests {
 
         let decoded = unpack(&frame, i64::MAX).unwrap();
 
-        assert_eq!(
-            decoded,
-            StoredEntry::Value {
-                body: b"null".to_vec(),
-                stale: false,
-            }
-        );
+        assert_eq!(decoded, StoredEntry::Value {
+            body: b"null".to_vec(),
+            stale: false,
+        });
     }
 
     #[test]

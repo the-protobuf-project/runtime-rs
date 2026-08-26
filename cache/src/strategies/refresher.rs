@@ -11,20 +11,31 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::{CacheError, Result};
 
+/// Admission and drain state protected by one short-lived async lock.
 struct State {
+    /// Once true, admission is permanently closed for this DB lifecycle.
     closed: bool,
+    /// Number of admitted tasks whose completion cleanup has not run.
     running: usize,
 }
 
 /// Runs background work under a fixed non-queuing budget.
 pub(crate) struct Refresher {
+    /// Coordinates close with admission and completion accounting.
     state: Arc<Mutex<State>>,
+    /// Wakes drain waiters when the running count reaches zero.
     idle: Arc<Notify>,
+    /// Fixed task capacity; acquisition never waits or queues.
     slots: Arc<Semaphore>,
+    /// Maximum time this coordinator waits on each admitted work future.
     timeout: Duration,
 }
 
 impl Refresher {
+    /// Creates an open refresher with a fixed non-zero admission budget.
+    ///
+    /// A zero limit is normalized to one. Construction is local and starts no
+    /// task; the timeout applies independently to each later admission.
     pub(crate) fn new(limit: usize, timeout: Duration) -> Self {
         Self {
             state: Arc::new(Mutex::new(State {
@@ -82,7 +93,10 @@ impl Refresher {
         true
     }
 
-    /// Stops admission and waits for admitted tasks up to `limit`.
+    /// Stops admission permanently and waits for admitted tasks up to `limit`.
+    ///
+    /// Repeated calls are safe. Timeout returns `Internal`; already-running
+    /// tasks keep their own lifecycle and completion accounting.
     pub(crate) async fn drain(&self, limit: Duration) -> Result<()> {
         {
             let mut state = self.state.lock().await;

@@ -1,4 +1,9 @@
-//! Secondary-index filing over the shared Document algorithm.
+//! Secondary-index filing, lookup, and group deletion over Document storage.
+//!
+//! Each entry has secondary membership sets keyed by `field=value` and an
+//! inverse per-ID record used to undo those memberships without scanning every
+//! index. Operations are ordered for recoverable partial failure but are not
+//! transactional across keys.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -25,10 +30,15 @@ use super::document::default_new_id;
 /// memberships. These extra writes enable lookup and group invalidation at the
 /// cost of hot index keys and ordered, non-transactional failure handling.
 pub struct IndexedImpl {
+    /// Shared ID-addressed algorithm bound to the isolated `idx` key family.
     document: DocumentImpl,
+    /// Entry storage and liveness checks.
     driver: Arc<dyn Driver>,
+    /// Optional server-side index capability; secondary operations require it.
     sets: Option<Arc<dyn Sets>>,
+    /// Generates every entry, membership, and inverse-record key.
     keyspace: Keyspace,
+    /// Bound for parallel per-entry reads and cleanup operations; always >= 1.
     concurrency: usize,
 }
 
@@ -55,6 +65,9 @@ impl IndexedImpl {
     }
 
     /// Wires Indexed with the database's shared ID generator.
+    ///
+    /// Construction performs no backend I/O. A zero concurrency value is
+    /// normalized to one so a configured zero cannot permanently stall work.
     pub(crate) fn new_with_id(
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
@@ -81,10 +94,17 @@ impl IndexedImpl {
         }
     }
 
+    /// Encodes inverse metadata for one secondary membership.
+    ///
+    /// This mirrors Go's `field=value` record. The key itself remains a value
+    /// stored in Sets; all backend keys still come from Keyspace.
     fn pair(field: &str, value: &str) -> String {
         format!("{field}={value}")
     }
 
+    /// Decodes inverse metadata, treating a missing separator as an empty value.
+    ///
+    /// Splitting only once preserves additional `=` characters in index values.
     fn split_pair(pair: &str) -> (&str, &str) {
         match pair.split_once('=') {
             Some(parts) => parts,
@@ -92,6 +112,11 @@ impl IndexedImpl {
         }
     }
 
+    /// Adds an ID to every requested secondary set, then records undo metadata.
+    ///
+    /// **Cost**: One Sets write per field plus one inverse-record write.
+    /// **Failure ordering**: Memberships are written first. A later failure can
+    /// leave dangling, sweepable members rather than an invisible stored value.
     async fn file(
         &self,
         sets: &Arc<dyn Sets>,
@@ -114,6 +139,11 @@ impl IndexedImpl {
         sets.set_add(&fields_key, &pair_refs).await
     }
 
+    /// Removes obsolete memberships, then idempotently files all desired ones.
+    ///
+    /// Failure while pruning the inverse record is deliberately suppressed only
+    /// after the real membership is gone; a later refile/delete safely retries
+    /// that idempotent removal. All other Sets errors are returned.
     async fn refile(
         &self,
         sets: &Arc<dyn Sets>,
@@ -152,6 +182,10 @@ impl IndexedImpl {
         self.file(sets, id, indexes).await
     }
 
+    /// Removes every recorded secondary membership before entry deletion.
+    ///
+    /// The inverse record avoids scanning every possible index. Errors stop the
+    /// sequence so the value is not deleted while known memberships remain.
     async fn unfile(&self, sets: &Arc<dyn Sets>, id: &str) -> Result<()> {
         let fields_key = self.keyspace.idx_fields(id);
         let previous = sets.set_members(&fields_key).await?;
@@ -165,6 +199,11 @@ impl IndexedImpl {
     }
 
     /// Returns live IDs and best-effort sweeps expired members.
+    ///
+    /// **Cost**: One membership read, then up to one Driver Exists per member
+    /// with bounded concurrency, plus one cleanup write when stale IDs exist.
+    /// Cleanup failure is suppressed because it must not invalidate a correct
+    /// lookup result and a later lookup retries it.
     async fn ids_by_index(&self, field: &str, value: &str) -> Result<Vec<String>> {
         let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
         let index_key = self.keyspace.idx_by_field(field, value);
@@ -211,6 +250,10 @@ impl IndexedImpl {
     }
 
     /// Returns values for live secondary members, tolerating expiry races.
+    ///
+    /// IDs can expire after their liveness check. Only `NotFound` from that race
+    /// is skipped; other Driver errors abort the lookup. Reads are bounded by
+    /// the configured concurrency limit.
     async fn by_index(&self, field: &str, value: &str) -> Result<Vec<Vec<u8>>> {
         let ids = self.ids_by_index(field, value).await?;
         let driver = self.driver.clone();
@@ -234,6 +277,11 @@ impl IndexedImpl {
     }
 
     /// Removes one live secondary group and every membership naming its IDs.
+    ///
+    /// Inverse records are gathered concurrently, then removals are grouped by
+    /// shared index key to avoid one write per ID. Secondary memberships and
+    /// enumeration records are removed before values. Failure is non-atomic:
+    /// successful earlier removals are not rolled back.
     async fn delete_by_index(&self, field: &str, value: &str) -> Result<usize> {
         let ids = self.ids_by_index(field, value).await?;
         if ids.is_empty() {
