@@ -15,7 +15,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     CacheError, Result,
-    core::{Bulk, Document, Driver, Indexed, Keyspace, Leases, NewId, Options, Sets},
+    core::{Bulk, Document, Driver, Indexed, Keyspace, Leases, NewId, Options, SetScanner, Sets},
 };
 
 #[cfg(test)]
@@ -41,6 +41,8 @@ pub struct IndexedImpl {
     sets: Option<Arc<dyn Sets>>,
     /// Optional ordered multi-key read capability.
     bulk: Option<Arc<dyn Bulk>>,
+    /// Optional cursor-based server-side set traversal capability.
+    set_scanner: Option<Arc<dyn SetScanner>>,
     /// Generates every entry, membership, and inverse-record key.
     keyspace: Keyspace,
     /// Bound for parallel per-entry reads and cleanup operations; always >= 1.
@@ -63,6 +65,7 @@ impl IndexedImpl {
             sets,
             None,
             None,
+            None,
             keyspace,
             default_ttl,
             require_ttl,
@@ -80,6 +83,7 @@ impl IndexedImpl {
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
         bulk: Option<Arc<dyn Bulk>>,
+        set_scanner: Option<Arc<dyn SetScanner>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -91,6 +95,7 @@ impl IndexedImpl {
             sets.clone(),
             leases,
             bulk.clone(),
+            set_scanner.clone(),
             keyspace.clone(),
             default_ttl,
             require_ttl,
@@ -102,6 +107,7 @@ impl IndexedImpl {
             driver,
             sets,
             bulk,
+            set_scanner,
             keyspace,
             concurrency: concurrency.max(1),
         }
@@ -225,6 +231,7 @@ impl IndexedImpl {
             self.driver.clone(),
             self.bulk.as_deref(),
             sets,
+            self.set_scanner.as_deref(),
             self.concurrency,
             &index_key,
             move |id| keyspace.idx_entry(id),

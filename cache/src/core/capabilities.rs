@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{Bulk, Leases, Scanner, Sets};
+use super::{Bulk, Leases, Scanner, SetScanner, Sets};
 
 /// Optional behavior a backend can provide beyond the required Driver trait.
 ///
@@ -28,6 +28,8 @@ pub struct Capabilities {
     scanner: Option<Arc<dyn Scanner>>,
     /// Ordered multi-key reads sharing backend round trips.
     bulk: Option<Arc<dyn Bulk>>,
+    /// Cursor-based traversal of large server-side sets.
+    set_scanner: Option<Arc<dyn SetScanner>>,
 }
 
 impl Capabilities {
@@ -106,6 +108,23 @@ impl Capabilities {
     pub fn bulk(&self) -> Option<Arc<dyn Bulk>> {
         self.bulk.clone()
     }
+
+    /// Declares cursor-based server-side set traversal.
+    ///
+    /// **Cost**: O(1); stores one reference-counted capability handle.
+    /// **Side effects**: Replaces any previously declared SetScanner capability.
+    pub fn with_set_scanner(mut self, set_scanner: Arc<dyn SetScanner>) -> Self {
+        self.set_scanner = Some(set_scanner);
+        self
+    }
+
+    /// Returns the declared SetScanner capability, if available.
+    ///
+    /// **Cost**: O(1); cloning increments an atomic reference count.
+    /// **Side effects**: None on the backend.
+    pub fn set_scanner(&self) -> Option<Arc<dyn SetScanner>> {
+        self.set_scanner.clone()
+    }
 }
 
 #[cfg(test)]
@@ -128,6 +147,7 @@ mod tests {
         assert!(Capabilities::new().leases().is_none());
         assert!(Capabilities::new().scanner().is_none());
         assert!(Capabilities::new().bulk().is_none());
+        assert!(Capabilities::new().set_scanner().is_none());
     }
 
     #[test]
@@ -156,5 +176,12 @@ mod tests {
         let capabilities = Capabilities::new().with_bulk(Arc::new(MemoryDriver::new()));
 
         assert!(capabilities.bulk().is_some());
+    }
+
+    #[test]
+    fn test_capabilities_with_set_scanner_exposes_declared_capability() {
+        let capabilities = Capabilities::new().with_set_scanner(Arc::new(MemorySets::new()));
+
+        assert!(capabilities.set_scanner().is_some());
     }
 }

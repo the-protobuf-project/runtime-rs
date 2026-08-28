@@ -33,7 +33,7 @@ pub use leases::Leases;
 pub use memory_driver::MemoryDriver;
 pub use options::Options;
 pub use scanner::Scanner;
-pub use sets::{MemorySets, Sets};
+pub use sets::{MemorySets, SetScanVisitor, SetScanner, Sets};
 pub use volatile::Volatile;
 
 use crate::Result;

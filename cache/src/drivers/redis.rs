@@ -25,7 +25,8 @@ use crate::{
     CacheError, Config, DialTimeout, Result,
     core::{
         Bulk, Capabilities, DB, DatabaseSpec, Driver, Keyspace, Leases, Provider, Release, Scanner,
-        Sets, build_database, check_known, check_namespace, drop_database,
+        SetScanVisitor, SetScanner, Sets, build_database, check_known, check_namespace,
+        drop_database,
     },
 };
 
@@ -355,9 +356,9 @@ impl RedisProvider {
 
     /// Wires one selected client into every core strategy and capability.
     ///
-    /// Driver, Sets, Leases, Scanner, and Bulk are trait-object views of one
-    /// primitive, keeping all commands on the selected client. `release` is
-    /// present only when this DB owns a derived client. Construction is local
+    /// Driver, Sets, Leases, Scanner, SetScanner, and Bulk are trait-object views
+    /// of one primitive, keeping all commands on the selected client. `release`
+    /// is present only when this DB owns a derived client. Construction is local
     /// and performs no Redis round trip.
     fn database(
         &self,
@@ -371,11 +372,13 @@ impl RedisProvider {
         let sets: Arc<dyn Sets> = primitives.clone();
         let leases: Arc<dyn Leases> = primitives.clone();
         let bulk: Arc<dyn Bulk> = primitives.clone();
+        let set_scanner: Arc<dyn SetScanner> = primitives.clone();
         let scanner: Arc<dyn Scanner> = primitives;
         let capabilities = Capabilities::new()
             .with_sets(sets)
             .with_leases(leases)
             .with_bulk(bulk)
+            .with_set_scanner(set_scanner)
             .with_scanner(scanner);
         build_database(driver, capabilities, DatabaseSpec {
             prefix: self.config.prefix.clone(),
@@ -476,8 +479,8 @@ impl Provider for RedisProvider {
 /// This adapter deliberately contains no Keyspace or strategy policy. Ordinary
 /// non-empty operations map to one Redis command; Bulk maps an ordered command
 /// pipeline to one round trip.
-/// One instance can be viewed as Driver, Sets, Leases, Scanner, and Bulk while
-/// sharing the same executor.
+/// One instance can be viewed as Driver, Sets, Leases, Scanner, SetScanner, and
+/// Bulk while sharing the same executor.
 ///
 /// **Trade-offs**: Direct commands preserve atomic Redis primitives, but the
 /// Scanner must collect a full matching key list to satisfy the current Go-
@@ -768,6 +771,30 @@ impl Sets for RedisPrimitives {
 }
 
 #[async_trait]
+impl SetScanner for RedisPrimitives {
+    /// Walks one Redis set with SSCAN and processes each page immediately.
+    ///
+    /// **Cost**: One SSCAN round trip per cursor page with a count hint of 256.
+    /// **Side effects**: Driver-side none; the visitor may perform cleanup.
+    async fn set_scan(&self, key: &str, visitor: &mut dyn SetScanVisitor) -> Result<()> {
+        let mut cursor = 0_u64;
+        loop {
+            let mut command = redis::cmd("SSCAN");
+            command.arg(key).arg(cursor).arg("COUNT").arg(SCAN_BATCH);
+            let response = self.command("set scan", command).await?;
+            let (next, members): (u64, Vec<String>) = decode("set-scan reply", response)?;
+            if !members.is_empty() {
+                visitor.visit(members).await?;
+            }
+            if next == 0 {
+                return Ok(());
+            }
+            cursor = next;
+        }
+    }
+}
+
+#[async_trait]
 impl Scanner for RedisPrimitives {
     /// Walks keys matching Redis glob syntax using cursor-based SCAN.
     ///
@@ -965,6 +992,22 @@ mod tests {
 
         async fn close(&self) {
             self.closed.store(true, Ordering::SeqCst);
+        }
+    }
+
+    struct PageVisitor {
+        pages: Vec<Vec<String>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl SetScanVisitor for PageVisitor {
+        async fn visit(&mut self, members: Vec<String>) -> Result<()> {
+            if self.fail {
+                return Err(CacheError::Internal("visitor failed".to_owned()));
+            }
+            self.pages.push(members);
+            Ok(())
         }
     }
 
@@ -1346,6 +1389,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_redis_set_scanner_walks_pages_without_accumulating() {
+        let (driver, executor) = primitives([
+            Ok(Value::Array(vec![
+                Value::BulkString(b"7".to_vec()),
+                Value::Array(vec![Value::BulkString(b"one".to_vec())]),
+            ])),
+            Ok(Value::Array(vec![
+                Value::BulkString(b"0".to_vec()),
+                Value::Array(vec![
+                    Value::BulkString(b"one".to_vec()),
+                    Value::BulkString(b"two".to_vec()),
+                ]),
+            ])),
+        ]);
+        let mut visitor = PageVisitor {
+            pages: Vec::new(),
+            fail: false,
+        };
+
+        driver.set_scan("members", &mut visitor).await.unwrap();
+
+        assert_eq!(visitor.pages, vec![vec!["one".to_owned()], vec![
+            "one".to_owned(),
+            "two".to_owned()
+        ]]);
+        let mut first = redis::cmd("SSCAN");
+        first.arg("members").arg(0_u64).arg("COUNT").arg(256_usize);
+        let mut second = redis::cmd("SSCAN");
+        second.arg("members").arg(7_u64).arg("COUNT").arg(256_usize);
+        assert_eq!(executor.commands().await, vec![
+            packed(first),
+            packed(second)
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_set_scanner_stops_after_visitor_failure() {
+        let (driver, executor) = primitives([
+            Ok(Value::Array(vec![
+                Value::BulkString(b"7".to_vec()),
+                Value::Array(vec![Value::BulkString(b"one".to_vec())]),
+            ])),
+            Ok(Value::Array(vec![
+                Value::BulkString(b"0".to_vec()),
+                Value::Array(Vec::new()),
+            ])),
+        ]);
+        let mut visitor = PageVisitor {
+            pages: Vec::new(),
+            fail: true,
+        };
+
+        let result = driver.set_scan("members", &mut visitor).await;
+
+        assert!(matches!(
+            result,
+            Err(CacheError::Internal(message)) if message == "visitor failed"
+        ));
+        assert_eq!(executor.commands().await.len(), 1);
+    }
+
+    #[tokio::test]
     async fn test_redis_scanner_walks_cursor_and_deduplicates_keys() {
         let (driver, executor) = primitives([
             Ok(Value::Array(vec![
@@ -1413,7 +1518,10 @@ mod tests {
     async fn test_redis_provider_set_database_validates_pings_and_wires_capabilities() {
         let (client, executor) = client(4, [
             Ok(Value::SimpleString("PONG".to_owned())),
-            Ok(Value::Array(vec![Value::BulkString(b"entry".to_vec())])),
+            Ok(Value::Array(vec![
+                Value::BulkString(b"0".to_vec()),
+                Value::Array(vec![Value::BulkString(b"entry".to_vec())]),
+            ])),
             Ok(Value::Array(vec![Value::Int(1)])),
             Ok(Value::Int(125)),
             Ok(Value::Array(vec![
@@ -1442,8 +1550,12 @@ mod tests {
         assert_eq!(volatile_keys, [
             "app:orders:cache:vol:session:one".to_owned()
         ]);
-        let mut members = redis::cmd("SMEMBERS");
-        members.arg("app:orders:cache:doc:index");
+        let mut members = redis::cmd("SSCAN");
+        members
+            .arg("app:orders:cache:doc:index")
+            .arg(0_u64)
+            .arg("COUNT")
+            .arg(256_usize);
         let mut exists = redis::pipe();
         exists.cmd("EXISTS").arg("app:orders:cache:doc:entry:entry");
         let mut ttl = redis::cmd("PTTL");

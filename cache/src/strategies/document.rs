@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     CacheError, Result,
-    core::{Bulk, Document, Driver, Keyspace, Leases, NewId, Options, Sets},
+    core::{Bulk, Document, Driver, Keyspace, Leases, NewId, Options, SetScanner, Sets},
 };
 
 use super::batch::{DEFAULT_CONCURRENCY, get_all, live_members};
@@ -43,6 +43,8 @@ pub struct DocumentImpl {
     leases: Option<Arc<dyn Leases>>,
     /// Optional ordered multi-key read capability.
     bulk: Option<Arc<dyn Bulk>>,
+    /// Optional cursor-based enumeration-set traversal capability.
+    set_scanner: Option<Arc<dyn SetScanner>>,
     /// Selected database's centralized key builder.
     keyspace: Keyspace,
     /// Chooses Document or Indexed key families for the shared algorithm.
@@ -89,6 +91,7 @@ impl DocumentImpl {
             sets,
             None,
             None,
+            None,
             keyspace,
             default_ttl,
             require_ttl,
@@ -105,6 +108,7 @@ impl DocumentImpl {
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
         bulk: Option<Arc<dyn Bulk>>,
+        set_scanner: Option<Arc<dyn SetScanner>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -116,6 +120,7 @@ impl DocumentImpl {
             sets,
             leases,
             bulk,
+            set_scanner,
             keyspace,
             default_ttl,
             require_ttl,
@@ -134,6 +139,7 @@ impl DocumentImpl {
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
         bulk: Option<Arc<dyn Bulk>>,
+        set_scanner: Option<Arc<dyn SetScanner>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -145,6 +151,7 @@ impl DocumentImpl {
             sets,
             leases,
             bulk,
+            set_scanner,
             keyspace,
             default_ttl,
             require_ttl,
@@ -160,6 +167,7 @@ impl DocumentImpl {
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
         bulk: Option<Arc<dyn Bulk>>,
+        set_scanner: Option<Arc<dyn SetScanner>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -172,6 +180,7 @@ impl DocumentImpl {
             sets,
             leases,
             bulk,
+            set_scanner,
             keyspace,
             layout,
             default_ttl,
@@ -298,6 +307,7 @@ impl Document for DocumentImpl {
             self.driver.clone(),
             self.bulk.as_deref(),
             sets,
+            self.set_scanner.as_deref(),
             self.concurrency,
             &index_key,
             |id| self.entry_key(id),

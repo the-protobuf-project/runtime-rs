@@ -230,6 +230,7 @@ pub fn build_database(
     let leases = capabilities.leases();
     let scanner = capabilities.scanner();
     let bulk = capabilities.bulk();
+    let set_scanner = capabilities.set_scanner();
     let new_id = match spec.new_id {
         Some(new_id) => new_id,
         None => default_new_id(),
@@ -242,6 +243,7 @@ pub fn build_database(
         sets.clone(),
         leases.clone(),
         bulk.clone(),
+        set_scanner.clone(),
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
@@ -261,6 +263,7 @@ pub fn build_database(
         sets,
         leases,
         bulk,
+        set_scanner,
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
