@@ -4,6 +4,7 @@
 //! in `drivers`, while cross-operation behavior lives in `strategies`.
 
 pub mod aside;
+pub mod bulk;
 pub mod capabilities;
 pub mod database;
 pub mod document;
@@ -20,6 +21,7 @@ pub mod sets;
 pub mod volatile;
 
 pub use aside::{Aside, Loader};
+pub use bulk::Bulk;
 pub use capabilities::Capabilities;
 pub use database::{DB, DatabaseSpec, Release, build_database};
 pub use document::{Document, NewId};

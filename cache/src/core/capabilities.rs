@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{Leases, Scanner, Sets};
+use super::{Bulk, Leases, Scanner, Sets};
 
 /// Optional behavior a backend can provide beyond the required Driver trait.
 ///
@@ -26,6 +26,8 @@ pub struct Capabilities {
     leases: Option<Arc<dyn Leases>>,
     /// Cursor-based whole-keyspace traversal for administrative deletion.
     scanner: Option<Arc<dyn Scanner>>,
+    /// Ordered multi-key reads sharing backend round trips.
+    bulk: Option<Arc<dyn Bulk>>,
 }
 
 impl Capabilities {
@@ -87,6 +89,23 @@ impl Capabilities {
     pub fn scanner(&self) -> Option<Arc<dyn Scanner>> {
         self.scanner.clone()
     }
+
+    /// Declares ordered multi-key read support.
+    ///
+    /// **Cost**: O(1); stores one reference-counted capability handle.
+    /// **Side effects**: Replaces any previously declared Bulk capability.
+    pub fn with_bulk(mut self, bulk: Arc<dyn Bulk>) -> Self {
+        self.bulk = Some(bulk);
+        self
+    }
+
+    /// Returns the declared Bulk capability, if the backend can batch reads.
+    ///
+    /// **Cost**: O(1); cloning increments an atomic reference count.
+    /// **Side effects**: None on the backend.
+    pub fn bulk(&self) -> Option<Arc<dyn Bulk>> {
+        self.bulk.clone()
+    }
 }
 
 #[cfg(test)]
@@ -108,6 +127,7 @@ mod tests {
         assert!(Capabilities::new().sets().is_none());
         assert!(Capabilities::new().leases().is_none());
         assert!(Capabilities::new().scanner().is_none());
+        assert!(Capabilities::new().bulk().is_none());
     }
 
     #[test]
@@ -129,5 +149,12 @@ mod tests {
         let capabilities = Capabilities::new().with_scanner(Arc::new(EmptyScanner));
 
         assert!(capabilities.scanner().is_some());
+    }
+
+    #[test]
+    fn test_capabilities_with_bulk_exposes_declared_capability() {
+        let capabilities = Capabilities::new().with_bulk(Arc::new(MemoryDriver::new()));
+
+        assert!(capabilities.bulk().is_some());
     }
 }

@@ -4,7 +4,7 @@
 //! preserves Driver semantics without external services, but provides neither
 //! persistence nor coordination across processes.
 
-use super::{Driver, Leases};
+use super::{Bulk, Driver, Leases};
 use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -184,6 +184,30 @@ impl Driver for MemoryDriver {
 }
 
 #[async_trait::async_trait]
+impl Bulk for MemoryDriver {
+    /// Reads ordered values under one shared map lock.
+    async fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let data = self.data.read().await;
+        Ok(keys
+            .iter()
+            .map(|key| match data.get(key) {
+                Some(entry) if !entry.is_expired() => Some(entry.value.clone()),
+                Some(_) | None => None,
+            })
+            .collect())
+    }
+
+    /// Checks ordered liveness under one shared map lock.
+    async fn exists_many(&self, keys: &[String]) -> Result<Vec<bool>> {
+        let data = self.data.read().await;
+        Ok(keys
+            .iter()
+            .map(|key| data.get(key).is_some_and(|entry| !entry.is_expired()))
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
 impl Leases for MemoryDriver {
     /// Reports a live entry's lease from the process monotonic clock.
     ///
@@ -246,5 +270,29 @@ mod lease_tests {
             Leases::ttl(&driver, "expired").await,
             Err(crate::CacheError::NotFound)
         ));
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_driver_bulk_preserves_order_and_marks_misses() {
+        let driver = MemoryDriver::new();
+        driver.set("one", b"first", Duration::ZERO).await.unwrap();
+        driver.set("two", b"second", Duration::ZERO).await.unwrap();
+        let keys = vec!["two".to_owned(), "missing".to_owned(), "one".to_owned()];
+
+        assert_eq!(Bulk::get_many(&driver, &keys).await.unwrap(), vec![
+            Some(b"second".to_vec()),
+            None,
+            Some(b"first".to_vec())
+        ]);
+        assert_eq!(Bulk::exists_many(&driver, &keys).await.unwrap(), vec![
+            true, false, true
+        ]);
+        assert!(Bulk::get_many(&driver, &[]).await.unwrap().is_empty());
+        assert!(Bulk::exists_many(&driver, &[]).await.unwrap().is_empty());
     }
 }

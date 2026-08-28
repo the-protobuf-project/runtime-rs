@@ -15,8 +15,8 @@ use std::{collections::HashSet, fmt::Display, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use redis::{
-    Cmd, ConnectionInfo, ErrorKind, FromRedisValue, IntoConnectionInfo, RedisConnectionInfo,
-    RedisError, RedisResult, Value,
+    Cmd, ConnectionInfo, ErrorKind, FromRedisValue, IntoConnectionInfo, Pipeline,
+    RedisConnectionInfo, RedisError, RedisResult, Value,
     aio::{ConnectionManager, ConnectionManagerConfig},
 };
 use tokio::sync::RwLock;
@@ -24,8 +24,8 @@ use tokio::sync::RwLock;
 use crate::{
     CacheError, Config, DialTimeout, Result,
     core::{
-        Capabilities, DB, DatabaseSpec, Driver, Keyspace, Leases, Provider, Release, Scanner, Sets,
-        build_database, check_known, check_namespace, drop_database,
+        Bulk, Capabilities, DB, DatabaseSpec, Driver, Keyspace, Leases, Provider, Release, Scanner,
+        Sets, build_database, check_known, check_namespace, drop_database,
     },
 };
 
@@ -90,7 +90,7 @@ impl Default for RedisConfig {
     }
 }
 
-/// Internal seam for executing an already-constructed Redis command.
+/// Internal seam for executing already-constructed Redis commands and pipelines.
 ///
 /// Production uses [`ManagedExecutor`]. Tests substitute a scripted executor
 /// so exact RESP commands and failures can be checked without a Redis service.
@@ -101,6 +101,12 @@ trait CommandExecutor: Send + Sync {
     ///
     /// **Cost**: Exactly one Redis round trip.
     async fn execute(&self, command: Cmd) -> RedisResult<Value>;
+
+    /// Executes one non-transactional command pipeline in one round trip.
+    ///
+    /// **Side effects**: Runs every queued Redis command in order without
+    /// transaction isolation.
+    async fn execute_pipeline(&self, pipeline: Pipeline) -> RedisResult<Vec<Value>>;
 
     /// Stops future command admission and releases the owned transport handle.
     ///
@@ -136,6 +142,19 @@ impl CommandExecutor for ManagedExecutor {
             }
         };
         command.query_async(&mut manager).await
+    }
+
+    async fn execute_pipeline(&self, pipeline: Pipeline) -> RedisResult<Vec<Value>> {
+        let mut manager = match self.manager.read().await.as_ref() {
+            Some(manager) => manager.clone(),
+            None => {
+                return Err(RedisError::from((
+                    ErrorKind::Client,
+                    "Redis client is closed",
+                )));
+            }
+        };
+        pipeline.query_async(&mut manager).await
     }
 
     async fn close(&self) {
@@ -336,10 +355,10 @@ impl RedisProvider {
 
     /// Wires one selected client into every core strategy and capability.
     ///
-    /// Driver, Sets, Leases, and Scanner are trait-object views of one primitive,
-    /// keeping all commands on the selected client. `release` is present only
-    /// when this DB owns a derived client. Construction is local and performs
-    /// no Redis round trip.
+    /// Driver, Sets, Leases, Scanner, and Bulk are trait-object views of one
+    /// primitive, keeping all commands on the selected client. `release` is
+    /// present only when this DB owns a derived client. Construction is local
+    /// and performs no Redis round trip.
     fn database(
         &self,
         client: Arc<RedisClient>,
@@ -351,10 +370,12 @@ impl RedisProvider {
         let driver: Arc<dyn Driver> = primitives.clone();
         let sets: Arc<dyn Sets> = primitives.clone();
         let leases: Arc<dyn Leases> = primitives.clone();
+        let bulk: Arc<dyn Bulk> = primitives.clone();
         let scanner: Arc<dyn Scanner> = primitives;
         let capabilities = Capabilities::new()
             .with_sets(sets)
             .with_leases(leases)
+            .with_bulk(bulk)
             .with_scanner(scanner);
         build_database(driver, capabilities, DatabaseSpec {
             prefix: self.config.prefix.clone(),
@@ -452,9 +473,10 @@ impl Provider for RedisProvider {
 
 /// Redis implementation of the low-level cache primitives.
 ///
-/// This adapter deliberately contains no Keyspace or strategy policy. Every
-/// non-empty operation maps to one Redis command and therefore one round trip.
-/// One instance can be viewed as Driver, Sets, Leases, and Scanner while
+/// This adapter deliberately contains no Keyspace or strategy policy. Ordinary
+/// non-empty operations map to one Redis command; Bulk maps an ordered command
+/// pipeline to one round trip.
+/// One instance can be viewed as Driver, Sets, Leases, Scanner, and Bulk while
 /// sharing the same executor.
 ///
 /// **Trade-offs**: Direct commands preserve atomic Redis primitives, but the
@@ -481,6 +503,14 @@ impl RedisPrimitives {
     async fn command(&self, operation: &str, command: Cmd) -> Result<Value> {
         self.executor
             .execute(command)
+            .await
+            .map_err(|error| internal(operation, error))
+    }
+
+    /// Executes one non-transactional Redis pipeline with operation context.
+    async fn pipeline(&self, operation: &str, pipeline: Pipeline) -> Result<Vec<Value>> {
+        self.executor
+            .execute_pipeline(pipeline)
             .await
             .map_err(|error| internal(operation, error))
     }
@@ -649,6 +679,49 @@ impl Leases for RedisPrimitives {
 }
 
 #[async_trait]
+impl Bulk for RedisPrimitives {
+    /// Fetches ordered values with one pipeline of single-key GET commands.
+    ///
+    /// Individual GETs preserve future Redis Cluster compatibility; a nil reply
+    /// is an ordinary miss and keeps its position as `None`.
+    async fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut pipeline = redis::pipe();
+        for key in keys {
+            pipeline.cmd("GET").arg(key);
+        }
+        let replies = self.pipeline("get many", pipeline).await?;
+        validate_bulk_replies("get many", keys.len(), replies.len())?;
+        replies
+            .into_iter()
+            .map(|reply| match reply {
+                Value::Nil => Ok(None),
+                value => decode("get-many reply", value).map(Some),
+            })
+            .collect()
+    }
+
+    /// Checks ordered liveness with one pipeline of single-key EXISTS commands.
+    async fn exists_many(&self, keys: &[String]) -> Result<Vec<bool>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut pipeline = redis::pipe();
+        for key in keys {
+            pipeline.cmd("EXISTS").arg(key);
+        }
+        let replies = self.pipeline("exists many", pipeline).await?;
+        validate_bulk_replies("exists many", keys.len(), replies.len())?;
+        replies
+            .into_iter()
+            .map(|reply| decode::<i64>("exists-many reply", reply).map(|count| count > 0))
+            .collect()
+    }
+}
+
+#[async_trait]
 impl Sets for RedisPrimitives {
     /// Adds members with one SADD round trip.
     ///
@@ -810,6 +883,17 @@ fn internal(operation: &str, error: impl Display) -> CacheError {
     CacheError::Internal(format!("redis: {operation}: {error}"))
 }
 
+/// Rejects malformed pipeline result counts before ordered replies are exposed.
+fn validate_bulk_replies(operation: &str, expected: usize, actual: usize) -> Result<()> {
+    if expected == actual {
+        return Ok(());
+    }
+    Err(internal(
+        operation,
+        format!("received {actual} replies for {expected} commands"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -856,6 +940,25 @@ mod tests {
                 None => Err(RedisError::from((
                     ErrorKind::Client,
                     "missing scripted reply",
+                ))),
+            }
+        }
+
+        async fn execute_pipeline(&self, pipeline: Pipeline) -> RedisResult<Vec<Value>> {
+            self.commands
+                .lock()
+                .await
+                .push(pipeline.get_packed_pipeline());
+            match self.responses.lock().await.pop_front() {
+                Some(Ok(Value::Array(replies))) => Ok(replies),
+                Some(Ok(_)) => Err(RedisError::from((
+                    ErrorKind::Client,
+                    "scripted pipeline reply must be an array",
+                ))),
+                Some(Err(error)) => Err(error),
+                None => Err(RedisError::from((
+                    ErrorKind::Client,
+                    "missing scripted pipeline reply",
                 ))),
             }
         }
@@ -1178,6 +1281,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_redis_bulk_pipelines_ordered_gets_and_exists() {
+        let (driver, executor) = primitives([
+            Ok(Value::Array(vec![
+                Value::BulkString(b"first".to_vec()),
+                Value::Nil,
+            ])),
+            Ok(Value::Array(vec![Value::Int(1), Value::Int(0)])),
+        ]);
+        let keys = vec!["one".to_owned(), "missing".to_owned()];
+
+        assert_eq!(Bulk::get_many(&driver, &keys).await.unwrap(), vec![
+            Some(b"first".to_vec()),
+            None
+        ]);
+        assert_eq!(Bulk::exists_many(&driver, &keys).await.unwrap(), vec![
+            true, false
+        ]);
+        assert!(Bulk::get_many(&driver, &[]).await.unwrap().is_empty());
+        assert!(Bulk::exists_many(&driver, &[]).await.unwrap().is_empty());
+
+        let mut gets = redis::pipe();
+        gets.cmd("GET").arg("one");
+        gets.cmd("GET").arg("missing");
+        let mut exists = redis::pipe();
+        exists.cmd("EXISTS").arg("one");
+        exists.cmd("EXISTS").arg("missing");
+        assert_eq!(executor.commands().await, vec![
+            gets.get_packed_pipeline(),
+            exists.get_packed_pipeline()
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_bulk_rejects_wrong_pipeline_reply_count() {
+        let (driver, _) = primitives([Ok(Value::Array(vec![Value::Nil]))]);
+        let keys = vec!["one".to_owned(), "two".to_owned()];
+
+        let result = Bulk::get_many(&driver, &keys).await;
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message.contains("1 replies for 2 commands"))
+        );
+    }
+
+    #[tokio::test]
     async fn test_redis_sets_commands_and_empty_noops() {
         let (driver, executor) = primitives([
             Ok(Value::Int(2)),
@@ -1265,7 +1413,8 @@ mod tests {
     async fn test_redis_provider_set_database_validates_pings_and_wires_capabilities() {
         let (client, executor) = client(4, [
             Ok(Value::SimpleString("PONG".to_owned())),
-            Ok(Value::Array(Vec::new())),
+            Ok(Value::Array(vec![Value::BulkString(b"entry".to_vec())])),
+            Ok(Value::Array(vec![Value::Int(1)])),
             Ok(Value::Int(125)),
             Ok(Value::Array(vec![
                 Value::BulkString(b"0".to_vec()),
@@ -1288,13 +1437,15 @@ mod tests {
         assert_eq!(database.name, "orders");
         assert_eq!(database.index, 4);
         assert_eq!(database.backend, "redis");
-        assert!(keys.is_empty());
+        assert_eq!(keys, ["entry".to_owned()]);
         assert_eq!(ttl, Duration::from_millis(125));
         assert_eq!(volatile_keys, [
             "app:orders:cache:vol:session:one".to_owned()
         ]);
         let mut members = redis::cmd("SMEMBERS");
         members.arg("app:orders:cache:doc:index");
+        let mut exists = redis::pipe();
+        exists.cmd("EXISTS").arg("app:orders:cache:doc:entry:entry");
         let mut ttl = redis::cmd("PTTL");
         ttl.arg("app:orders:cache:doc:entry:entry");
         let mut scan = redis::cmd("SCAN");
@@ -1306,6 +1457,7 @@ mod tests {
         assert_eq!(executor.commands().await, vec![
             packed(redis::cmd("PING")),
             packed(members),
+            exists.get_packed_pipeline(),
             packed(ttl),
             packed(scan)
         ]);

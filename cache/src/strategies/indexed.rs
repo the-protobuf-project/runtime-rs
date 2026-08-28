@@ -15,7 +15,7 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Indexed, Keyspace, Leases, NewId, Options, Sets},
+    core::{Bulk, Document, Driver, Indexed, Keyspace, Leases, NewId, Options, Sets},
 };
 
 #[cfg(test)]
@@ -39,6 +39,8 @@ pub struct IndexedImpl {
     driver: Arc<dyn Driver>,
     /// Optional server-side index capability; secondary operations require it.
     sets: Option<Arc<dyn Sets>>,
+    /// Optional ordered multi-key read capability.
+    bulk: Option<Arc<dyn Bulk>>,
     /// Generates every entry, membership, and inverse-record key.
     keyspace: Keyspace,
     /// Bound for parallel per-entry reads and cleanup operations; always >= 1.
@@ -60,6 +62,7 @@ impl IndexedImpl {
             driver,
             sets,
             None,
+            None,
             keyspace,
             default_ttl,
             require_ttl,
@@ -76,6 +79,7 @@ impl IndexedImpl {
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
+        bulk: Option<Arc<dyn Bulk>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -86,6 +90,7 @@ impl IndexedImpl {
             driver.clone(),
             sets.clone(),
             leases,
+            bulk.clone(),
             keyspace.clone(),
             default_ttl,
             require_ttl,
@@ -96,6 +101,7 @@ impl IndexedImpl {
             document,
             driver,
             sets,
+            bulk,
             keyspace,
             concurrency: concurrency.max(1),
         }
@@ -217,6 +223,7 @@ impl IndexedImpl {
         let keyspace = self.keyspace.clone();
         live_members(
             self.driver.clone(),
+            self.bulk.as_deref(),
             sets,
             self.concurrency,
             &index_key,
@@ -233,7 +240,13 @@ impl IndexedImpl {
     async fn by_index(&self, field: &str, value: &str) -> Result<Vec<Vec<u8>>> {
         let ids = self.ids_by_index(field, value).await?;
         let keys = ids.iter().map(|id| self.keyspace.idx_entry(id)).collect();
-        get_all(self.driver.clone(), self.concurrency, keys).await
+        get_all(
+            self.driver.clone(),
+            self.bulk.as_deref(),
+            self.concurrency,
+            keys,
+        )
+        .await
     }
 
     /// Removes one live secondary group and every membership naming its IDs.

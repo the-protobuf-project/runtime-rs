@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use crate::{
     CacheError, Result,
-    core::{Document, Driver, Keyspace, Leases, NewId, Options, Sets},
+    core::{Bulk, Document, Driver, Keyspace, Leases, NewId, Options, Sets},
 };
 
 use super::batch::{DEFAULT_CONCURRENCY, get_all, live_members};
@@ -41,6 +41,8 @@ pub struct DocumentImpl {
     sets: Option<Arc<dyn Sets>>,
     /// Optional remaining-expiry reporting capability.
     leases: Option<Arc<dyn Leases>>,
+    /// Optional ordered multi-key read capability.
+    bulk: Option<Arc<dyn Bulk>>,
     /// Selected database's centralized key builder.
     keyspace: Keyspace,
     /// Chooses Document or Indexed key families for the shared algorithm.
@@ -86,6 +88,7 @@ impl DocumentImpl {
             driver,
             sets,
             None,
+            None,
             keyspace,
             default_ttl,
             require_ttl,
@@ -101,6 +104,7 @@ impl DocumentImpl {
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
+        bulk: Option<Arc<dyn Bulk>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -111,6 +115,7 @@ impl DocumentImpl {
             driver,
             sets,
             leases,
+            bulk,
             keyspace,
             default_ttl,
             require_ttl,
@@ -128,6 +133,7 @@ impl DocumentImpl {
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
+        bulk: Option<Arc<dyn Bulk>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -138,6 +144,7 @@ impl DocumentImpl {
             driver,
             sets,
             leases,
+            bulk,
             keyspace,
             default_ttl,
             require_ttl,
@@ -152,6 +159,7 @@ impl DocumentImpl {
         driver: Arc<dyn Driver>,
         sets: Option<Arc<dyn Sets>>,
         leases: Option<Arc<dyn Leases>>,
+        bulk: Option<Arc<dyn Bulk>>,
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
@@ -163,6 +171,7 @@ impl DocumentImpl {
             driver,
             sets,
             leases,
+            bulk,
             keyspace,
             layout,
             default_ttl,
@@ -287,6 +296,7 @@ impl Document for DocumentImpl {
         let index_key = self.index_key();
         live_members(
             self.driver.clone(),
+            self.bulk.as_deref(),
             sets,
             self.concurrency,
             &index_key,
@@ -298,7 +308,13 @@ impl Document for DocumentImpl {
     async fn list(&self) -> Result<Vec<Vec<u8>>> {
         let ids = self.keys().await?;
         let keys = ids.iter().map(|id| self.entry_key(id)).collect();
-        get_all(self.driver.clone(), self.concurrency, keys).await
+        get_all(
+            self.driver.clone(),
+            self.bulk.as_deref(),
+            self.concurrency,
+            keys,
+        )
+        .await
     }
 
     async fn ttl(&self, id: &str) -> Result<Duration> {
