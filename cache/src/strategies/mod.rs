@@ -12,6 +12,7 @@
 //! values remain behind Driver implementations.
 
 pub mod aside;
+pub(crate) mod batch;
 pub mod document;
 pub(crate) mod flight;
 pub mod indexed;

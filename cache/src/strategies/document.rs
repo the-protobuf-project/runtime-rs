@@ -18,6 +18,8 @@ use crate::{
     core::{Document, Driver, Keyspace, Leases, NewId, Options, Sets},
 };
 
+use super::batch::{DEFAULT_CONCURRENCY, get_all, live_members};
+
 /// Stores whole encoded values, with optional enumeration through server Sets.
 ///
 /// Direct create, get, update, and delete operations need only the Driver. When
@@ -26,9 +28,9 @@ use crate::{
 /// the Go strategy and keeps a backend such as Memcached useful without
 /// pretending it can enumerate values.
 ///
-/// The enumeration index is a shared hot key. The current Rust implementation
-/// does not sweep expired members during `keys` or `list`, so it can retain
-/// stale IDs. Prefer Volatile when enumeration is not needed.
+/// The enumeration index is a shared hot key. Reads sweep expired members with
+/// bounded Driver fan-out, but the operation remains O(entries). Prefer
+/// Volatile when enumeration is not needed.
 pub struct DocumentImpl {
     /// Stores and conditionally replaces encoded entry values.
     driver: Arc<dyn Driver>,
@@ -49,6 +51,8 @@ pub struct DocumentImpl {
     require_ttl: bool,
     /// Database-wide ID source shared with Indexed.
     new_id: NewId,
+    /// Bound for parallel per-entry liveness and value reads; always >= 1.
+    concurrency: usize,
 }
 
 /// Key-family selection for the shared ID-addressed implementation.
@@ -85,6 +89,7 @@ impl DocumentImpl {
             keyspace,
             default_ttl,
             require_ttl,
+            DEFAULT_CONCURRENCY,
             default_new_id(),
         )
     }
@@ -99,6 +104,7 @@ impl DocumentImpl {
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
+        concurrency: usize,
         new_id: NewId,
     ) -> Self {
         Self::with_layout(
@@ -108,6 +114,7 @@ impl DocumentImpl {
             keyspace,
             default_ttl,
             require_ttl,
+            concurrency,
             new_id,
             DocumentLayout::Document,
         )
@@ -124,6 +131,7 @@ impl DocumentImpl {
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
+        concurrency: usize,
         new_id: NewId,
     ) -> Self {
         Self::with_layout(
@@ -133,6 +141,7 @@ impl DocumentImpl {
             keyspace,
             default_ttl,
             require_ttl,
+            concurrency,
             new_id,
             DocumentLayout::Indexed,
         )
@@ -146,6 +155,7 @@ impl DocumentImpl {
         keyspace: Keyspace,
         default_ttl: Duration,
         require_ttl: bool,
+        concurrency: usize,
         new_id: NewId,
         layout: DocumentLayout,
     ) -> Self {
@@ -158,6 +168,7 @@ impl DocumentImpl {
             default_ttl,
             require_ttl,
             new_id,
+            concurrency: concurrency.max(1),
         }
     }
 
@@ -274,23 +285,20 @@ impl Document for DocumentImpl {
     async fn keys(&self) -> Result<Vec<String>> {
         let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
         let index_key = self.index_key();
-        sets.set_members(&index_key).await
+        live_members(
+            self.driver.clone(),
+            sets,
+            self.concurrency,
+            &index_key,
+            |id| self.entry_key(id),
+        )
+        .await
     }
 
     async fn list(&self) -> Result<Vec<Vec<u8>>> {
-        let keys = self.keys().await?;
-
-        let mut results = Vec::with_capacity(keys.len());
-        for key in keys {
-            match self.driver.get(&self.entry_key(&key)).await {
-                Ok(value) => results.push(value),
-                // Listing is a non-transactional snapshot. The current
-                // algorithm suppresses any per-entry read failure after the
-                // index read; it does not sweep that member here.
-                Err(_) => {}
-            }
-        }
-        Ok(results)
+        let ids = self.keys().await?;
+        let keys = ids.iter().map(|id| self.entry_key(id)).collect();
+        get_all(self.driver.clone(), self.concurrency, keys).await
     }
 
     async fn ttl(&self, id: &str) -> Result<Duration> {
@@ -303,6 +311,64 @@ impl Document for DocumentImpl {
 mod tests {
     use super::*;
     use crate::core::{MemoryDriver, MemorySets};
+
+    #[derive(Clone, Copy)]
+    enum GetOverride {
+        NotFound,
+        Failure,
+    }
+
+    struct ReadOverrideDriver {
+        inner: MemoryDriver,
+        key: String,
+        get_override: GetOverride,
+    }
+
+    #[async_trait::async_trait]
+    impl Driver for ReadOverrideDriver {
+        fn name(&self) -> &str {
+            "read-override"
+        }
+
+        async fn get(&self, key: &str) -> Result<Vec<u8>> {
+            if key == self.key {
+                return match self.get_override {
+                    GetOverride::NotFound => Err(CacheError::NotFound),
+                    GetOverride::Failure => {
+                        Err(CacheError::Internal("injected read failure".to_owned()))
+                    }
+                };
+            }
+            self.inner.get(key).await
+        }
+
+        async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<()> {
+            self.inner.set(key, value, ttl).await
+        }
+
+        async fn add(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
+            self.inner.add(key, value, ttl).await
+        }
+
+        async fn replace(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
+            self.inner.replace(key, value, ttl).await
+        }
+
+        async fn delete(&self, keys: &[&str]) -> Result<()> {
+            self.inner.delete(keys).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool> {
+            if key == self.key {
+                return Ok(true);
+            }
+            self.inner.exists(key).await
+        }
+
+        async fn touch(&self, key: &str, ttl: Duration) -> Result<()> {
+            self.inner.touch(key, ttl).await
+        }
+    }
 
     #[tokio::test]
     async fn test_document_create_and_get() {
@@ -413,5 +479,76 @@ mod tests {
         );
 
         assert!(matches!(doc.list().await, Err(CacheError::Unsupported)));
+    }
+
+    #[tokio::test]
+    async fn test_document_keys_sweeps_expired_member() {
+        let driver = Arc::new(MemoryDriver::new());
+        let sets = Arc::new(MemorySets::new());
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        let doc = DocumentImpl::new(
+            driver,
+            Some(sets.clone()),
+            keyspace.clone(),
+            Duration::ZERO,
+            false,
+        );
+        doc.create(
+            b"short-lived",
+            &Options::default()
+                .with_id("expired")
+                .with_ttl(Duration::from_millis(1)),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        let keys = doc.keys().await.unwrap();
+
+        assert!(keys.is_empty());
+        assert!(
+            sets.set_members(&keyspace.doc_index())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_document_list_skips_not_found_expiry_race() {
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        let sets = Arc::new(MemorySets::new());
+        sets.set_add(&keyspace.doc_index(), &["raced"])
+            .await
+            .unwrap();
+        let driver = Arc::new(ReadOverrideDriver {
+            inner: MemoryDriver::new(),
+            key: keyspace.doc_entry("raced"),
+            get_override: GetOverride::NotFound,
+        });
+        let doc = DocumentImpl::new(driver, Some(sets), keyspace, Duration::ZERO, false);
+
+        assert!(doc.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_document_list_propagates_non_miss_driver_failure() {
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        let sets = Arc::new(MemorySets::new());
+        sets.set_add(&keyspace.doc_index(), &["broken"])
+            .await
+            .unwrap();
+        let driver = Arc::new(ReadOverrideDriver {
+            inner: MemoryDriver::new(),
+            key: keyspace.doc_entry("broken"),
+            get_override: GetOverride::Failure,
+        });
+        let doc = DocumentImpl::new(driver, Some(sets), keyspace, Duration::ZERO, false);
+
+        let result = doc.list().await;
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message == "injected read failure")
+        );
     }
 }

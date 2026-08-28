@@ -18,9 +18,12 @@ use crate::{
     core::{Document, Driver, Indexed, Keyspace, Leases, NewId, Options, Sets},
 };
 
-use super::DocumentImpl;
 #[cfg(test)]
 use super::document::default_new_id;
+use super::{
+    DocumentImpl,
+    batch::{get_all, live_members},
+};
 
 /// Document storage that records caller-selected secondary memberships.
 ///
@@ -86,6 +89,7 @@ impl IndexedImpl {
             keyspace.clone(),
             default_ttl,
             require_ttl,
+            concurrency,
             new_id,
         );
         Self {
@@ -210,46 +214,15 @@ impl IndexedImpl {
     async fn ids_by_index(&self, field: &str, value: &str) -> Result<Vec<String>> {
         let sets = self.sets.as_ref().ok_or(CacheError::Unsupported)?;
         let index_key = self.keyspace.idx_by_field(field, value);
-        let members = sets.set_members(&index_key).await?;
-        if members.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        let driver = self.driver.clone();
         let keyspace = self.keyspace.clone();
-        let checked: Vec<(String, bool)> = stream::iter(members.into_iter().map(move |id| {
-            let driver = driver.clone();
-            let entry_key = keyspace.idx_entry(&id);
-            async move {
-                let exists = driver.exists(&entry_key).await?;
-                Ok::<_, CacheError>((id, exists))
-            }
-        }))
-        .buffered(self.concurrency)
-        .try_collect()
-        .await?;
-
-        let mut live = Vec::with_capacity(checked.len());
-        let mut stale = Vec::new();
-        for (id, exists) in checked {
-            if exists {
-                live.push(id);
-            } else {
-                stale.push(id);
-            }
-        }
-
-        if !stale.is_empty() {
-            let stale_refs: Vec<&str> = stale.iter().map(String::as_str).collect();
-            // A failed sweep must not turn a successful lookup into an error.
-            // The stale members name no live values and the next read retries.
-            let cleanup = sets.set_remove(&index_key, &stale_refs).await;
-            if cleanup.is_err() {
-                // Deliberately suppressed for the retryable reason above.
-            }
-        }
-
-        Ok(live)
+        live_members(
+            self.driver.clone(),
+            sets,
+            self.concurrency,
+            &index_key,
+            move |id| keyspace.idx_entry(id),
+        )
+        .await
     }
 
     /// Returns values for live secondary members, tolerating expiry races.
@@ -259,24 +232,8 @@ impl IndexedImpl {
     /// the configured concurrency limit.
     async fn by_index(&self, field: &str, value: &str) -> Result<Vec<Vec<u8>>> {
         let ids = self.ids_by_index(field, value).await?;
-        let driver = self.driver.clone();
-        let keyspace = self.keyspace.clone();
-        let bodies: Vec<Option<Vec<u8>>> = stream::iter(ids.into_iter().map(move |id| {
-            let driver = driver.clone();
-            let entry_key = keyspace.idx_entry(&id);
-            async move {
-                match driver.get(&entry_key).await {
-                    Ok(body) => Ok(Some(body)),
-                    Err(CacheError::NotFound) => Ok(None),
-                    Err(error) => Err(error),
-                }
-            }
-        }))
-        .buffered(self.concurrency)
-        .try_collect()
-        .await?;
-
-        Ok(bodies.into_iter().flatten().collect())
+        let keys = ids.iter().map(|id| self.keyspace.idx_entry(id)).collect();
+        get_all(self.driver.clone(), self.concurrency, keys).await
     }
 
     /// Removes one live secondary group and every membership naming its IDs.

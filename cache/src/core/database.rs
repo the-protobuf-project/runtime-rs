@@ -7,7 +7,7 @@ use tokio::sync::{Mutex, watch};
 
 use crate::strategies::document::default_new_id;
 use crate::strategies::{AsideImpl, DocumentImpl, IndexedImpl, VolatileImpl};
-use crate::strategies::{flight::Flight, refresher::Refresher};
+use crate::strategies::{batch::DEFAULT_CONCURRENCY, flight::Flight, refresher::Refresher};
 use crate::{CacheError, Result};
 
 use super::{Aside, Capabilities, Document, Driver, Indexed, Keyspace, Loader, NewId, Volatile};
@@ -24,9 +24,6 @@ const REFRESH_BUDGET: usize = 64;
 const FLIGHT_BUDGET: usize = 2048;
 /// Maximum wait for the owner of a shared Aside load.
 const FLIGHT_TIMEOUT: Duration = Duration::from_secs(30);
-/// Multi-entry read/delete fan-out used when configuration supplies zero.
-const DEFAULT_CONCURRENCY: usize = 16;
-
 /// Asynchronous cleanup for resources derived while selecting one database.
 pub type Release = Box<dyn FnOnce() -> BoxFuture<'static, Result<()>> + Send + 'static>;
 
@@ -246,6 +243,7 @@ pub fn build_database(
         keyspace.clone(),
         spec.default_ttl,
         spec.require_ttl,
+        concurrency,
         new_id.clone(),
     ));
     let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new_with_capabilities(
