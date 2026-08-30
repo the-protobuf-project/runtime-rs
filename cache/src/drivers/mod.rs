@@ -7,3 +7,8 @@
 
 /// Standalone Redis client, Provider, and primitive capability adapters.
 pub mod redis;
+
+// This module is deliberately test-only. It compile-proves the provisional
+// Memcached dependency before a public backend boundary is admitted.
+#[cfg(test)]
+mod memcached_compatibility;
