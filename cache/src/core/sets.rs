@@ -104,6 +104,11 @@ impl Default for MemorySets {
 
 #[async_trait::async_trait]
 impl Sets for MemorySets {
+    /// Adds unique members under one process-local write lock.
+    ///
+    /// **Cost**: O(members), with no external I/O.
+    /// **Side effects**: Creates the set on first insertion; duplicates are
+    /// idempotent.
     async fn set_add(&self, key: &str, members: &[&str]) -> Result<()> {
         let mut data = self.data.write().await;
         let set = data
@@ -115,6 +120,10 @@ impl Sets for MemorySets {
         Ok(())
     }
 
+    /// Removes named members under one process-local write lock.
+    ///
+    /// Missing sets and members are harmless. An empty resulting set is removed
+    /// from the map so test storage does not retain empty collection keys.
     async fn set_remove(&self, key: &str, members: &[&str]) -> Result<()> {
         let mut data = self.data.write().await;
         if let Some(set) = data.get_mut(key) {
@@ -128,6 +137,10 @@ impl Sets for MemorySets {
         Ok(())
     }
 
+    /// Clones every member under the shared read lock.
+    ///
+    /// **Cost**: O(cardinality) time and returned memory. Hash-set iteration
+    /// order is intentionally unspecified, matching the Sets contract.
     async fn set_members(&self, key: &str) -> Result<Vec<String>> {
         let data = self.data.read().await;
         match data.get(key) {

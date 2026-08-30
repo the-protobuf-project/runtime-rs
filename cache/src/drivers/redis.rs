@@ -129,6 +129,11 @@ struct ManagedExecutor {
 
 #[async_trait]
 impl CommandExecutor for ManagedExecutor {
+    /// Executes one command through a short-lived manager snapshot.
+    ///
+    /// The lifecycle read lock is released before network I/O so multiplexed
+    /// commands remain concurrent. A closed executor rejects new admission;
+    /// an already-cloned manager may finish while close proceeds.
     async fn execute(&self, command: Cmd) -> RedisResult<Value> {
         // Clone while holding the read lock, then release the guard before I/O.
         // ConnectionManager clones address the same multiplexed connection, so
@@ -145,6 +150,10 @@ impl CommandExecutor for ManagedExecutor {
         command.query_async(&mut manager).await
     }
 
+    /// Executes one non-transactional pipeline through a manager snapshot.
+    ///
+    /// Locking and close-race behavior match [`CommandExecutor::execute`]; Redis
+    /// runs the queued commands in order without transaction isolation.
     async fn execute_pipeline(&self, pipeline: Pipeline) -> RedisResult<Vec<Value>> {
         let mut manager = match self.manager.read().await.as_ref() {
             Some(manager) => manager.clone(),
@@ -158,6 +167,10 @@ impl CommandExecutor for ManagedExecutor {
         pipeline.query_async(&mut manager).await
     }
 
+    /// Stops future admission by dropping the owned manager exactly once.
+    ///
+    /// This performs no Redis command and does not cancel operations that
+    /// already cloned the manager before the state transition.
     async fn close(&self) {
         // `take` makes repeated close calls harmless and rejects later execute
         // calls without affecting snapshots already running.

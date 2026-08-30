@@ -80,6 +80,11 @@ impl<F> SetScanVisitor for LiveVisitor<'_, F>
 where
     F: Fn(&str) -> String + Send + Sync,
 {
+    /// Classifies and repairs one cursor page before the next page is fetched.
+    ///
+    /// Liveness failures stop scanning. Stale-member removal remains
+    /// best-effort because the accumulated live result is already correct.
+    /// Cursor duplicates are suppressed while retaining first-seen order.
     async fn visit(&mut self, members: Vec<String>) -> Result<()> {
         if members.is_empty() {
             return Ok(());

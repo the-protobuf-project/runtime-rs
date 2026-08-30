@@ -59,10 +59,16 @@ impl Default for MemoryDriver {
 
 #[async_trait::async_trait]
 impl Driver for MemoryDriver {
+    /// Returns the stable `memory` backend name without locking storage.
     fn name(&self) -> &str {
         &self.name
     }
 
+    /// Clones one live value under the shared read lock.
+    ///
+    /// **Cost**: O(value bytes), with no external round trip.
+    /// **Failure behavior**: Missing and lazily expired entries return
+    /// `NotFound`; expired storage is not removed by this read.
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         let data = self.data.read().await;
 
@@ -78,6 +84,10 @@ impl Driver for MemoryDriver {
         }
     }
 
+    /// Replaces one value and lease under the exclusive map lock.
+    ///
+    /// Zero TTL stores permanently; a positive TTL becomes a monotonic
+    /// deadline. This is the in-process equivalent of one Driver round trip.
     async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<()> {
         let expires_at = if ttl.is_zero() {
             None
@@ -93,6 +103,11 @@ impl Driver for MemoryDriver {
         Ok(())
     }
 
+    /// Inserts only when no live value currently owns the key.
+    ///
+    /// The existence check and insertion share one write lock, making the
+    /// operation atomic for process-local tests. An expired entry may be
+    /// overwritten and is treated as absent.
     async fn add(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
         let expires_at = if ttl.is_zero() {
             None
@@ -116,6 +131,10 @@ impl Driver for MemoryDriver {
         Ok(true)
     }
 
+    /// Replaces only a currently live entry under one write lock.
+    ///
+    /// Missing or expired entries return `false` without changing storage.
+    /// Successful replacement also replaces the previous lease.
     async fn replace(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
         let expires_at = if ttl.is_zero() {
             None
@@ -141,6 +160,10 @@ impl Driver for MemoryDriver {
         Ok(true)
     }
 
+    /// Removes every supplied key under one write lock.
+    ///
+    /// Missing keys and empty input are harmless, matching Driver deletion
+    /// semantics without manufacturing per-key errors.
     async fn delete(&self, keys: &[&str]) -> Result<()> {
         let mut data = self.data.write().await;
         for key in keys {
@@ -149,6 +172,10 @@ impl Driver for MemoryDriver {
         Ok(())
     }
 
+    /// Reports whether one entry is currently live under the read lock.
+    ///
+    /// Lazy expiry is observational here: an expired allocation remains in the
+    /// map but is reported as absent.
     async fn exists(&self, key: &str) -> Result<bool> {
         let data = self.data.read().await;
 
@@ -164,6 +191,10 @@ impl Driver for MemoryDriver {
         }
     }
 
+    /// Replaces the lease of one live entry without changing its bytes.
+    ///
+    /// Zero makes the entry permanent. Missing or expired entries return
+    /// `NotFound`; comparison and mutation share one write lock.
     async fn touch(&self, key: &str, ttl: Duration) -> Result<()> {
         let mut data = self.data.write().await;
 
