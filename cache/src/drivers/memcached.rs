@@ -1,19 +1,14 @@
 //! Async Memcached client, Go-compatible router, and primitive capabilities.
 //!
 //! This module owns transport setup, client-side server placement, Memcached
-//! expiry encoding, and direct protocol result mapping. Strategy policy,
-//! key qualification, database construction, and capability registration stay
-//! in core and in the later Provider boundary.
+//! expiry encoding, direct protocol result mapping, and Provider selection.
+//! Strategy policy, key qualification, and database construction remain in
+//! core; the Provider only supplies backend facts and capabilities.
 //!
 //! Memcached 1.6 or newer is required because the selected Tokio client uses
 //! the meta text protocol. One pooled client is retained per distinct server;
 //! a private CRC32-IEEE modulo router preserves `gomemcache` placement across
 //! Go-to-Rust migrations, including repeated server entries used as weights.
-
-// Provider wiring is deliberately the next reviewed milestone. Until it
-// constructs `MemcachedPrimitives`, the compiler cannot see the internal
-// Driver/Bulk path as reachable even though this milestone tests it directly.
-#![allow(dead_code)]
 
 use std::{
     collections::HashMap,
@@ -30,8 +25,11 @@ use memcache::exp::{
 use tokio::sync::RwLock;
 
 use crate::{
-    CacheError, DialTimeout, OperationTimeout, Result,
-    core::{Bulk, Driver},
+    CacheError, Config, DialTimeout, OperationTimeout, Result,
+    core::{
+        Bulk, Capabilities, DB, DatabaseSpec, Driver, Provider, build_database, check_known,
+        check_namespace,
+    },
 };
 
 /// Stable backend identity exposed by Memcached primitives.
@@ -291,11 +289,8 @@ impl CommandExecutor for ManagedExecutor {
 /// batches run concurrently and each server retains its own idle pool.
 ///
 /// **Use when**: An application owns a stable Memcached server list and will
-/// construct one or more cache databases from it through the Provider added in
-/// the following milestone.
+/// construct one or more cache databases through [`MemcachedProvider`].
 pub struct MemcachedClient {
-    /// Normalized caller settings retained for the later Provider boundary.
-    config: MemcachedConfig,
     /// Shared command admission and local close state.
     executor: Arc<dyn CommandExecutor>,
 }
@@ -326,7 +321,7 @@ impl MemcachedClient {
         let executor: Arc<dyn CommandExecutor> = Arc::new(ManagedExecutor {
             router: RwLock::new(Some(Arc::new(Router { servers, slots }))),
         });
-        let client = Self { config, executor };
+        let client = Self { executor };
         client.probe().await?;
         Ok(client)
     }
@@ -364,15 +359,112 @@ impl MemcachedClient {
         })
     }
 
-    /// Copies normalized settings for later Provider metadata.
-    pub(crate) fn config(&self) -> MemcachedConfig {
-        self.config.clone()
-    }
-
     #[cfg(test)]
     /// Constructs a client around a deterministic executor for unit tests.
-    fn with_executor(config: MemcachedConfig, executor: Arc<dyn CommandExecutor>) -> Self {
-        Self { config, executor }
+    fn with_executor(executor: Arc<dyn CommandExecutor>) -> Self {
+        Self { executor }
+    }
+}
+
+/// Memcached implementation of the cache [`Provider`] boundary.
+///
+/// Named databases are isolated by a key namespace. Numeric databases are
+/// emulated by embedding the requested index in every key because Memcached has
+/// no native database selection. Selected databases borrow the caller-owned
+/// [`MemcachedClient`] and advertise only Driver and Bulk capabilities.
+///
+/// **Trade-offs**: Selection is local and inexpensive, but isolation depends on
+/// every application respecting the generated keyspace. Memcached cannot scan
+/// or safely drop one database, enumerate server-side sets, report remaining
+/// TTL, or release a distributed claim with compare-and-delete.
+///
+/// **Scalability**: Every selected DB shares the root client's per-server pools
+/// and Go-compatible router. Numeric selection creates no new connection.
+///
+/// **Best for**: Constructing cache strategies over a caller-owned Memcached
+/// client when direct key access and batched reads are sufficient.
+pub struct MemcachedProvider {
+    /// Caller-owned root client; the Provider and selected DBs never close it.
+    client: Arc<MemcachedClient>,
+    /// Shared strategy defaults and optional named-database allowlist.
+    config: Config,
+}
+
+impl MemcachedProvider {
+    /// Binds cache policy to a caller-owned Memcached client.
+    ///
+    /// **Cost**: Local allocation only; no DNS lookup or Memcached command.
+    /// **Concurrency**: Returned databases safely share the client's router and
+    /// per-server pools.
+    /// **Side effects**: Does not connect, probe, or take ownership of the
+    /// client's shutdown lifecycle.
+    /// **When to use**: After [`MemcachedClient::connect`] and before selecting
+    /// a named or numeric cache database.
+    pub fn new(client: Arc<MemcachedClient>, config: Config) -> Self {
+        Self { client, config }
+    }
+
+    /// Wires Driver and Bulk over the root client's shared executor.
+    ///
+    /// Memcached's absent capabilities remain absent so strategies report
+    /// `Unsupported` at their public operation boundary. Construction performs
+    /// no backend I/O and installs no release callback because no client or
+    /// connection is derived for a selected database.
+    fn database(&self, namespace: String, database: usize, embed_db: bool) -> DB {
+        let primitives = self.client.primitives();
+        let driver: Arc<dyn Driver> = primitives.clone();
+        let bulk: Arc<dyn Bulk> = primitives;
+        let capabilities = Capabilities::new().with_bulk(bulk);
+        build_database(driver, capabilities, DatabaseSpec {
+            prefix: self.config.prefix.clone(),
+            namespace,
+            database,
+            embed_db,
+            default_ttl: self.config.default_ttl,
+            default_stale: self.config.default_stale,
+            concurrency: self.config.concurrency,
+            require_ttl: self.config.require_ttl,
+            ..DatabaseSpec::default()
+        })
+    }
+}
+
+#[async_trait]
+impl Provider for MemcachedProvider {
+    /// Selects a named key namespace over the caller-owned client.
+    ///
+    /// Validation and the configured allowlist are checked locally before DB
+    /// construction. Selection performs no Memcached command; the client was
+    /// already probed during connection. The namespace itself separates keys,
+    /// so database zero is not redundantly embedded.
+    async fn set_database(&self, name: &str) -> Result<DB> {
+        check_namespace(name)?;
+        check_known(name, &self.config.databases)?;
+        Ok(self.database(name.to_owned(), 0, false))
+    }
+
+    /// Selects an emulated numeric database over the caller-owned client.
+    ///
+    /// Memcached has no native database selector, so the requested index is
+    /// embedded into every generated key. This is a local construction with no
+    /// command, connection, or independently owned resource.
+    async fn select_index(&self, index: usize) -> Result<DB> {
+        Ok(self.database(String::new(), index, true))
+    }
+
+    /// Rejects deletion of one named database after validating its namespace.
+    ///
+    /// **Cost**: Local validation only. **Side effects**: None.
+    /// **Safety**: Memcached has no keyspace cursor, and `flush_all` would erase
+    /// unrelated prefixes and applications, so it is never used as a fallback.
+    async fn drop_database(&self, name: &str) -> Result<usize> {
+        check_namespace(name)?;
+        Err(CacheError::Unsupported)
+    }
+
+    /// Returns the stable Memcached identity without backend I/O.
+    fn backend(&self) -> &str {
+        BACKEND
     }
 }
 
@@ -1163,13 +1255,12 @@ mod tests {
     #[tokio::test]
     async fn test_memcached_client_close_is_idempotent_and_rejects_later_work() {
         let executor = Arc::new(ScriptedExecutor::new(Vec::new()));
-        let client = MemcachedClient::with_executor(MemcachedConfig::default(), executor.clone());
+        let client = MemcachedClient::with_executor(executor.clone());
         let primitives = client.primitives();
         client.close().await;
         client.close().await;
         assert!(primitives.get("key").await.is_err());
         assert!(executor.closed.load(Ordering::SeqCst));
-        assert!(client.config().servers.is_empty());
     }
 
     #[tokio::test]
@@ -1228,5 +1319,133 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn test_memcached_provider_backend_and_construction_perform_no_io() {
+        let executor = Arc::new(ScriptedExecutor::new(Vec::new()));
+        let client = Arc::new(MemcachedClient::with_executor(executor.clone()));
+        let provider = MemcachedProvider::new(client, Config::default());
+
+        assert_eq!(provider.backend(), "memcached");
+        assert!(executor.operations.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_memcached_provider_named_database_validates_and_qualifies_keys() {
+        let executor = Arc::new(ScriptedExecutor::new(vec![Ok(WireReply::Stored)]));
+        let client = Arc::new(MemcachedClient::with_executor(executor.clone()));
+        let provider = MemcachedProvider::new(client, Config {
+            prefix: "app".to_owned(),
+            databases: vec!["orders".to_owned()],
+            ..Config::default()
+        });
+
+        assert!(provider.set_database("").await.is_err());
+        assert!(provider.set_database("unknown").await.is_err());
+        let db = provider.set_database("orders").await.unwrap();
+        assert_eq!(db.name, "orders");
+        assert_eq!(db.index, 0);
+        db.volatile
+            .set("session", b"value", &crate::core::Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(executor.operations.lock().await.as_slice(), &[
+            WireOperation::Store {
+                key: "app:orders:cache:vol:session".to_owned(),
+                value: b"value".to_vec(),
+                expiry: 0,
+                condition: StoreCondition::Set,
+            }
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_memcached_provider_numeric_database_embeds_index() {
+        let executor = Arc::new(ScriptedExecutor::new(vec![Ok(WireReply::Stored)]));
+        let client = Arc::new(MemcachedClient::with_executor(executor.clone()));
+        let provider = MemcachedProvider::new(client, Config {
+            prefix: "app".to_owned(),
+            ..Config::default()
+        });
+
+        let db = provider.select_index(3).await.unwrap();
+        assert_eq!(db.name, "");
+        assert_eq!(db.index, 3);
+        db.volatile
+            .set("session", b"value", &crate::core::Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            executor.operations.lock().await[0].key(),
+            "app:db3:cache:vol:session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memcached_provider_exposes_only_bulk_optional_capability() {
+        let executor = Arc::new(ScriptedExecutor::new(Vec::new()));
+        let client = Arc::new(MemcachedClient::with_executor(executor));
+        let provider = MemcachedProvider::new(client, Config::default());
+        let db = provider.select_index(0).await.unwrap();
+
+        assert!(matches!(
+            db.document.keys().await,
+            Err(CacheError::Unsupported)
+        ));
+        assert!(matches!(
+            db.indexed.ids_by_index("tenant", "acme").await,
+            Err(CacheError::Unsupported)
+        ));
+        assert!(matches!(
+            db.document.ttl("document").await,
+            Err(CacheError::Unsupported)
+        ));
+        assert!(matches!(
+            db.volatile.scan("*").await,
+            Err(CacheError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memcached_provider_drop_database_validates_then_reports_unsupported() {
+        let executor = Arc::new(ScriptedExecutor::new(Vec::new()));
+        let client = Arc::new(MemcachedClient::with_executor(executor));
+        let provider = MemcachedProvider::new(client, Config {
+            databases: vec!["known".to_owned()],
+            ..Config::default()
+        });
+
+        assert!(matches!(
+            provider.drop_database("").await,
+            Err(CacheError::Internal(_))
+        ));
+        assert!(matches!(
+            provider.drop_database("stale-name").await,
+            Err(CacheError::Unsupported)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memcached_provider_database_close_keeps_root_client_open() {
+        let executor = Arc::new(ScriptedExecutor::new(vec![Ok(WireReply::Stored)]));
+        let client = Arc::new(MemcachedClient::with_executor(executor));
+        let provider = MemcachedProvider::new(client.clone(), Config::default());
+        let db = provider.select_index(0).await.unwrap();
+
+        db.close().await.unwrap();
+        db.volatile
+            .set("after-db-close", b"value", &crate::core::Options::default())
+            .await
+            .unwrap();
+        client.close().await;
+        assert!(matches!(
+            db.volatile
+                .get("after-client-close", &mut Vec::new())
+                .await,
+            Err(CacheError::Internal(message)) if message.contains("closed")
+        ));
     }
 }
