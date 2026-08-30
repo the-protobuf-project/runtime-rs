@@ -24,8 +24,8 @@ use tokio::sync::RwLock;
 use crate::{
     CacheError, Config, DialTimeout, Result,
     core::{
-        Bulk, Capabilities, DB, DatabaseSpec, Driver, Keyspace, Leases, Provider, Release, Scanner,
-        SetScanVisitor, SetScanner, Sets, build_database, check_known, check_namespace,
+        Bulk, Capabilities, DB, DatabaseSpec, Driver, Fenced, Keyspace, Leases, Provider, Release,
+        Scanner, SetScanVisitor, SetScanner, Sets, build_database, check_known, check_namespace,
         drop_database,
     },
 };
@@ -369,10 +369,10 @@ impl RedisProvider {
 
     /// Wires one selected client into every core strategy and capability.
     ///
-    /// Driver, Sets, Leases, Scanner, SetScanner, and Bulk are trait-object views
-    /// of one primitive, keeping all commands on the selected client. `release`
-    /// is present only when this DB owns a derived client. Construction is local
-    /// and performs no Redis round trip.
+    /// Driver, Sets, Leases, Scanner, SetScanner, Bulk, and Fenced are
+    /// trait-object views of one primitive, keeping all commands on the selected
+    /// client. `release` is present only when this DB owns a derived client.
+    /// Construction is local and performs no Redis round trip.
     fn database(
         &self,
         client: Arc<RedisClient>,
@@ -386,12 +386,14 @@ impl RedisProvider {
         let leases: Arc<dyn Leases> = primitives.clone();
         let bulk: Arc<dyn Bulk> = primitives.clone();
         let set_scanner: Arc<dyn SetScanner> = primitives.clone();
+        let fenced: Arc<dyn Fenced> = primitives.clone();
         let scanner: Arc<dyn Scanner> = primitives;
         let capabilities = Capabilities::new()
             .with_sets(sets)
             .with_leases(leases)
             .with_bulk(bulk)
             .with_set_scanner(set_scanner)
+            .with_fenced(fenced)
             .with_scanner(scanner);
         build_database(driver, capabilities, DatabaseSpec {
             prefix: self.config.prefix.clone(),
@@ -492,8 +494,8 @@ impl Provider for RedisProvider {
 /// This adapter deliberately contains no Keyspace or strategy policy. Ordinary
 /// non-empty operations map to one Redis command; Bulk maps an ordered command
 /// pipeline to one round trip.
-/// One instance can be viewed as Driver, Sets, Leases, Scanner, SetScanner, and
-/// Bulk while sharing the same executor.
+/// One instance can be viewed as Driver, Sets, Leases, Scanner, SetScanner,
+/// Bulk, and Fenced while sharing the same executor.
 ///
 /// **Trade-offs**: Direct commands preserve atomic Redis primitives, but the
 /// Scanner must collect a full matching key list to satisfy the current Go-
@@ -734,6 +736,25 @@ impl Bulk for RedisPrimitives {
             .into_iter()
             .map(|reply| decode::<i64>("exists-many reply", reply).map(|count| count > 0))
             .collect()
+    }
+}
+
+#[async_trait]
+impl Fenced for RedisPrimitives {
+    /// Atomically compares and deletes one key with a Lua script.
+    ///
+    /// **Cost**: One EVAL round trip. Redis executes comparison and deletion as
+    /// one indivisible server-side operation, so lease turnover cannot create a
+    /// GET/DEL race. Missing and mismatched values return false.
+    async fn delete_if(&self, key: &str, expected: &[u8]) -> Result<bool> {
+        let mut command = redis::cmd("EVAL");
+        command
+            .arg("if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0")
+            .arg(1)
+            .arg(key)
+            .arg(expected);
+        let deleted: i64 = decode("delete-if reply", self.command("delete if", command).await?)?;
+        Ok(deleted > 0)
     }
 }
 
@@ -1378,6 +1399,35 @@ mod tests {
 
         assert!(
             matches!(result, Err(CacheError::Internal(message)) if message.contains("1 replies for 2 commands"))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_redis_fenced_delete_if_maps_mismatch_and_owner_delete() {
+        let (driver, executor) = primitives([Ok(Value::Int(0)), Ok(Value::Int(1))]);
+
+        assert!(!Fenced::delete_if(&driver, "lock", b"other").await.unwrap());
+        assert!(Fenced::delete_if(&driver, "lock", b"owner").await.unwrap());
+
+        let script = "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0";
+        let mut mismatch = redis::cmd("EVAL");
+        mismatch.arg(script).arg(1).arg("lock").arg(b"other");
+        let mut owner = redis::cmd("EVAL");
+        owner.arg(script).arg(1).arg("lock").arg(b"owner");
+        assert_eq!(executor.commands().await, vec![
+            packed(mismatch),
+            packed(owner)
+        ]);
+    }
+
+    #[tokio::test]
+    async fn test_redis_fenced_delete_if_invalid_reply_propagates_error() {
+        let (driver, _) = primitives([Ok(Value::SimpleString("wrong".to_owned()))]);
+
+        let result = Fenced::delete_if(&driver, "lock", b"owner").await;
+
+        assert!(
+            matches!(result, Err(CacheError::Internal(message)) if message.contains("delete-if reply"))
         );
     }
 

@@ -132,8 +132,8 @@ impl Keyspace {
 
     /// Qualifies the reserved distributed-lock key for an Aside ID.
     ///
-    /// Current coordination is process-local; this format is reserved for a
-    /// future fenced lock capability and does not itself acquire a lock.
+    /// Aside uses this only when the selected backend declares Fenced. Key
+    /// construction itself performs no I/O and does not acquire ownership.
     pub fn aside_lock(&self, id: &str) -> String {
         format!("{}aside:lock:{}", self.base, id)
     }

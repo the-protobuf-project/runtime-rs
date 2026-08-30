@@ -14,12 +14,90 @@ use std::{
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::value::RawValue;
+use uuid::Uuid;
 
-use crate::core::{Aside, Driver, Keyspace, Loader, Options};
+use crate::core::{Aside, Driver, Fenced, Keyspace, Loader, Options};
 use crate::{CacheError, Result};
 
 use super::flight::Flight;
 use super::refresher::Refresher;
+
+/// Maximum time spent attempting an owned lock's best-effort release.
+const UNLOCK_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Ownership generation and atomic release capability for one claimed ID.
+///
+/// Dropping a live guard schedules the same bounded release used by the normal
+/// path. This matters because Flight times out by dropping the work future at
+/// any await point; without Drop cleanup, cancellation would always retain the
+/// lock until its full lease elapsed.
+struct FencedClaim {
+    /// Present until explicit release or cancellation cleanup takes ownership.
+    owned: Option<OwnedClaim>,
+}
+
+/// Data required to release one exact ownership generation.
+struct OwnedClaim {
+    /// Backend capability performing atomic comparison and deletion.
+    fenced: Arc<dyn Fenced>,
+    /// Database-qualified Aside lock key.
+    key: String,
+    /// Random fixed-size value written when the claim was acquired.
+    token: Vec<u8>,
+}
+
+impl FencedClaim {
+    /// Arms cancellation-safe cleanup for a newly acquired lock.
+    fn new(fenced: Arc<dyn Fenced>, key: String, token: Vec<u8>) -> Self {
+        Self {
+            owned: Some(OwnedClaim { fenced, key, token }),
+        }
+    }
+
+    /// Releases normally while preserving the Loader result on any failure.
+    async fn release(mut self) {
+        if let Some(owned) = self.owned.as_ref() {
+            release_owned(owned).await;
+        }
+        // Disarm Drop only after the attempt completes. Cancellation while
+        // awaiting DeleteIf therefore schedules another bounded attempt.
+        self.owned.take();
+    }
+}
+
+impl Drop for FencedClaim {
+    fn drop(&mut self) {
+        let Some(owned) = self.owned.take() else {
+            return;
+        };
+        // Runtime shutdown can make task spawning unavailable. The lease still
+        // bounds that final fallback, so Drop must not panic while unwinding.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move { release_owned(&owned).await });
+        }
+    }
+}
+
+/// Attempts one bounded atomic release and deliberately suppresses its result.
+async fn release_owned(owned: &OwnedClaim) {
+    let _ = tokio::time::timeout(
+        UNLOCK_TIMEOUT,
+        owned.fenced.delete_if(&owned.key, &owned.token),
+    )
+    .await;
+}
+
+/// Outcome of the one-shot cross-process claim attempt.
+enum Claim {
+    /// This process owns the lock and must release it after work.
+    Owned(FencedClaim),
+    /// Another process has already published a value.
+    Published(Vec<u8>),
+    /// Another process has published authoritative absence.
+    PublishedVoid,
+    /// Locking could not help; proceed locally without waiting.
+    Unclaimed,
+}
 
 /// Cancellation-safe ownership of one per-ID background refresh claim.
 ///
@@ -69,15 +147,18 @@ impl Drop for RefreshClaim {
 ///
 /// Aside prevents source stampedes by collapsing same-ID loads, remembers
 /// authoritative absence briefly, and can return stale values immediately while
-/// refreshing them in bounded background work. It has no enumeration index and
-/// therefore no index hot key, but separate processes may each load once until a
-/// safe fenced-lock capability is implemented.
+/// refreshing them in bounded background work. With Fenced it also attempts a
+/// non-waiting cross-process claim; without that optional capability, separate
+/// processes may each load once. It has no enumeration index and therefore no
+/// index hot key.
 ///
 /// Best for read-heavy values whose authority is a slower database or service.
 #[derive(Clone)]
 pub struct AsideImpl {
     /// Required one-key storage primitives for framed values and void markers.
     driver: Arc<dyn Driver>,
+    /// Optional atomic release enabling best-effort cross-process claims.
+    fenced: Option<Arc<dyn Fenced>>,
     /// Generates every Aside entry key within the selected database.
     keyspace: Keyspace,
     /// Caller-owned authoritative source invoked on misses and refreshes.
@@ -96,6 +177,8 @@ pub struct AsideImpl {
     refreshing: Arc<tokio::sync::Mutex<HashSet<String>>>,
     /// Lease for best-effort Loader `NotFound` markers; zero disables them.
     negative_ttl: Duration,
+    /// Maximum lifetime of a cross-process ownership key.
+    lock_lease: Duration,
 }
 
 #[async_trait::async_trait]
@@ -138,6 +221,7 @@ impl AsideImpl {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         driver: Arc<dyn Driver>,
+        fenced: Option<Arc<dyn Fenced>>,
         keyspace: Keyspace,
         loader: Loader,
         default_ttl: Duration,
@@ -146,9 +230,11 @@ impl AsideImpl {
         flight: Arc<Flight>,
         refresher: Arc<Refresher>,
         negative_ttl: Duration,
+        lock_lease: Duration,
     ) -> Self {
         Self {
             driver,
+            fenced,
             keyspace,
             loader,
             default_ttl,
@@ -158,6 +244,7 @@ impl AsideImpl {
             refresher,
             refreshing: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
             negative_ttl,
+            lock_lease,
         }
     }
 
@@ -190,13 +277,59 @@ impl AsideImpl {
     /// to optimize a later miss must not replace the meaningful `NotFound` that
     /// the authoritative source returned now.
     ///
-    /// **Cost**: One Loader execution and at most one Driver SET.
+    /// **Cost**: Without Fenced, one Loader execution and at most one Driver
+    /// SET. With Fenced, claim/release add up to two round trips; a lost claim
+    /// adds one entry GET and may avoid the Loader entirely.
     /// **Side effects**: Stores a value through hard expiry, or stores a void
     /// envelope for `negative_ttl` when the Loader returns `NotFound`.
     async fn load_and_store(&self, id: &str, opts: &Options) -> Result<Vec<u8>> {
         let ttl = resolve_ttl(self.default_ttl, self.require_ttl, opts)?;
         let stale = resolve_stale(self.default_stale, opts);
         let freshness = freshness(ttl, stale)?;
+        let claim = self.claim(id).await;
+        let owned = match claim {
+            Claim::Owned(owned) => Some(owned),
+            Claim::Published(value) => return Ok(value),
+            Claim::PublishedVoid => return Err(CacheError::NotFound),
+            Claim::Unclaimed => None,
+        };
+
+        let result = self.load_and_store_claimed(id, freshness).await;
+        if let Some(owned) = owned {
+            owned.release().await;
+        }
+        result
+    }
+
+    /// Attempts one non-waiting cross-process load claim.
+    ///
+    /// **Cost**: No I/O without Fenced. Otherwise one Driver Add; losing or
+    /// failing that optimization performs exactly one entry GET.
+    /// **Failure behavior**: Lock and follow-up read failures become
+    /// `Unclaimed`, preserving local loading. A published void marker completes
+    /// the remote load as `NotFound`, correcting GO-008.
+    async fn claim(&self, id: &str) -> Claim {
+        let Some(fenced) = self.fenced.clone() else {
+            return Claim::Unclaimed;
+        };
+        let key = self.keyspace.aside_lock(id);
+        let token = Uuid::new_v4().as_bytes().to_vec();
+        match self.driver.add(&key, &token, self.lock_lease).await {
+            Ok(true) => Claim::Owned(FencedClaim::new(fenced, key, token)),
+            Ok(false) | Err(_) => match self.read(id).await {
+                Ok(StoredEntry::Value { body, .. }) => Claim::Published(body),
+                Ok(StoredEntry::Void) => Claim::PublishedVoid,
+                Err(_) => Claim::Unclaimed,
+            },
+        }
+    }
+
+    /// Invokes the Loader and publishes its framed result after claim handling.
+    ///
+    /// The caller has already resolved TTL policy and may own a distributed
+    /// claim. Loader, framing, and storage errors are returned unchanged; the
+    /// outer method releases any ownership generation afterward.
+    async fn load_and_store_claimed(&self, id: &str, freshness: Freshness) -> Result<Vec<u8>> {
         let key = self.keyspace.aside_entry(id);
 
         let value = match (self.loader)(id.to_owned()).await {
@@ -525,6 +658,56 @@ mod tests {
 
     use super::*;
 
+    /// Driver wrapper forcing the best-effort lock Add path to fail.
+    struct FailingAddDriver {
+        inner: Arc<MemoryDriver>,
+    }
+
+    #[async_trait::async_trait]
+    impl Driver for FailingAddDriver {
+        fn name(&self) -> &str {
+            "failing-add"
+        }
+
+        async fn get(&self, key: &str) -> Result<Vec<u8>> {
+            self.inner.get(key).await
+        }
+
+        async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<()> {
+            self.inner.set(key, value, ttl).await
+        }
+
+        async fn add(&self, _key: &str, _value: &[u8], _ttl: Duration) -> Result<bool> {
+            Err(CacheError::Internal("lock unavailable".to_owned()))
+        }
+
+        async fn replace(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
+            self.inner.replace(key, value, ttl).await
+        }
+
+        async fn delete(&self, keys: &[&str]) -> Result<()> {
+            self.inner.delete(keys).await
+        }
+
+        async fn exists(&self, key: &str) -> Result<bool> {
+            self.inner.exists(key).await
+        }
+
+        async fn touch(&self, key: &str, ttl: Duration) -> Result<()> {
+            self.inner.touch(key, ttl).await
+        }
+    }
+
+    /// Fenced test capability proving release failures are only optimization failures.
+    struct FailingFenced;
+
+    #[async_trait::async_trait]
+    impl Fenced for FailingFenced {
+        async fn delete_if(&self, _key: &str, _expected: &[u8]) -> Result<bool> {
+            Err(CacheError::Internal("release unavailable".to_owned()))
+        }
+    }
+
     fn test_aside(driver: Arc<MemoryDriver>) -> AsideImpl {
         let loader: Loader = Arc::new(|_| async { Ok(b"null".to_vec()) }.boxed());
         test_aside_with_loader(driver, loader, Duration::from_secs(30))
@@ -537,6 +720,7 @@ mod tests {
     ) -> AsideImpl {
         AsideImpl::new(
             driver,
+            None,
             Keyspace::new("test", "db", 0, false),
             loader,
             Duration::from_secs(60),
@@ -545,6 +729,27 @@ mod tests {
             Arc::new(Flight::new(8, Duration::from_secs(1))),
             Arc::new(Refresher::new(8, Duration::from_secs(1))),
             negative_ttl,
+            Duration::from_secs(30),
+        )
+    }
+
+    fn test_aside_with_fenced(
+        driver: Arc<MemoryDriver>,
+        fenced: Arc<dyn Fenced>,
+        loader: Loader,
+    ) -> AsideImpl {
+        AsideImpl::new(
+            driver,
+            Some(fenced),
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            Arc::new(Refresher::new(8, Duration::from_secs(1))),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
         )
     }
 
@@ -648,6 +853,7 @@ mod tests {
         let refresher = Arc::new(Refresher::new(8, Duration::from_secs(1)));
         let aside = AsideImpl::new(
             driver,
+            None,
             Keyspace::new("test", "db", 0, false),
             loader,
             Duration::from_secs(60),
@@ -655,6 +861,7 @@ mod tests {
             false,
             Arc::new(Flight::new(8, Duration::from_secs(1))),
             refresher.clone(),
+            Duration::from_secs(30),
             Duration::from_secs(30),
         );
         let opts = Options::default()
@@ -831,6 +1038,235 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_aside_claim_without_fenced_performs_no_lock_write() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""value""#.to_vec()) }.boxed());
+        let aside = test_aside_with_loader(driver.clone(), loader, Duration::from_secs(30));
+        let lock = Keyspace::new("test", "db", 0, false).aside_lock("item");
+
+        aside
+            .load_and_store("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert!(!driver.exists(&lock).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_winner_releases_matching_lock() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""value""#.to_vec()) }.boxed());
+        let aside = test_aside_with_fenced(driver.clone(), driver.clone(), loader);
+        let lock = Keyspace::new("test", "db", 0, false).aside_lock("item");
+
+        let value = aside
+            .load_and_store("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(value, br#""value""#);
+        assert!(!driver.exists(&lock).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_release_preserves_successor_token() {
+        let driver = Arc::new(MemoryDriver::new());
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        let lock = keyspace.aside_lock("item");
+        let loader_driver = driver.clone();
+        let loader_lock = lock.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_driver = loader_driver.clone();
+            let loader_lock = loader_lock.clone();
+            async move {
+                loader_driver
+                    .set(&loader_lock, b"successor", Duration::from_secs(30))
+                    .await?;
+                Ok(br#""value""#.to_vec())
+            }
+            .boxed()
+        });
+        let aside = test_aside_with_fenced(driver.clone(), driver.clone(), loader);
+
+        aside
+            .load_and_store("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(driver.get(&lock).await.unwrap(), b"successor");
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_loser_returns_published_value_without_loader() {
+        let driver = Arc::new(MemoryDriver::new());
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        driver
+            .set(
+                &keyspace.aside_lock("item"),
+                b"other",
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        driver
+            .set(
+                &keyspace.aside_entry("item"),
+                &pack_value(br#""published""#, 0).unwrap(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(br#""loaded""#.to_vec())
+            }
+            .boxed()
+        });
+        let aside = test_aside_with_fenced(driver.clone(), driver, loader);
+
+        let value = aside
+            .load_and_store("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(value, br#""published""#);
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_loser_returns_published_void_without_loader() {
+        let driver = Arc::new(MemoryDriver::new());
+        let keyspace = Keyspace::new("test", "db", 0, false);
+        driver
+            .set(
+                &keyspace.aside_lock("missing"),
+                b"other",
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        driver
+            .set(
+                &keyspace.aside_entry("missing"),
+                &pack_void().unwrap(),
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(br#""loaded""#.to_vec())
+            }
+            .boxed()
+        });
+        let aside = test_aside_with_fenced(driver.clone(), driver, loader);
+
+        let result = aside.load_and_store("missing", &Options::default()).await;
+
+        assert!(matches!(result, Err(CacheError::NotFound)));
+        assert_eq!(executions.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_acquisition_failure_falls_back_to_loader() {
+        let storage = Arc::new(MemoryDriver::new());
+        let driver: Arc<dyn Driver> = Arc::new(FailingAddDriver {
+            inner: storage.clone(),
+        });
+        let fenced: Arc<dyn Fenced> = storage.clone();
+        let loader: Loader = Arc::new(|_| async { Ok(br#""fallback""#.to_vec()) }.boxed());
+        let aside = AsideImpl::new(
+            driver,
+            Some(fenced),
+            Keyspace::new("test", "db", 0, false),
+            loader,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            false,
+            Arc::new(Flight::new(8, Duration::from_secs(1))),
+            Arc::new(Refresher::new(8, Duration::from_secs(1))),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        );
+
+        let value = aside
+            .load_and_store("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(value, br#""fallback""#);
+        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
+            body: br#""fallback""#.to_vec(),
+            stale: false,
+        });
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_release_failure_preserves_loader_result() {
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader = Arc::new(|_| async { Ok(br#""value""#.to_vec()) }.boxed());
+        let aside = test_aside_with_fenced(driver.clone(), Arc::new(FailingFenced), loader);
+        let lock = Keyspace::new("test", "db", 0, false).aside_lock("item");
+
+        let value = aside
+            .load_and_store("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(value, br#""value""#);
+        assert!(driver.exists(&lock).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_aside_claim_cancelled_work_schedules_bounded_release() {
+        let driver = Arc::new(MemoryDriver::new());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let loader_started = started.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_started = loader_started.clone();
+            async move {
+                loader_started.notify_one();
+                std::future::pending::<()>().await;
+                Ok(Vec::new())
+            }
+            .boxed()
+        });
+        let aside = Arc::new(test_aside_with_fenced(
+            driver.clone(),
+            driver.clone(),
+            loader,
+        ));
+        let lock = Keyspace::new("test", "db", 0, false).aside_lock("item");
+        let work = {
+            let aside = aside.clone();
+            tokio::spawn(async move { aside.load_and_store("item", &Options::default()).await })
+        };
+        started.notified().await;
+        assert!(driver.exists(&lock).await.unwrap());
+
+        work.abort();
+        let _ = work.await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !driver.exists(&lock).await.unwrap() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("cancelled claim was not released");
+    }
+
+    #[tokio::test]
     async fn test_aside_load_through_flight_collapses_concurrent_loaders() {
         let driver = Arc::new(MemoryDriver::new());
         let executions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -921,6 +1357,7 @@ mod tests {
         let second_loader: Loader = Arc::new(|_| async { Ok(br#""second""#.to_vec()) }.boxed());
         let first_view = AsideImpl::new(
             driver.clone(),
+            None,
             keyspace.clone(),
             first_loader,
             Duration::from_secs(60),
@@ -929,9 +1366,11 @@ mod tests {
             flight.clone(),
             Arc::new(Refresher::new(8, Duration::from_secs(1))),
             Duration::from_secs(30),
+            Duration::from_secs(30),
         );
         let second_view = AsideImpl::new(
             driver,
+            None,
             keyspace,
             second_loader,
             Duration::from_secs(60),
@@ -939,6 +1378,7 @@ mod tests {
             false,
             flight,
             Arc::new(Refresher::new(8, Duration::from_secs(1))),
+            Duration::from_secs(30),
             Duration::from_secs(30),
         );
 
@@ -980,6 +1420,7 @@ mod tests {
         let refresher = Arc::new(Refresher::new(8, Duration::from_secs(1)));
         let aside = AsideImpl::new(
             driver,
+            None,
             Keyspace::new("test", "db", 0, false),
             loader,
             Duration::from_secs(60),
@@ -987,6 +1428,7 @@ mod tests {
             false,
             Arc::new(Flight::new(8, Duration::from_secs(1))),
             refresher.clone(),
+            Duration::from_secs(30),
             Duration::from_secs(30),
         );
 
@@ -1016,6 +1458,7 @@ mod tests {
         let refresher = Arc::new(Refresher::new(1, Duration::from_secs(1)));
         let aside = AsideImpl::new(
             driver,
+            None,
             Keyspace::new("test", "db", 0, false),
             loader,
             Duration::from_secs(60),
@@ -1023,6 +1466,7 @@ mod tests {
             false,
             Arc::new(Flight::new(8, Duration::from_secs(1))),
             refresher.clone(),
+            Duration::from_secs(30),
             Duration::from_secs(30),
         );
 
@@ -1046,6 +1490,7 @@ mod tests {
         let refresher = Arc::new(Refresher::new(1, Duration::from_millis(10)));
         let aside = AsideImpl::new(
             driver,
+            None,
             Keyspace::new("test", "db", 0, false),
             loader,
             Duration::from_secs(60),
@@ -1053,6 +1498,7 @@ mod tests {
             false,
             Arc::new(Flight::new(8, Duration::from_secs(1))),
             refresher.clone(),
+            Duration::from_secs(30),
             Duration::from_secs(30),
         );
 

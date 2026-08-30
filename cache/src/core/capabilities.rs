@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use super::{Bulk, Leases, Scanner, SetScanner, Sets};
+use super::{Bulk, Fenced, Leases, Scanner, SetScanner, Sets};
 
 /// Optional behavior a backend can provide beyond the required Driver trait.
 ///
@@ -30,6 +30,8 @@ pub struct Capabilities {
     bulk: Option<Arc<dyn Bulk>>,
     /// Cursor-based traversal of large server-side sets.
     set_scanner: Option<Arc<dyn SetScanner>>,
+    /// Atomic compare-and-delete for safely releasing leased ownership keys.
+    fenced: Option<Arc<dyn Fenced>>,
 }
 
 impl Capabilities {
@@ -125,6 +127,23 @@ impl Capabilities {
     pub fn set_scanner(&self) -> Option<Arc<dyn SetScanner>> {
         self.set_scanner.clone()
     }
+
+    /// Declares atomic compare-and-delete support.
+    ///
+    /// **Cost**: O(1); stores one reference-counted capability handle.
+    /// **Side effects**: Replaces any previously declared Fenced capability.
+    pub fn with_fenced(mut self, fenced: Arc<dyn Fenced>) -> Self {
+        self.fenced = Some(fenced);
+        self
+    }
+
+    /// Returns the declared Fenced capability, if available.
+    ///
+    /// **Cost**: O(1); cloning increments an atomic reference count.
+    /// **Side effects**: None on the backend.
+    pub fn fenced(&self) -> Option<Arc<dyn Fenced>> {
+        self.fenced.clone()
+    }
 }
 
 #[cfg(test)]
@@ -148,6 +167,7 @@ mod tests {
         assert!(Capabilities::new().scanner().is_none());
         assert!(Capabilities::new().bulk().is_none());
         assert!(Capabilities::new().set_scanner().is_none());
+        assert!(Capabilities::new().fenced().is_none());
     }
 
     #[test]
@@ -183,5 +203,12 @@ mod tests {
         let capabilities = Capabilities::new().with_set_scanner(Arc::new(MemorySets::new()));
 
         assert!(capabilities.set_scanner().is_some());
+    }
+
+    #[test]
+    fn test_capabilities_with_fenced_exposes_declared_capability() {
+        let capabilities = Capabilities::new().with_fenced(Arc::new(MemoryDriver::new()));
+
+        assert!(capabilities.fenced().is_some());
     }
 }

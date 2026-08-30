@@ -10,12 +10,16 @@ use crate::strategies::{AsideImpl, DocumentImpl, IndexedImpl, VolatileImpl};
 use crate::strategies::{batch::DEFAULT_CONCURRENCY, flight::Flight, refresher::Refresher};
 use crate::{CacheError, Result};
 
-use super::{Aside, Capabilities, Document, Driver, Indexed, Keyspace, Loader, NewId, Volatile};
+use super::{
+    Aside, Capabilities, Document, Driver, Fenced, Indexed, Keyspace, Loader, NewId, Volatile,
+};
 
 /// Maximum runtime allowed for one Aside loader execution.
 const LOAD_TIMEOUT: Duration = Duration::from_secs(30);
 /// Lease used to remember a Loader-reported absence.
 const NEGATIVE_TTL: Duration = Duration::from_secs(30);
+/// Lease bounding an abandoned cross-process Aside ownership claim.
+const LOCK_LEASE: Duration = Duration::from_secs(30);
 /// Maximum time DB close waits for admitted refreshes to finish.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Maximum background refreshes admitted per selected database.
@@ -79,6 +83,8 @@ impl Default for DatabaseSpec {
 struct AsideFactory {
     /// Required storage primitives for value frames.
     driver: Arc<dyn Driver>,
+    /// Optional atomic release for cross-process ownership claims.
+    fenced: Option<Arc<dyn Fenced>>,
     /// Database-qualified Aside key builder.
     keyspace: Keyspace,
     /// Freshness lease used when an operation supplies none.
@@ -143,6 +149,7 @@ impl DB {
     pub fn aside(&self, loader: Loader) -> Arc<dyn Aside> {
         Arc::new(AsideImpl::new(
             self.aside.driver.clone(),
+            self.aside.fenced.clone(),
             self.aside.keyspace.clone(),
             loader,
             self.aside.default_ttl,
@@ -151,6 +158,7 @@ impl DB {
             self.aside.flight.clone(),
             self.aside.refresher.clone(),
             NEGATIVE_TTL,
+            LOCK_LEASE,
         ))
     }
 
@@ -231,6 +239,7 @@ pub fn build_database(
     let scanner = capabilities.scanner();
     let bulk = capabilities.bulk();
     let set_scanner = capabilities.set_scanner();
+    let fenced = capabilities.fenced();
     let new_id = match spec.new_id {
         Some(new_id) => new_id,
         None => default_new_id(),
@@ -280,6 +289,7 @@ pub fn build_database(
         index: spec.database,
         aside: AsideFactory {
             driver,
+            fenced,
             keyspace,
             default_ttl: spec.default_ttl,
             default_stale: spec.default_stale,
@@ -376,6 +386,49 @@ mod tests {
             db.volatile.scan("*").await,
             Err(CacheError::Unsupported)
         ));
+    }
+
+    #[tokio::test]
+    async fn test_database_build_wires_fenced_to_aside_factory() {
+        let driver = Arc::new(MemoryDriver::new());
+        let db = build_database(
+            driver.clone(),
+            Capabilities::new().with_fenced(driver.clone()),
+            DatabaseSpec {
+                default_ttl: Duration::from_secs(60),
+                ..DatabaseSpec::default()
+            },
+        );
+        let seed_loader: Loader = Arc::new(|_| async { Ok(br#""seed""#.to_vec()) }.boxed());
+        db.aside(seed_loader)
+            .refresh("item", &Options::default())
+            .await
+            .unwrap();
+        driver
+            .set(
+                &db.aside.keyspace.aside_lock("item"),
+                b"remote-owner",
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap();
+        let executions = Arc::new(AtomicUsize::new(0));
+        let loader_count = executions.clone();
+        let loader: Loader = Arc::new(move |_| {
+            let loader_count = loader_count.clone();
+            async move {
+                loader_count.fetch_add(1, Ordering::SeqCst);
+                Ok(br#""unexpected""#.to_vec())
+            }
+            .boxed()
+        });
+
+        db.aside(loader)
+            .refresh("item", &Options::default())
+            .await
+            .unwrap();
+
+        assert_eq!(executions.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

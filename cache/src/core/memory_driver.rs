@@ -4,7 +4,7 @@
 //! preserves Driver semantics without external services, but provides neither
 //! persistence nor coordination across processes.
 
-use super::{Bulk, Driver, Leases};
+use super::{Bulk, Driver, Fenced, Leases};
 use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -258,6 +258,24 @@ impl Leases for MemoryDriver {
     }
 }
 
+#[async_trait::async_trait]
+impl Fenced for MemoryDriver {
+    /// Compares and conditionally removes one live entry under one write lock.
+    ///
+    /// Missing, expired, and mismatched entries return false without mutation.
+    /// The shared critical section makes comparison and deletion indivisible.
+    async fn delete_if(&self, key: &str, expected: &[u8]) -> Result<bool> {
+        let mut data = self.data.write().await;
+        let matches = data
+            .get(key)
+            .is_some_and(|entry| !entry.is_expired() && entry.value == expected);
+        if matches {
+            data.remove(key);
+        }
+        Ok(matches)
+    }
+}
+
 #[cfg(test)]
 mod lease_tests {
     use super::*;
@@ -325,5 +343,38 @@ mod bulk_tests {
         ]);
         assert!(Bulk::get_many(&driver, &[]).await.unwrap().is_empty());
         assert!(Bulk::exists_many(&driver, &[]).await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fenced_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_driver_delete_if_removes_only_matching_live_value() {
+        let driver = MemoryDriver::new();
+        driver.set("lock", b"owner", Duration::ZERO).await.unwrap();
+
+        assert!(!Fenced::delete_if(&driver, "lock", b"other").await.unwrap());
+        assert!(driver.exists("lock").await.unwrap());
+        assert!(Fenced::delete_if(&driver, "lock", b"owner").await.unwrap());
+        assert!(!driver.exists("lock").await.unwrap());
+        assert!(
+            !Fenced::delete_if(&driver, "missing", b"owner")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_driver_delete_if_expired_value_is_not_owned() {
+        let driver = MemoryDriver::new();
+        driver
+            .set("lock", b"owner", Duration::from_millis(1))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(!Fenced::delete_if(&driver, "lock", b"owner").await.unwrap());
     }
 }
