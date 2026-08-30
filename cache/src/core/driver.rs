@@ -60,7 +60,9 @@ pub trait Driver: Send + Sync {
 
     /// Removes all supplied keys; absent keys are harmless.
     ///
-    /// **Cost**: One batched delete round trip. Empty input is permitted.
+    /// **Cost**: Backend-dependent. Servers with multi-delete use one batched
+    /// round trip; limited backends may require one round trip per key. Empty
+    /// input is permitted.
     async fn delete(&self, keys: &[&str]) -> Result<()>;
 
     /// Reports whether a live key exists without returning its value.

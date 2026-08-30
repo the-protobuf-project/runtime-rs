@@ -1,11 +1,11 @@
-//! Compile-time compatibility gate for the provisional async Memcached client.
+//! Compile-time regression gate for the pinned async Memcached dependency.
 //!
-//! This is not the Memcached backend. It verifies that the pinned dependency
-//! exposes the atomic operations, byte values, per-server batching and pooling,
-//! and timeout controls required by the approved boundary. The production
-//! adapter will route among these single-server clients with Go's CRC32 rule;
-//! it must not use the dependency's incompatible jump-hash router. Keeping the
-//! probe test-only prevents an incomplete driver from entering the public API.
+//! The production backend lives in the adjacent `memcached` module. This test
+//! verifies that its experimental dependency still exposes the atomic
+//! operations, byte values, per-server batching and pooling, and timeout
+//! controls the private adapter uses. Production routes among single-server
+//! clients with Go's CRC32 rule and must not adopt the dependency's
+//! incompatible jump-hash router.
 
 use std::time::Duration;
 
