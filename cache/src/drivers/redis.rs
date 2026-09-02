@@ -35,8 +35,30 @@ pub const DEFAULT_REDIS_ADDRESS: &str = "localhost:6379";
 
 /// Cursor count hint shared by Redis keyspace scans.
 const SCAN_BATCH: usize = 256;
-/// Stable backend identity exposed through Driver and Provider metadata.
-const BACKEND: &str = "redis";
+/// Stable Redis identity and preset defaults supplied to the shared RESP path.
+const REDIS_PROFILE: RespProfile = RespProfile::new("redis", DEFAULT_REDIS_ADDRESS);
+
+/// Immutable identity and defaults for one Redis-compatible server preset.
+///
+/// The profile is crate-private so future built-in presets can reuse the RESP
+/// implementation without letting callers relabel an arbitrary Redis client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RespProfile {
+    /// Stable backend name used by DB metadata and diagnostic errors.
+    backend: &'static str,
+    /// Address selected when the preset-specific public config leaves it empty.
+    default_address: &'static str,
+}
+
+impl RespProfile {
+    /// Creates one built-in RESP preset without performing backend I/O.
+    pub(crate) const fn new(backend: &'static str, default_address: &'static str) -> Self {
+        Self {
+            backend,
+            default_address,
+        }
+    }
+}
 
 /// Connection settings for one standalone Redis client.
 ///
@@ -143,7 +165,7 @@ impl CommandExecutor for ManagedExecutor {
             None => {
                 return Err(RedisError::from((
                     ErrorKind::Client,
-                    "Redis client is closed",
+                    "RESP client is closed",
                 )));
             }
         };
@@ -160,7 +182,7 @@ impl CommandExecutor for ManagedExecutor {
             None => {
                 return Err(RedisError::from((
                     ErrorKind::Client,
-                    "Redis client is closed",
+                    "RESP client is closed",
                 )));
             }
         };
@@ -197,6 +219,8 @@ impl CommandExecutor for ManagedExecutor {
 pub struct RedisClient {
     /// Normalized settings retained so another native index can be derived.
     config: RedisConfig,
+    /// Backend identity/defaults retained across derived database clients.
+    profile: RespProfile,
     /// Shared transport and close state used by every primitive adapter.
     executor: Arc<dyn CommandExecutor>,
 }
@@ -210,17 +234,26 @@ impl RedisClient {
     /// **When to use**: Once during application startup, before constructing a
     /// [`RedisProvider`]. Connection, authentication, PING, and invalid address
     /// failures are returned without exposing credentials.
-    pub async fn connect(mut config: RedisConfig) -> Result<Self> {
+    pub async fn connect(config: RedisConfig) -> Result<Self> {
+        Self::connect_with_profile(config, REDIS_PROFILE).await
+    }
+
+    /// Connects one built-in Redis-compatible preset through the shared RESP
+    /// path while retaining its identity for errors and derived clients.
+    pub(crate) async fn connect_with_profile(
+        mut config: RedisConfig,
+        profile: RespProfile,
+    ) -> Result<Self> {
         let address = if config.address.is_empty() {
-            DEFAULT_REDIS_ADDRESS.to_owned()
+            profile.default_address.to_owned()
         } else {
             config.address.clone()
         };
-        let (host, port) = parse_address(&address)?;
+        let (host, port) = parse_address(profile.backend, &address)?;
         let database = i64::try_from(config.database).map_err(|_| {
             CacheError::Internal(format!(
-                "redis: database index {} exceeds Redis range",
-                config.database
+                "{}: database index {} exceeds RESP range",
+                profile.backend, config.database
             ))
         })?;
         let mut redis_settings = RedisConnectionInfo::default().set_db(database);
@@ -232,17 +265,18 @@ impl RedisClient {
         }
         let connection_info: ConnectionInfo = (host, port)
             .into_connection_info()
-            .map_err(|error| internal("configure connection", error))?
+            .map_err(|error| internal(profile.backend, "configure connection", error))?
             .set_redis_settings(redis_settings);
         let redis_client = redis::Client::open(connection_info)
-            .map_err(|error| internal("configure connection", error))?;
-        let manager_config = connection_manager_config(config.dial_timeout)?;
+            .map_err(|error| internal(profile.backend, "configure connection", error))?;
+        let manager_config = connection_manager_config(profile.backend, config.dial_timeout)?;
         let manager = ConnectionManager::new_with_config(redis_client, manager_config)
             .await
-            .map_err(|error| internal("connect", error))?;
+            .map_err(|error| internal(profile.backend, "connect", error))?;
         config.address = address;
         let client = Self {
             config,
+            profile,
             executor: Arc::new(ManagedExecutor {
                 manager: RwLock::new(Some(manager)),
             }),
@@ -271,8 +305,8 @@ impl RedisClient {
             .executor
             .execute(redis::cmd("PING"))
             .await
-            .map_err(|error| internal("ping", error))?;
-        let _: String = decode("ping reply", value)?;
+            .map_err(|error| internal(self.profile.backend, "ping", error))?;
+        let _: String = decode(self.profile.backend, "ping reply", value)?;
         Ok(())
     }
 
@@ -280,8 +314,9 @@ impl RedisClient {
     ///
     /// The adapter does not own or close the client. Building it is local and
     /// only increments the executor's reference count.
-    pub(crate) fn primitives(&self) -> Arc<RedisPrimitives> {
-        Arc::new(RedisPrimitives {
+    pub(crate) fn primitives(&self) -> Arc<RespPrimitives> {
+        Arc::new(RespPrimitives {
+            profile: self.profile,
             executor: self.executor.clone(),
         })
     }
@@ -294,33 +329,54 @@ impl RedisClient {
         self.config.clone()
     }
 
+    /// Returns the immutable preset identity retained by this client.
+    pub(crate) fn profile(&self) -> RespProfile {
+        self.profile
+    }
+
     #[cfg(test)]
     /// Constructs a client around an in-process executor for unit tests.
     fn with_executor(config: RedisConfig, executor: Arc<dyn CommandExecutor>) -> Self {
-        Self { config, executor }
+        Self::with_profile_executor(config, REDIS_PROFILE, executor)
+    }
+
+    #[cfg(test)]
+    /// Constructs a profiled client around an in-process test executor.
+    fn with_profile_executor(
+        config: RedisConfig,
+        profile: RespProfile,
+        executor: Arc<dyn CommandExecutor>,
+    ) -> Self {
+        Self {
+            config,
+            profile,
+            executor,
+        }
     }
 }
 
-/// Internal factory for a verified client on a derived Redis index.
+/// Internal factory for a verified client on a derived RESP database index.
 ///
 /// Provider tests replace this boundary to observe copied configuration and
 /// lifecycle behavior without opening network connections.
 #[async_trait]
-trait RedisConnector: Send + Sync {
+trait RespConnector: Send + Sync {
     /// Connects and PING-verifies a client for the supplied configuration.
     ///
     /// **Cost**: Connection setup plus the PING performed by
     /// [`RedisClient::connect`]. A returned client is ready for DB construction.
-    async fn connect(&self, config: RedisConfig) -> Result<Arc<RedisClient>>;
+    async fn connect(&self, config: RedisConfig, profile: RespProfile) -> Result<Arc<RedisClient>>;
 }
 
 /// Production connector delegating derived selection to [`RedisClient`].
-struct DefaultRedisConnector;
+struct DefaultRespConnector;
 
 #[async_trait]
-impl RedisConnector for DefaultRedisConnector {
-    async fn connect(&self, config: RedisConfig) -> Result<Arc<RedisClient>> {
-        Ok(Arc::new(RedisClient::connect(config).await?))
+impl RespConnector for DefaultRespConnector {
+    async fn connect(&self, config: RedisConfig, profile: RespProfile) -> Result<Arc<RedisClient>> {
+        Ok(Arc::new(
+            RedisClient::connect_with_profile(config, profile).await?,
+        ))
     }
 }
 
@@ -347,7 +403,7 @@ pub struct RedisProvider {
     /// Strategy defaults and optional named-database allowlist.
     config: Config,
     /// Factory used only when selecting an index different from the root.
-    connector: Arc<dyn RedisConnector>,
+    connector: Arc<dyn RespConnector>,
 }
 
 impl RedisProvider {
@@ -363,7 +419,7 @@ impl RedisProvider {
         Self {
             client,
             config,
-            connector: Arc::new(DefaultRedisConnector),
+            connector: Arc::new(DefaultRespConnector),
         }
     }
 
@@ -414,7 +470,7 @@ impl RedisProvider {
     fn with_connector(
         client: Arc<RedisClient>,
         config: Config,
-        connector: Arc<dyn RedisConnector>,
+        connector: Arc<dyn RespConnector>,
     ) -> Self {
         Self {
             client,
@@ -455,7 +511,10 @@ impl Provider for RedisProvider {
 
         let mut derived_config = current;
         derived_config.database = index;
-        let derived = self.connector.connect(derived_config).await?;
+        let derived = self
+            .connector
+            .connect(derived_config, self.client.profile())
+            .await?;
         let released = derived.clone();
         // Strategies keep their executor alive, so DB close must explicitly
         // close the derived handle after core drains background refresh work.
@@ -485,15 +544,16 @@ impl Provider for RedisProvider {
 
     /// Returns the stable Redis identity without backend I/O.
     fn backend(&self) -> &str {
-        BACKEND
+        self.client.profile.backend
     }
 }
 
-/// Redis implementation of the low-level cache primitives.
+/// Backend-aware implementation of Redis-compatible RESP cache primitives.
 ///
 /// This adapter deliberately contains no Keyspace or strategy policy. Ordinary
-/// non-empty operations map to one Redis command; Bulk maps an ordered command
-/// pipeline to one round trip.
+/// non-empty operations map to one RESP command; Bulk maps an ordered command
+/// pipeline to one round trip. The retained profile supplies metadata and error
+/// identity without changing command semantics.
 /// One instance can be viewed as Driver, Sets, Leases, Scanner, SetScanner,
 /// Bulk, and Fenced while sharing the same executor.
 ///
@@ -505,15 +565,18 @@ impl Provider for RedisProvider {
 /// count hint and may require many small round trips instead of blocking Redis
 /// with `KEYS`.
 ///
-/// **Use case**: Backend adapter supplied only by [`RedisProvider`]; callers use
-/// the strategy traits exposed by [`DB`] rather than constructing it directly.
-pub(crate) struct RedisPrimitives {
+/// **Use case**: Backend adapter supplied by built-in RESP Providers; callers
+/// use the strategy traits exposed by [`DB`] rather than constructing it
+/// directly.
+pub(crate) struct RespPrimitives {
+    /// Backend identity used by metadata and contextual errors.
+    profile: RespProfile,
     /// Shared command transport; closing remains the client's responsibility.
     executor: Arc<dyn CommandExecutor>,
 }
 
-impl RedisPrimitives {
-    /// Executes one Redis command and adds safe backend/operation context.
+impl RespPrimitives {
+    /// Executes one RESP command and adds safe backend/operation context.
     ///
     /// Concrete Redis errors cannot fit the closed cache error enum, so they
     /// become `Internal`; command values remain untyped until the caller checks
@@ -522,15 +585,15 @@ impl RedisPrimitives {
         self.executor
             .execute(command)
             .await
-            .map_err(|error| internal(operation, error))
+            .map_err(|error| internal(self.profile.backend, operation, error))
     }
 
-    /// Executes one non-transactional Redis pipeline with operation context.
+    /// Executes one non-transactional RESP pipeline with operation context.
     async fn pipeline(&self, operation: &str, pipeline: Pipeline) -> Result<Vec<Value>> {
         self.executor
             .execute_pipeline(pipeline)
             .await
-            .map_err(|error| internal(operation, error))
+            .map_err(|error| internal(self.profile.backend, operation, error))
     }
 
     /// Implements unconditional, NX, and XX writes with one atomic SET.
@@ -549,7 +612,9 @@ impl RedisPrimitives {
         let mut command = redis::cmd("SET");
         command.arg(key).arg(value);
         if !ttl.is_zero() {
-            command.arg("PX").arg(ttl_millis(ttl)?);
+            command
+                .arg("PX")
+                .arg(ttl_millis(self.profile.backend, ttl)?);
         }
         if let Some(condition) = condition {
             command.arg(condition);
@@ -558,11 +623,12 @@ impl RedisPrimitives {
         match response {
             Value::Nil if condition.is_some() => Ok(false),
             Value::Nil => Err(internal(
+                self.profile.backend,
                 "set reply",
                 "unexpected nil response from unconditional SET",
             )),
             value => {
-                let _: String = decode("set reply", value)?;
+                let _: String = decode(self.profile.backend, "set reply", value)?;
                 Ok(true)
             }
         }
@@ -570,10 +636,10 @@ impl RedisPrimitives {
 }
 
 #[async_trait]
-impl Driver for RedisPrimitives {
+impl Driver for RespPrimitives {
     /// Identifies this adapter locally; no Redis round trip or side effect.
     fn name(&self) -> &str {
-        BACKEND
+        self.profile.backend
     }
 
     /// Reads bytes with GET in one round trip.
@@ -585,7 +651,7 @@ impl Driver for RedisPrimitives {
         command.arg(key);
         match self.command("get", command).await? {
             Value::Nil => Err(CacheError::NotFound),
-            value => decode("get reply", value),
+            value => decode(self.profile.backend, "get reply", value),
         }
     }
 
@@ -622,7 +688,11 @@ impl Driver for RedisPrimitives {
         }
         let mut command = redis::cmd("DEL");
         command.arg(keys);
-        let _: i64 = decode("delete reply", self.command("delete", command).await?)?;
+        let _: i64 = decode(
+            self.profile.backend,
+            "delete reply",
+            self.command("delete", command).await?,
+        )?;
         Ok(())
     }
 
@@ -630,7 +700,11 @@ impl Driver for RedisPrimitives {
     async fn exists(&self, key: &str) -> Result<bool> {
         let mut command = redis::cmd("EXISTS");
         command.arg(key);
-        let count: i64 = decode("exists reply", self.command("exists", command).await?)?;
+        let count: i64 = decode(
+            self.profile.backend,
+            "exists reply",
+            self.command("exists", command).await?,
+        )?;
         Ok(count > 0)
     }
 
@@ -649,12 +723,12 @@ impl Driver for RedisPrimitives {
                 .arg(1)
                 .arg(key);
             let value = self.command("touch", command).await?;
-            decode::<i64>("touch reply", value)? >= 0
+            decode::<i64>(self.profile.backend, "touch reply", value)? >= 0
         } else {
             let mut command = redis::cmd("PEXPIRE");
-            command.arg(key).arg(ttl_millis(ttl)?);
+            command.arg(key).arg(ttl_millis(self.profile.backend, ttl)?);
             let value = self.command("touch", command).await?;
-            decode::<i64>("touch reply", value)? > 0
+            decode::<i64>(self.profile.backend, "touch reply", value)? > 0
         };
         if result {
             Ok(())
@@ -665,7 +739,7 @@ impl Driver for RedisPrimitives {
 }
 
 #[async_trait]
-impl Leases for RedisPrimitives {
+impl Leases for RespPrimitives {
     /// Reports remaining expiry with one PTTL round trip.
     ///
     /// Redis `-2` is missing and `-1` is permanent. A live sub-millisecond
@@ -674,7 +748,11 @@ impl Leases for RedisPrimitives {
     async fn ttl(&self, key: &str) -> Result<Duration> {
         let mut command = redis::cmd("PTTL");
         command.arg(key);
-        let ttl: i64 = decode("ttl reply", self.command("ttl", command).await?)?;
+        let ttl: i64 = decode(
+            self.profile.backend,
+            "ttl reply",
+            self.command("ttl", command).await?,
+        )?;
         match ttl {
             -2 => Err(CacheError::NotFound),
             -1 => Ok(Duration::ZERO),
@@ -682,6 +760,7 @@ impl Leases for RedisPrimitives {
             milliseconds if milliseconds > 0 => {
                 let milliseconds = u64::try_from(milliseconds).map_err(|error| {
                     internal(
+                        self.profile.backend,
                         "ttl reply",
                         format!("positive PTTL does not fit u64: {error}"),
                     )
@@ -689,6 +768,7 @@ impl Leases for RedisPrimitives {
                 Ok(Duration::from_millis(milliseconds))
             }
             sentinel => Err(internal(
+                self.profile.backend,
                 "ttl reply",
                 format!("unexpected Redis PTTL sentinel {sentinel}"),
             )),
@@ -697,7 +777,7 @@ impl Leases for RedisPrimitives {
 }
 
 #[async_trait]
-impl Bulk for RedisPrimitives {
+impl Bulk for RespPrimitives {
     /// Fetches ordered values with one pipeline of single-key GET commands.
     ///
     /// Individual GETs preserve future Redis Cluster compatibility; a nil reply
@@ -711,12 +791,12 @@ impl Bulk for RedisPrimitives {
             pipeline.cmd("GET").arg(key);
         }
         let replies = self.pipeline("get many", pipeline).await?;
-        validate_bulk_replies("get many", keys.len(), replies.len())?;
+        validate_bulk_replies(self.profile.backend, "get many", keys.len(), replies.len())?;
         replies
             .into_iter()
             .map(|reply| match reply {
                 Value::Nil => Ok(None),
-                value => decode("get-many reply", value).map(Some),
+                value => decode(self.profile.backend, "get-many reply", value).map(Some),
             })
             .collect()
     }
@@ -731,16 +811,24 @@ impl Bulk for RedisPrimitives {
             pipeline.cmd("EXISTS").arg(key);
         }
         let replies = self.pipeline("exists many", pipeline).await?;
-        validate_bulk_replies("exists many", keys.len(), replies.len())?;
+        validate_bulk_replies(
+            self.profile.backend,
+            "exists many",
+            keys.len(),
+            replies.len(),
+        )?;
         replies
             .into_iter()
-            .map(|reply| decode::<i64>("exists-many reply", reply).map(|count| count > 0))
+            .map(|reply| {
+                decode::<i64>(self.profile.backend, "exists-many reply", reply)
+                    .map(|count| count > 0)
+            })
             .collect()
     }
 }
 
 #[async_trait]
-impl Fenced for RedisPrimitives {
+impl Fenced for RespPrimitives {
     /// Atomically compares and deletes one key with a Lua script.
     ///
     /// **Cost**: One EVAL round trip. Redis executes comparison and deletion as
@@ -753,13 +841,17 @@ impl Fenced for RedisPrimitives {
             .arg(1)
             .arg(key)
             .arg(expected);
-        let deleted: i64 = decode("delete-if reply", self.command("delete if", command).await?)?;
+        let deleted: i64 = decode(
+            self.profile.backend,
+            "delete-if reply",
+            self.command("delete if", command).await?,
+        )?;
         Ok(deleted > 0)
     }
 }
 
 #[async_trait]
-impl Sets for RedisPrimitives {
+impl Sets for RespPrimitives {
     /// Adds members with one SADD round trip.
     ///
     /// Redis sets deduplicate members. Empty input is a local no-op because
@@ -770,7 +862,11 @@ impl Sets for RedisPrimitives {
         }
         let mut command = redis::cmd("SADD");
         command.arg(key).arg(members);
-        let _: i64 = decode("set-add reply", self.command("set add", command).await?)?;
+        let _: i64 = decode(
+            self.profile.backend,
+            "set-add reply",
+            self.command("set add", command).await?,
+        )?;
         Ok(())
     }
 
@@ -784,6 +880,7 @@ impl Sets for RedisPrimitives {
         let mut command = redis::cmd("SREM");
         command.arg(key).arg(members);
         let _: i64 = decode(
+            self.profile.backend,
             "set-remove reply",
             self.command("set remove", command).await?,
         )?;
@@ -798,6 +895,7 @@ impl Sets for RedisPrimitives {
         let mut command = redis::cmd("SMEMBERS");
         command.arg(key);
         decode(
+            self.profile.backend,
             "set-members reply",
             self.command("set members", command).await?,
         )
@@ -805,7 +903,7 @@ impl Sets for RedisPrimitives {
 }
 
 #[async_trait]
-impl SetScanner for RedisPrimitives {
+impl SetScanner for RespPrimitives {
     /// Walks one Redis set with SSCAN and processes each page immediately.
     ///
     /// **Cost**: One SSCAN round trip per cursor page with a count hint of 256.
@@ -816,7 +914,8 @@ impl SetScanner for RedisPrimitives {
             let mut command = redis::cmd("SSCAN");
             command.arg(key).arg(cursor).arg("COUNT").arg(SCAN_BATCH);
             let response = self.command("set scan", command).await?;
-            let (next, members): (u64, Vec<String>) = decode("set-scan reply", response)?;
+            let (next, members): (u64, Vec<String>) =
+                decode(self.profile.backend, "set-scan reply", response)?;
             if !members.is_empty() {
                 visitor.visit(members).await?;
             }
@@ -829,7 +928,7 @@ impl SetScanner for RedisPrimitives {
 }
 
 #[async_trait]
-impl Scanner for RedisPrimitives {
+impl Scanner for RespPrimitives {
     /// Walks keys matching Redis glob syntax using cursor-based SCAN.
     ///
     /// **Cost**: One or more SCAN round trips with a count hint of 256.
@@ -850,7 +949,8 @@ impl Scanner for RedisPrimitives {
                 .arg("COUNT")
                 .arg(SCAN_BATCH);
             let response = self.command("scan", command).await?;
-            let (next, batch): (u64, Vec<String>) = decode("scan reply", response)?;
+            let (next, batch): (u64, Vec<String>) =
+                decode(self.profile.backend, "scan reply", response)?;
             for key in batch {
                 if unique.insert(key.clone()) {
                     keys.push(key);
@@ -869,29 +969,35 @@ impl Scanner for RedisPrimitives {
 /// Hostnames/IPv4 use `host:port`; IPv6 must use `[address]:port` so the final
 /// colon is unambiguous. Empty hosts, missing ports, zero, and out-of-range
 /// ports fail locally before credentials or network state are touched.
-fn parse_address(address: &str) -> Result<(String, u16)> {
+fn parse_address(backend: &str, address: &str) -> Result<(String, u16)> {
     let (host, port) = if let Some(rest) = address.strip_prefix('[') {
         let (host, port) = rest.split_once("]:").ok_or_else(|| {
-            CacheError::Internal("redis: address must be host:port or [ipv6]:port".to_owned())
+            CacheError::Internal(format!(
+                "{backend}: address must be host:port or [ipv6]:port"
+            ))
         })?;
         (host, port)
     } else {
         address.rsplit_once(':').ok_or_else(|| {
-            CacheError::Internal("redis: address must be host:port or [ipv6]:port".to_owned())
+            CacheError::Internal(format!(
+                "{backend}: address must be host:port or [ipv6]:port"
+            ))
         })?
     };
     if host.is_empty() {
-        return Err(CacheError::Internal(
-            "redis: address host cannot be empty".to_owned(),
-        ));
+        return Err(CacheError::Internal(format!(
+            "{backend}: address host cannot be empty"
+        )));
     }
     let port = port.parse::<u16>().map_err(|_| {
-        CacheError::Internal("redis: address port must be between 1 and 65535".to_owned())
+        CacheError::Internal(format!(
+            "{backend}: address port must be between 1 and 65535"
+        ))
     })?;
     if port == 0 {
-        return Err(CacheError::Internal(
-            "redis: address port must be between 1 and 65535".to_owned(),
-        ));
+        return Err(CacheError::Internal(format!(
+            "{backend}: address port must be between 1 and 65535"
+        )));
     }
     Ok((host.to_owned(), port))
 }
@@ -900,13 +1006,16 @@ fn parse_address(address: &str) -> Result<(String, u16)> {
 ///
 /// `Default` deliberately avoids calling the setter, preserving future redis-rs
 /// default changes. `Disabled` is the only branch that installs `None`.
-fn connection_manager_config(timeout: DialTimeout) -> Result<ConnectionManagerConfig> {
+fn connection_manager_config(
+    backend: &str,
+    timeout: DialTimeout,
+) -> Result<ConnectionManagerConfig> {
     match timeout {
         DialTimeout::Default => Ok(ConnectionManagerConfig::new()),
         DialTimeout::Disabled => Ok(ConnectionManagerConfig::new().set_connection_timeout(None)),
-        DialTimeout::After(duration) if duration.is_zero() => Err(CacheError::Internal(
-            "redis: dial timeout must be positive; use Default or Disabled".to_owned(),
-        )),
+        DialTimeout::After(duration) if duration.is_zero() => Err(CacheError::Internal(format!(
+            "{backend}: dial timeout must be positive; use Default or Disabled"
+        ))),
         DialTimeout::After(duration) => {
             Ok(ConnectionManagerConfig::new().set_connection_timeout(Some(duration)))
         }
@@ -918,38 +1027,44 @@ fn connection_manager_config(timeout: DialTimeout) -> Result<ConnectionManagerCo
 /// Any positive fractional millisecond rounds up. Rounding down could turn a
 /// positive TTL into zero, whose meaning differs dangerously between SET and
 /// PEXPIRE. Values outside Redis's integer range return an error.
-fn ttl_millis(ttl: Duration) -> Result<u64> {
+fn ttl_millis(backend: &str, ttl: Duration) -> Result<u64> {
     let whole = ttl.as_millis();
     let rounded = if ttl.subsec_nanos() % 1_000_000 == 0 {
         whole
     } else {
         whole.checked_add(1).ok_or_else(|| {
-            CacheError::Internal("redis: TTL exceeds millisecond range".to_owned())
+            CacheError::Internal(format!("{backend}: TTL exceeds millisecond range"))
         })?
     };
     u64::try_from(rounded)
-        .map_err(|_| CacheError::Internal("redis: TTL exceeds millisecond range".to_owned()))
+        .map_err(|_| CacheError::Internal(format!("{backend}: TTL exceeds millisecond range")))
 }
 
 /// Decodes one raw protocol value and attaches operation context on mismatch.
-fn decode<T: FromRedisValue>(operation: &str, value: Value) -> Result<T> {
-    redis::from_redis_value(value).map_err(|error| internal(operation, error))
+fn decode<T: FromRedisValue>(backend: &str, operation: &str, value: Value) -> Result<T> {
+    redis::from_redis_value(value).map_err(|error| internal(backend, operation, error))
 }
 
 /// Converts a backend failure without exposing connection configuration.
 ///
 /// The closed cache error enum cannot retain redis-rs's concrete error type, so
 /// the message records the backend and safe operation name for diagnostics.
-fn internal(operation: &str, error: impl Display) -> CacheError {
-    CacheError::Internal(format!("redis: {operation}: {error}"))
+fn internal(backend: &str, operation: &str, error: impl Display) -> CacheError {
+    CacheError::Internal(format!("{backend}: {operation}: {error}"))
 }
 
 /// Rejects malformed pipeline result counts before ordered replies are exposed.
-fn validate_bulk_replies(operation: &str, expected: usize, actual: usize) -> Result<()> {
+fn validate_bulk_replies(
+    backend: &str,
+    operation: &str,
+    expected: usize,
+    actual: usize,
+) -> Result<()> {
     if expected == actual {
         return Ok(());
     }
     Err(internal(
+        backend,
         operation,
         format!("received {actual} replies for {expected} commands"),
     ))
@@ -1052,6 +1167,7 @@ mod tests {
     struct ScriptedConnector {
         clients: Mutex<VecDeque<Result<Arc<RedisClient>>>>,
         configs: Mutex<Vec<RedisConfig>>,
+        profiles: Mutex<Vec<RespProfile>>,
     }
 
     impl ScriptedConnector {
@@ -1059,23 +1175,34 @@ mod tests {
             Self {
                 clients: Mutex::new(clients.into_iter().collect()),
                 configs: Mutex::new(Vec::new()),
+                profiles: Mutex::new(Vec::new()),
             }
         }
 
         async fn configs(&self) -> Vec<RedisConfig> {
             self.configs.lock().await.clone()
         }
+
+        async fn profiles(&self) -> Vec<RespProfile> {
+            self.profiles.lock().await.clone()
+        }
     }
 
     #[async_trait]
-    impl RedisConnector for ScriptedConnector {
-        async fn connect(&self, config: RedisConfig) -> Result<Arc<RedisClient>> {
+    impl RespConnector for ScriptedConnector {
+        async fn connect(
+            &self,
+            config: RedisConfig,
+            profile: RespProfile,
+        ) -> Result<Arc<RedisClient>> {
             self.configs.lock().await.push(config);
+            self.profiles.lock().await.push(profile);
             match self.clients.lock().await.pop_front() {
                 Some(result) => result,
-                None => Err(CacheError::Internal(
-                    "redis: missing scripted connection".to_owned(),
-                )),
+                None => Err(CacheError::Internal(format!(
+                    "{}: missing scripted connection",
+                    profile.backend
+                ))),
             }
         }
     }
@@ -1083,10 +1210,11 @@ mod tests {
     /// Builds one primitive adapter and retains its observable test executor.
     fn primitives(
         responses: impl IntoIterator<Item = RedisResult<Value>>,
-    ) -> (RedisPrimitives, Arc<ScriptedExecutor>) {
+    ) -> (RespPrimitives, Arc<ScriptedExecutor>) {
         let executor = Arc::new(ScriptedExecutor::new(responses));
         (
-            RedisPrimitives {
+            RespPrimitives {
+                profile: REDIS_PROFILE,
                 executor: executor.clone(),
             },
             executor,
@@ -1103,13 +1231,23 @@ mod tests {
         database: usize,
         responses: impl IntoIterator<Item = RedisResult<Value>>,
     ) -> (Arc<RedisClient>, Arc<ScriptedExecutor>) {
+        profiled_client(database, REDIS_PROFILE, responses)
+    }
+
+    /// Builds a fake client with a selected internal RESP profile.
+    fn profiled_client(
+        database: usize,
+        profile: RespProfile,
+        responses: impl IntoIterator<Item = RedisResult<Value>>,
+    ) -> (Arc<RedisClient>, Arc<ScriptedExecutor>) {
         let executor = Arc::new(ScriptedExecutor::new(responses));
-        let client = Arc::new(RedisClient::with_executor(
+        let client = Arc::new(RedisClient::with_profile_executor(
             RedisConfig {
                 address: DEFAULT_REDIS_ADDRESS.to_owned(),
                 database,
                 ..RedisConfig::default()
             },
+            profile,
             executor.clone(),
         ));
         (client, executor)
@@ -1126,9 +1264,10 @@ mod tests {
 
     #[test]
     fn test_redis_dial_timeout_resolves_all_explicit_policies() {
-        let default = connection_manager_config(DialTimeout::Default).unwrap();
-        let disabled = connection_manager_config(DialTimeout::Disabled).unwrap();
-        let custom = connection_manager_config(DialTimeout::After(Duration::from_secs(3))).unwrap();
+        let default = connection_manager_config("redis", DialTimeout::Default).unwrap();
+        let disabled = connection_manager_config("redis", DialTimeout::Disabled).unwrap();
+        let custom =
+            connection_manager_config("redis", DialTimeout::After(Duration::from_secs(3))).unwrap();
 
         assert_eq!(
             default.connection_timeout(),
@@ -1140,7 +1279,7 @@ mod tests {
 
     #[test]
     fn test_redis_dial_timeout_rejects_zero_after_duration() {
-        let result = connection_manager_config(DialTimeout::After(Duration::ZERO));
+        let result = connection_manager_config("redis", DialTimeout::After(Duration::ZERO));
 
         assert!(
             matches!(result, Err(CacheError::Internal(message)) if message.contains("Default or Disabled"))
@@ -1553,18 +1692,18 @@ mod tests {
 
     #[test]
     fn test_redis_ttl_millis_rounds_nonzero_duration_up() {
-        assert_eq!(ttl_millis(Duration::from_nanos(1)).unwrap(), 1);
-        assert_eq!(ttl_millis(Duration::from_millis(2)).unwrap(), 2);
+        assert_eq!(ttl_millis("redis", Duration::from_nanos(1)).unwrap(), 1);
+        assert_eq!(ttl_millis("redis", Duration::from_millis(2)).unwrap(), 2);
     }
 
     #[test]
     fn test_redis_parse_address_supports_host_and_ipv6() {
         assert_eq!(
-            parse_address("localhost:6379").unwrap(),
+            parse_address("redis", "localhost:6379").unwrap(),
             ("localhost".to_owned(), 6379)
         );
         assert_eq!(
-            parse_address("[::1]:6380").unwrap(),
+            parse_address("redis", "[::1]:6380").unwrap(),
             ("::1".to_owned(), 6380)
         );
     }
@@ -1575,6 +1714,37 @@ mod tests {
         let provider = RedisProvider::new(client, Config::default());
 
         assert_eq!(provider.backend(), "redis");
+    }
+
+    #[tokio::test]
+    async fn test_resp_profile_propagates_to_driver_provider_and_database_identity() {
+        let profile = RespProfile::new("compatible", "compatible.local:6380");
+        let (client, _) = profiled_client(2, profile, [Ok(Value::SimpleString("PONG".to_owned()))]);
+        assert_eq!(client.primitives().name(), "compatible");
+
+        let provider = RedisProvider::new(client, Config::default());
+        assert_eq!(provider.backend(), "compatible");
+        let database = provider.set_database("orders").await.unwrap();
+        assert_eq!(database.backend, "compatible");
+    }
+
+    #[tokio::test]
+    async fn test_resp_profile_prefixes_configuration_and_command_errors() {
+        let profile = RespProfile::new("compatible", "compatible.local:6380");
+        let config = RedisConfig {
+            address: "invalid-address".to_owned(),
+            password: "credential-must-not-appear".to_owned(),
+            ..RedisConfig::default()
+        };
+        let result = RedisClient::connect_with_profile(config, profile).await;
+        assert!(matches!(result, Err(CacheError::Internal(message))
+                if message.starts_with("compatible:")
+                    && !message.contains("credential-must-not-appear")));
+
+        let error = RedisError::from((ErrorKind::Client, "scripted failure"));
+        let (client, _) = profiled_client(0, profile, [Err(error)]);
+        assert!(matches!(client.primitives().get("key").await,
+                Err(CacheError::Internal(message)) if message.contains("compatible: get")));
     }
 
     #[tokio::test]
@@ -1682,6 +1852,21 @@ mod tests {
         let configs = connector.configs().await;
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].database, 7);
+        assert_eq!(connector.profiles().await, vec![REDIS_PROFILE]);
+    }
+
+    #[tokio::test]
+    async fn test_resp_profile_propagates_to_derived_index_connection() {
+        let profile = RespProfile::new("compatible", "compatible.local:6380");
+        let (root, _) = profiled_client(2, profile, []);
+        let (derived, _) = profiled_client(7, profile, []);
+        let connector = Arc::new(ScriptedConnector::new([Ok(derived)]));
+        let provider = RedisProvider::with_connector(root, Config::default(), connector.clone());
+
+        let database = provider.select_index(7).await.unwrap();
+
+        assert_eq!(database.backend, "compatible");
+        assert_eq!(connector.profiles().await, vec![profile]);
     }
 
     #[tokio::test]
