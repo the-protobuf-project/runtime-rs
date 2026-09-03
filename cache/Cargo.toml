@@ -13,6 +13,10 @@ categories = ["caching", "asynchronous"]
 [package.metadata.docgen]
 go-source = "runtime-go/cache"
 
+[features]
+default = []
+live-tests = []
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -30,3 +34,8 @@ crc32fast = "1.4"
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tokio-test = { workspace = true }
+
+[[test]]
+name = "redis_live"
+path = "tests/redis_live.rs"
+required-features = ["live-tests"]
