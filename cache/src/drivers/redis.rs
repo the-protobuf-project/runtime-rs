@@ -119,7 +119,7 @@ impl Default for RedisConfig {
 /// so exact RESP commands and failures can be checked without a Redis service.
 /// The seam contains no cache semantics and must not manufacture misses.
 #[async_trait]
-trait CommandExecutor: Send + Sync {
+pub(crate) trait CommandExecutor: Send + Sync {
     /// Executes one command and returns its untyped Redis protocol value.
     ///
     /// **Cost**: Exactly one Redis round trip.
@@ -342,7 +342,7 @@ impl RedisClient {
 
     #[cfg(test)]
     /// Constructs a profiled client around an in-process test executor.
-    fn with_profile_executor(
+    pub(crate) fn with_profile_executor(
         config: RedisConfig,
         profile: RespProfile,
         executor: Arc<dyn CommandExecutor>,

@@ -8,6 +8,9 @@
 /// Standalone Redis client, Provider, and primitive capability adapters.
 pub mod redis;
 
+/// Dragonfly preset over the shared Redis-compatible RESP implementation.
+pub mod dragonfly;
+
 /// Async Memcached client, Go-compatible router, Driver, and Bulk adapter.
 pub mod memcached;
 
