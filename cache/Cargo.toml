@@ -39,3 +39,8 @@ tokio-test = { workspace = true }
 name = "redis_live"
 path = "tests/redis_live.rs"
 required-features = ["live-tests"]
+
+[[test]]
+name = "memcached_live"
+path = "tests/memcached_live.rs"
+required-features = ["live-tests"]
