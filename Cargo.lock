@@ -1276,6 +1276,7 @@ dependencies = [
  "crc32fast",
  "futures",
  "memcache",
+ "opentelemetry",
  "redis",
  "serde",
  "serde_json",

@@ -11,6 +11,7 @@ pub mod middleware;
 mod operation_timeout;
 pub mod retry;
 pub mod strategies;
+pub mod telemetry;
 pub mod typed;
 
 pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database};
@@ -20,6 +21,7 @@ pub use logging::{with_logging, with_logging_middleware};
 pub use middleware::{Middleware, chain};
 pub use operation_timeout::OperationTimeout;
 pub use retry::{with_retry, with_retry_middleware};
+pub use telemetry::{with_telemetry, with_telemetry_middleware};
 pub use typed::{Typed, typed};
 
 /// Backend-neutral defaults and database-selection policy for a cache Provider.
