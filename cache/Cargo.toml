@@ -44,3 +44,8 @@ required-features = ["live-tests"]
 name = "memcached_live"
 path = "tests/memcached_live.rs"
 required-features = ["live-tests"]
+
+[[test]]
+name = "dragonfly_live"
+path = "tests/dragonfly_live.rs"
+required-features = ["live-tests"]
