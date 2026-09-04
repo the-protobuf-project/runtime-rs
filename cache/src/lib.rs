@@ -8,11 +8,13 @@ pub mod drivers;
 pub mod error;
 mod operation_timeout;
 pub mod strategies;
+pub mod typed;
 
 pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database};
 pub use dial_timeout::DialTimeout;
 pub use error::{CacheError, Result};
 pub use operation_timeout::OperationTimeout;
+pub use typed::{Typed, typed};
 
 /// Backend-neutral defaults and database-selection policy for a cache Provider.
 ///
