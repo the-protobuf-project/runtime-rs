@@ -6,14 +6,18 @@ pub mod core;
 mod dial_timeout;
 pub mod drivers;
 pub mod error;
+pub mod middleware;
 mod operation_timeout;
+pub mod retry;
 pub mod strategies;
 pub mod typed;
 
 pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database};
 pub use dial_timeout::DialTimeout;
 pub use error::{CacheError, Result};
+pub use middleware::{Middleware, chain};
 pub use operation_timeout::OperationTimeout;
+pub use retry::{with_retry, with_retry_middleware};
 pub use typed::{Typed, typed};
 
 /// Backend-neutral defaults and database-selection policy for a cache Provider.
