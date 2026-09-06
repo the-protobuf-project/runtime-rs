@@ -11,26 +11,32 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 
 ## Crates
 
-2 crates. Each declares a `description` in its `Cargo.toml` and carries crate-level
+4 crates. Each declares a `description` in its `Cargo.toml` and carries crate-level
 `//!` docs; this table is generated from those and verified on every push.
 
 | Crate | Published as | Go source | Summary |
 | --- | --- | --- | --- |
-| [`cache`](cache) | `runtime-cache` | `runtime-go/cache` | Cache drivers and read-through/write-through strategies over pluggable backends |
+| [`agents`](agents) | `tpp-agents` | `runtime-go/agents` | One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain |
+| [`cache`](cache) | `tpp-cache` | `runtime-go/cache` | Cache drivers and read-through/write-through strategies over pluggable backends |
+| [`grpc`](grpc) | `tpp-grpc` | `runtime-go/grpc` | One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS |
 | [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions |
 
 ## Installation
 
 ```bash
-cargo add runtime-cache  # Cache drivers and read-through/write-through strategies over pluggable backends
-cargo add tpp-network    # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
+cargo add tpp-agents   # One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain
+cargo add tpp-cache    # Cache drivers and read-through/write-through strategies over pluggable backends
+cargo add tpp-grpc     # One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS
+cargo add tpp-network  # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
 ```
 
 ## Documentation
 
 Every crate's API docs, including usage examples, are on docs.rs:
 
-- [`runtime-cache`](https://docs.rs/runtime-cache)
+- [`tpp-agents`](https://docs.rs/tpp-agents)
+- [`tpp-cache`](https://docs.rs/tpp-cache)
+- [`tpp-grpc`](https://docs.rs/tpp-grpc)
 - [`tpp-network`](https://docs.rs/tpp-network)
 
 ## Development

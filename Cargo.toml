@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["network", "cache"]
+members = ["network", "cache", "agents", "grpc"]
 # Developer tooling, not a published crate: kept out of the workspace so it
 # never lands in the CI crate matrix, the release build, or Cargo.lock.
 exclude = ["tools/docgen"]
@@ -19,6 +19,7 @@ license = "Apache-2.0"
 [workspace.dependencies]
 tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "stream"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tungstenite = "0.30"
@@ -35,10 +36,34 @@ http = "1.4"
 bytes = "1"
 async-trait = "0.1"
 uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# gRPC and the transports the hybrid server speaks. tonic is the repo the gRPC
+# organisation points at for Rust: github.com/grpc/grpc-rust redirects here.
+tonic = "0.14"
+tonic-health = "0.14"
+tonic-reflection = "0.14"
+tonic-web = "0.14"
+tonic-prost = "0.14"
+prost = "0.14"
+axum = "0.8"
+hyper = { version = "1", features = ["http1", "http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["set-header", "trace", "timeout", "cors"] }
+
+# HTTP/3. quinn is the only h3 backend tonic-h3 considers production-ready.
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
 
 # Dev-only, but pinned here so every crate tests against the same versions.
 tokio-test = "0.4"
 wiremock = "0.6"
 
 network = { path = "network", package = "tpp-network", version = "0.1.0" }
-cache = { path = "cache", package = "runtime-cache", version = "0.1.0" }
+cache = { path = "cache", package = "tpp-cache", version = "0.1.0" }
+agents = { path = "agents", package = "tpp-agents", version = "0.1.0" }
