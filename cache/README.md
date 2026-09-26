@@ -58,6 +58,20 @@ docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
 The example defaults to `127.0.0.1:16379`. Set
 `RUNTIME_CACHE_REDIS_ADDRESS` to use another Redis endpoint.
 
+## Runnable Dragonfly example
+
+The shorter Dragonfly walkthrough demonstrates that Indexed and Aside use the
+same RESP capability implementation under a type-safe Dragonfly preset:
+
+```bash
+docker compose -p runtime-cache-dragonfly-live -f cache/docker/compose.dragonfly.live.yaml up -d --wait dragonfly
+cargo run -p runtime-cache --example dragonfly
+docker compose -p runtime-cache-dragonfly-live -f cache/docker/compose.dragonfly.live.yaml down
+```
+
+It defaults to `127.0.0.1:16380`; override this with
+`RUNTIME_CACHE_DRAGONFLY_ADDRESS`.
+
 ## Live contract tests
 
 The repository includes separate Compose services and feature-gated public API
