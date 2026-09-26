@@ -13,17 +13,40 @@ categories = ["caching", "asynchronous"]
 [package.metadata.docgen]
 go-source = "runtime-go/cache"
 
+[features]
+default = []
+live-tests = []
+
 [dependencies]
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+opentelemetry = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
+redis = { version = "1.6", features = ["tokio-comp", "connection-manager"] }
+memcache = { version = "0.20", default-features = false, features = ["tokio"] }
+crc32fast = "1.4"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 tokio-test = { workspace = true }
+
+[[test]]
+name = "redis_live"
+path = "tests/redis_live.rs"
+required-features = ["live-tests"]
+
+[[test]]
+name = "memcached_live"
+path = "tests/memcached_live.rs"
+required-features = ["live-tests"]
+
+[[test]]
+name = "dragonfly_live"
+path = "tests/dragonfly_live.rs"
+required-features = ["live-tests"]

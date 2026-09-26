@@ -1,0 +1,21 @@
+# Isolated service for runtime-cache's explicitly enabled Dragonfly integration test.
+#
+# Start:
+#   docker compose -p runtime-cache-dragonfly-live -f cache/docker/compose.dragonfly.live.yaml up -d --wait dragonfly
+# Stop:
+#   docker compose -p runtime-cache-dragonfly-live -f cache/docker/compose.dragonfly.live.yaml down
+
+services:
+  dragonfly:
+    image: docker.dragonflydb.io/dragonflydb/dragonfly:latest
+    ports:
+      - "127.0.0.1:16380:6379"
+    command: ["--dbnum", "16", "--notify_keyspace_events", "Ex"]
+    ulimits:
+      memlock: -1
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    restart: "no"

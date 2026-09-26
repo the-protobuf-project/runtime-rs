@@ -1,0 +1,18 @@
+# Isolated service for runtime-cache's explicitly enabled Redis integration test.
+#
+# Start:
+#   docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml up -d --wait redis
+# Stop:
+#   docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:16379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
+    restart: "no"

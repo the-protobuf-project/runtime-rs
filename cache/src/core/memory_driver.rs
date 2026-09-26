@@ -1,39 +1,48 @@
-//! In-memory driver for testing and learning
+//! Process-local Driver implementation for tests and examples.
 //!
-//! This is the simplest Driver implementation - all data in a HashMap with TTL.
+//! Values live in a lock-protected map and expire lazily when accessed. This
+//! preserves Driver semantics without external services, but provides neither
+//! persistence nor coordination across processes.
 
-use super::Driver;
+use super::{Bulk, Driver, Fenced, Leases};
 use crate::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
-/// Entry stores the value and expiry time
+/// Stored bytes paired with an optional monotonic expiry deadline.
 struct Entry {
+    /// Owned payload returned by `get`.
     value: Vec<u8>,
+    /// `None` denotes a permanent entry.
     expires_at: Option<Instant>,
 }
 
 impl Entry {
-    /// Check if this entry has expired
+    /// Compares the deadline with the current monotonic clock.
     fn is_expired(&self) -> bool {
         match self.expires_at {
             Some(expiry) => Instant::now() >= expiry,
-            None => false, // No expiry
+            None => false,
         }
     }
 }
 
-/// MemoryDriver stores all data in memory using a HashMap
-/// Suitable for testing, learning, and single-process caches
+/// Concurrent, process-local key/value implementation of [`Driver`].
+///
+/// **Trade-offs**: Operations are fast and deterministic, but all tasks share
+/// one map lock and expired entries are retained until overwritten/deleted.
+/// **Best for**: Unit tests, examples, and small single-process caches.
 pub struct MemoryDriver {
+    /// Shared storage; individual clones are performed while holding a read lock.
     data: Arc<RwLock<HashMap<String, Entry>>>,
+    /// Stable diagnostic backend name.
     name: String,
 }
 
 impl MemoryDriver {
-    /// Create a new in-memory driver
+    /// Creates an empty driver with backend name `memory`.
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(HashMap::new())),
@@ -50,10 +59,16 @@ impl Default for MemoryDriver {
 
 #[async_trait::async_trait]
 impl Driver for MemoryDriver {
+    /// Returns the stable `memory` backend name without locking storage.
     fn name(&self) -> &str {
         &self.name
     }
 
+    /// Clones one live value under the shared read lock.
+    ///
+    /// **Cost**: O(value bytes), with no external round trip.
+    /// **Failure behavior**: Missing and lazily expired entries return
+    /// `NotFound`; expired storage is not removed by this read.
     async fn get(&self, key: &str) -> Result<Vec<u8>> {
         let data = self.data.read().await;
 
@@ -69,6 +84,10 @@ impl Driver for MemoryDriver {
         }
     }
 
+    /// Replaces one value and lease under the exclusive map lock.
+    ///
+    /// Zero TTL stores permanently; a positive TTL becomes a monotonic
+    /// deadline. This is the in-process equivalent of one Driver round trip.
     async fn set(&self, key: &str, value: &[u8], ttl: Duration) -> Result<()> {
         let expires_at = if ttl.is_zero() {
             None
@@ -87,6 +106,11 @@ impl Driver for MemoryDriver {
         Ok(())
     }
 
+    /// Inserts only when no live value currently owns the key.
+    ///
+    /// The existence check and insertion share one write lock, making the
+    /// operation atomic for process-local tests. An expired entry may be
+    /// overwritten and is treated as absent.
     async fn add(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
         let expires_at = if ttl.is_zero() {
             None
@@ -113,6 +137,10 @@ impl Driver for MemoryDriver {
         Ok(true)
     }
 
+    /// Replaces only a currently live entry under one write lock.
+    ///
+    /// Missing or expired entries return `false` without changing storage.
+    /// Successful replacement also replaces the previous lease.
     async fn replace(&self, key: &str, value: &[u8], ttl: Duration) -> Result<bool> {
         let expires_at = if ttl.is_zero() {
             None
@@ -141,6 +169,10 @@ impl Driver for MemoryDriver {
         Ok(true)
     }
 
+    /// Removes every supplied key under one write lock.
+    ///
+    /// Missing keys and empty input are harmless, matching Driver deletion
+    /// semantics without manufacturing per-key errors.
     async fn delete(&self, keys: &[&str]) -> Result<()> {
         let mut data = self.data.write().await;
         for key in keys {
@@ -149,6 +181,10 @@ impl Driver for MemoryDriver {
         Ok(())
     }
 
+    /// Reports whether one entry is currently live under the read lock.
+    ///
+    /// Lazy expiry is observational here: an expired allocation remains in the
+    /// map but is reported as absent.
     async fn exists(&self, key: &str) -> Result<bool> {
         let data = self.data.read().await;
 
@@ -164,6 +200,10 @@ impl Driver for MemoryDriver {
         }
     }
 
+    /// Replaces the lease of one live entry without changing its bytes.
+    ///
+    /// Zero makes the entry permanent. Missing or expired entries return
+    /// `NotFound`; comparison and mutation share one write lock.
     async fn touch(&self, key: &str, ttl: Duration) -> Result<()> {
         let mut data = self.data.write().await;
 
@@ -180,5 +220,170 @@ impl Driver for MemoryDriver {
         } else {
             Err(crate::CacheError::NotFound)
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl Bulk for MemoryDriver {
+    /// Reads ordered values under one shared map lock.
+    async fn get_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let data = self.data.read().await;
+        Ok(keys
+            .iter()
+            .map(|key| match data.get(key) {
+                Some(entry) if !entry.is_expired() => Some(entry.value.clone()),
+                Some(_) | None => None,
+            })
+            .collect())
+    }
+
+    /// Checks ordered liveness under one shared map lock.
+    async fn exists_many(&self, keys: &[String]) -> Result<Vec<bool>> {
+        let data = self.data.read().await;
+        Ok(keys
+            .iter()
+            .map(|key| data.get(key).is_some_and(|entry| !entry.is_expired()))
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl Leases for MemoryDriver {
+    /// Reports a live entry's lease from the process monotonic clock.
+    ///
+    /// Permanent entries return zero. Missing and expired entries return
+    /// `NotFound`; checking the lease does not eagerly remove expired storage.
+    async fn ttl(&self, key: &str) -> Result<Duration> {
+        let data = self.data.read().await;
+        let entry = data.get(key).ok_or(crate::CacheError::NotFound)?;
+        let Some(expires_at) = entry.expires_at else {
+            return Ok(Duration::ZERO);
+        };
+        let now = Instant::now();
+        if expires_at <= now {
+            return Err(crate::CacheError::NotFound);
+        }
+        Ok(expires_at.duration_since(now))
+    }
+}
+
+#[async_trait::async_trait]
+impl Fenced for MemoryDriver {
+    /// Compares and conditionally removes one live entry under one write lock.
+    ///
+    /// Missing, expired, and mismatched entries return false without mutation.
+    /// The shared critical section makes comparison and deletion indivisible.
+    async fn delete_if(&self, key: &str, expected: &[u8]) -> Result<bool> {
+        let mut data = self.data.write().await;
+        let matches = data
+            .get(key)
+            .is_some_and(|entry| !entry.is_expired() && entry.value == expected);
+        if matches {
+            data.remove(key);
+        }
+        Ok(matches)
+    }
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_driver_ttl_reports_positive_permanent_and_missing() {
+        let driver = MemoryDriver::new();
+        driver
+            .set("leased", b"value", Duration::from_secs(1))
+            .await
+            .unwrap();
+        driver
+            .set("permanent", b"value", Duration::ZERO)
+            .await
+            .unwrap();
+
+        let remaining = Leases::ttl(&driver, "leased").await.unwrap();
+
+        assert!(remaining > Duration::ZERO);
+        assert!(remaining <= Duration::from_secs(1));
+        assert_eq!(
+            Leases::ttl(&driver, "permanent").await.unwrap(),
+            Duration::ZERO
+        );
+        assert!(matches!(
+            Leases::ttl(&driver, "missing").await,
+            Err(crate::CacheError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_memory_driver_ttl_expired_returns_not_found() {
+        let driver = MemoryDriver::new();
+        driver
+            .set("expired", b"value", Duration::from_millis(1))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(matches!(
+            Leases::ttl(&driver, "expired").await,
+            Err(crate::CacheError::NotFound)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_driver_bulk_preserves_order_and_marks_misses() {
+        let driver = MemoryDriver::new();
+        driver.set("one", b"first", Duration::ZERO).await.unwrap();
+        driver.set("two", b"second", Duration::ZERO).await.unwrap();
+        let keys = vec!["two".to_owned(), "missing".to_owned(), "one".to_owned()];
+
+        assert_eq!(
+            Bulk::get_many(&driver, &keys).await.unwrap(),
+            vec![Some(b"second".to_vec()), None, Some(b"first".to_vec())]
+        );
+        assert_eq!(
+            Bulk::exists_many(&driver, &keys).await.unwrap(),
+            vec![true, false, true]
+        );
+        assert!(Bulk::get_many(&driver, &[]).await.unwrap().is_empty());
+        assert!(Bulk::exists_many(&driver, &[]).await.unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod fenced_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_memory_driver_delete_if_removes_only_matching_live_value() {
+        let driver = MemoryDriver::new();
+        driver.set("lock", b"owner", Duration::ZERO).await.unwrap();
+
+        assert!(!Fenced::delete_if(&driver, "lock", b"other").await.unwrap());
+        assert!(driver.exists("lock").await.unwrap());
+        assert!(Fenced::delete_if(&driver, "lock", b"owner").await.unwrap());
+        assert!(!driver.exists("lock").await.unwrap());
+        assert!(
+            !Fenced::delete_if(&driver, "missing", b"owner")
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_memory_driver_delete_if_expired_value_is_not_owned() {
+        let driver = MemoryDriver::new();
+        driver
+            .set("lock", b"owner", Duration::from_millis(1))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(5)).await;
+
+        assert!(!Fenced::delete_if(&driver, "lock", b"owner").await.unwrap());
     }
 }
