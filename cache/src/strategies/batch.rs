@@ -393,9 +393,12 @@ mod tests {
             short_get: true,
         };
 
-        let result = get_all(Arc::new(ConcurrencyDriver::new()), Some(&bulk), 1, vec![
-            "key".to_owned(),
-        ])
+        let result = get_all(
+            Arc::new(ConcurrencyDriver::new()),
+            Some(&bulk),
+            1,
+            vec!["key".to_owned()],
+        )
         .await;
 
         assert!(
@@ -414,10 +417,10 @@ mod tests {
             .unwrap();
         let sets_capability: Arc<dyn Sets> = sets.clone();
         let scanner = PageScanner {
-            pages: vec![vec!["one".to_owned(), "stale".to_owned()], vec![
-                "one".to_owned(),
-                "two".to_owned(),
-            ]],
+            pages: vec![
+                vec!["one".to_owned(), "stale".to_owned()],
+                vec!["one".to_owned(), "two".to_owned()],
+            ],
             fail_after_first: false,
         };
 

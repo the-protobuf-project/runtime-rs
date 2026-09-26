@@ -96,10 +96,13 @@ impl Driver for MemoryDriver {
         };
 
         let mut data = self.data.write().await;
-        data.insert(key.to_string(), Entry {
-            value: value.to_vec(),
-            expires_at,
-        });
+        data.insert(
+            key.to_string(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
         Ok(())
     }
 
@@ -124,10 +127,13 @@ impl Driver for MemoryDriver {
             return Ok(false); // Key exists, so Add fails
         }
 
-        data.insert(key.to_string(), Entry {
-            value: value.to_vec(),
-            expires_at,
-        });
+        data.insert(
+            key.to_string(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
         Ok(true)
     }
 
@@ -153,10 +159,13 @@ impl Driver for MemoryDriver {
             return Ok(false); // Key doesn't exist, so Replace fails
         }
 
-        data.insert(key.to_string(), Entry {
-            value: value.to_vec(),
-            expires_at,
-        });
+        data.insert(
+            key.to_string(),
+            Entry {
+                value: value.to_vec(),
+                expires_at,
+            },
+        );
         Ok(true)
     }
 
@@ -333,14 +342,14 @@ mod bulk_tests {
         driver.set("two", b"second", Duration::ZERO).await.unwrap();
         let keys = vec!["two".to_owned(), "missing".to_owned(), "one".to_owned()];
 
-        assert_eq!(Bulk::get_many(&driver, &keys).await.unwrap(), vec![
-            Some(b"second".to_vec()),
-            None,
-            Some(b"first".to_vec())
-        ]);
-        assert_eq!(Bulk::exists_many(&driver, &keys).await.unwrap(), vec![
-            true, false, true
-        ]);
+        assert_eq!(
+            Bulk::get_many(&driver, &keys).await.unwrap(),
+            vec![Some(b"second".to_vec()), None, Some(b"first".to_vec())]
+        );
+        assert_eq!(
+            Bulk::exists_many(&driver, &keys).await.unwrap(),
+            vec![true, false, true]
+        );
         assert!(Bulk::get_many(&driver, &[]).await.unwrap().is_empty());
         assert!(Bulk::exists_many(&driver, &[]).await.unwrap().is_empty());
     }

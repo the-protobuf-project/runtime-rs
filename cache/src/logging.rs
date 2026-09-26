@@ -492,20 +492,26 @@ mod tests {
             .unwrap();
 
         let outer_base = TestDocument::failing(CacheError::Internal("transient".to_owned()), 1);
-        let outer = chain(outer_base, [
-            with_retry_middleware(2, Duration::ZERO),
-            with_logging_middleware(),
-        ]);
+        let outer = chain(
+            outer_base,
+            [
+                with_retry_middleware(2, Duration::ZERO),
+                with_logging_middleware(),
+            ],
+        );
         let (_, outer_events) = capture(|| {
             runtime.block_on(outer.get("id", &mut Vec::new())).unwrap();
         });
         assert_eq!(primary(&outer_events).len(), 1);
 
         let inner_base = TestDocument::failing(CacheError::Internal("transient".to_owned()), 1);
-        let inner = chain(inner_base, [
-            with_logging_middleware(),
-            with_retry_middleware(2, Duration::ZERO),
-        ]);
+        let inner = chain(
+            inner_base,
+            [
+                with_logging_middleware(),
+                with_retry_middleware(2, Duration::ZERO),
+            ],
+        );
         let (_, inner_events) = capture(|| {
             runtime.block_on(inner.get("id", &mut Vec::new())).unwrap();
         });

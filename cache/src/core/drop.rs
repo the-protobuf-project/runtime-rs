@@ -169,9 +169,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(deleted, 257);
-        assert_eq!(*scanner.patterns.lock().await, vec![
-            "app:orders:cache:*".to_owned()
-        ]);
+        assert_eq!(
+            *scanner.patterns.lock().await,
+            vec!["app:orders:cache:*".to_owned()]
+        );
         assert_eq!(*driver.delete_batches.lock().await, [256, 1]);
         for key in keys {
             assert!(!memory.exists(&key).await.unwrap());

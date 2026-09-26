@@ -385,13 +385,16 @@ fn finish(results: Vec<(&'static str, Result<()>)>) -> Result<()> {
 async fn test_memcached_live_public_cache_contract() -> Result<()> {
     let client = Arc::new(MemcachedClient::connect(memcached_config()?).await?);
     let prefix = format!("runtime-cache-live-{}", Uuid::new_v4());
-    let provider = MemcachedProvider::new(client.clone(), Config {
-        prefix,
-        default_ttl: TEST_TTL,
-        require_ttl: true,
-        databases: vec![NAMESPACE.to_owned()],
-        ..Config::default()
-    });
+    let provider = MemcachedProvider::new(
+        client.clone(),
+        Config {
+            prefix,
+            default_ttl: TEST_TTL,
+            require_ttl: true,
+            databases: vec![NAMESPACE.to_owned()],
+            ..Config::default()
+        },
+    );
 
     let named = match provider.set_database(NAMESPACE).await {
         Ok(db) => db,

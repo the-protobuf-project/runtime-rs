@@ -438,26 +438,29 @@ mod tests {
 
         let _document = with_telemetry(TestDocument::successful(), meter);
 
-        assert_eq!(*state.registrations.lock().unwrap(), vec![
-            Registration {
-                name: "cache_operations_total".to_owned(),
-                kind: "counter_u64",
-                unit: Some("1".to_owned()),
-                description: Some("Completed cache Document operations".to_owned()),
-            },
-            Registration {
-                name: "cache_operation_duration_seconds".to_owned(),
-                kind: "histogram_f64",
-                unit: Some("s".to_owned()),
-                description: Some("Cache Document operation latency".to_owned()),
-            },
-            Registration {
-                name: "cache_gets_total".to_owned(),
-                kind: "counter_u64",
-                unit: Some("1".to_owned()),
-                description: Some("Completed cache Document gets by hit or miss".to_owned()),
-            },
-        ]);
+        assert_eq!(
+            *state.registrations.lock().unwrap(),
+            vec![
+                Registration {
+                    name: "cache_operations_total".to_owned(),
+                    kind: "counter_u64",
+                    unit: Some("1".to_owned()),
+                    description: Some("Completed cache Document operations".to_owned()),
+                },
+                Registration {
+                    name: "cache_operation_duration_seconds".to_owned(),
+                    kind: "histogram_f64",
+                    unit: Some("s".to_owned()),
+                    description: Some("Cache Document operation latency".to_owned()),
+                },
+                Registration {
+                    name: "cache_gets_total".to_owned(),
+                    kind: "counter_u64",
+                    unit: Some("1".to_owned()),
+                    description: Some("Completed cache Document gets by hit or miss".to_owned()),
+                },
+            ]
+        );
     }
 
     #[test]

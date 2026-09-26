@@ -777,9 +777,10 @@ mod tests {
             contract.ids_by_index("tenant", "acme").await.unwrap(),
             vec!["one".to_owned()]
         );
-        assert_eq!(contract.by_index("tenant", "acme").await.unwrap(), vec![
-            b"value".to_vec()
-        ]);
+        assert_eq!(
+            contract.by_index("tenant", "acme").await.unwrap(),
+            vec![b"value".to_vec()]
+        );
         assert_eq!(contract.delete_by_index("tenant", "acme").await.unwrap(), 1);
     }
 

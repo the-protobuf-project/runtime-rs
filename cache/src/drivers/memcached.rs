@@ -415,17 +415,21 @@ impl MemcachedProvider {
         let driver: Arc<dyn Driver> = primitives.clone();
         let bulk: Arc<dyn Bulk> = primitives;
         let capabilities = Capabilities::new().with_bulk(bulk);
-        build_database(driver, capabilities, DatabaseSpec {
-            prefix: self.config.prefix.clone(),
-            namespace,
-            database,
-            embed_db,
-            default_ttl: self.config.default_ttl,
-            default_stale: self.config.default_stale,
-            concurrency: self.config.concurrency,
-            require_ttl: self.config.require_ttl,
-            ..DatabaseSpec::default()
-        })
+        build_database(
+            driver,
+            capabilities,
+            DatabaseSpec {
+                prefix: self.config.prefix.clone(),
+                namespace,
+                database,
+                embed_db,
+                default_ttl: self.config.default_ttl,
+                default_stale: self.config.default_stale,
+                concurrency: self.config.concurrency,
+                require_ttl: self.config.require_ttl,
+                ..DatabaseSpec::default()
+            },
+        )
     }
 }
 
@@ -1179,11 +1183,14 @@ mod tests {
                 .unwrap()
         );
         let operations = executor.operations.lock().await;
-        assert!(matches!(&operations[0], WireOperation::Store {
-            expiry: 5,
-            condition: StoreCondition::Set,
-            ..
-        }));
+        assert!(matches!(
+            &operations[0],
+            WireOperation::Store {
+                expiry: 5,
+                condition: StoreCondition::Set,
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1213,16 +1220,22 @@ mod tests {
             Err(CacheError::NotFound)
         ));
         let operations = executor.operations.lock().await;
-        assert!(matches!(&operations[0], WireOperation::Get {
-            value: false,
-            touch: None,
-            ..
-        }));
-        assert!(matches!(&operations[1], WireOperation::Get {
-            value: false,
-            touch: Some(0),
-            ..
-        }));
+        assert!(matches!(
+            &operations[0],
+            WireOperation::Get {
+                value: false,
+                touch: None,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &operations[1],
+            WireOperation::Get {
+                value: false,
+                touch: Some(0),
+                ..
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1335,11 +1348,14 @@ mod tests {
     async fn test_memcached_provider_named_database_validates_and_qualifies_keys() {
         let executor = Arc::new(ScriptedExecutor::new(vec![Ok(WireReply::Stored)]));
         let client = Arc::new(MemcachedClient::with_executor(executor.clone()));
-        let provider = MemcachedProvider::new(client, Config {
-            prefix: "app".to_owned(),
-            databases: vec!["orders".to_owned()],
-            ..Config::default()
-        });
+        let provider = MemcachedProvider::new(
+            client,
+            Config {
+                prefix: "app".to_owned(),
+                databases: vec!["orders".to_owned()],
+                ..Config::default()
+            },
+        );
 
         assert!(provider.set_database("").await.is_err());
         assert!(provider.set_database("unknown").await.is_err());
@@ -1351,24 +1367,28 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(executor.operations.lock().await.as_slice(), &[
-            WireOperation::Store {
+        assert_eq!(
+            executor.operations.lock().await.as_slice(),
+            &[WireOperation::Store {
                 key: "app:orders:cache:vol:session".to_owned(),
                 value: b"value".to_vec(),
                 expiry: 0,
                 condition: StoreCondition::Set,
-            }
-        ]);
+            }]
+        );
     }
 
     #[tokio::test]
     async fn test_memcached_provider_numeric_database_embeds_index() {
         let executor = Arc::new(ScriptedExecutor::new(vec![Ok(WireReply::Stored)]));
         let client = Arc::new(MemcachedClient::with_executor(executor.clone()));
-        let provider = MemcachedProvider::new(client, Config {
-            prefix: "app".to_owned(),
-            ..Config::default()
-        });
+        let provider = MemcachedProvider::new(
+            client,
+            Config {
+                prefix: "app".to_owned(),
+                ..Config::default()
+            },
+        );
 
         let db = provider.select_index(3).await.unwrap();
         assert_eq!(db.name, "");
@@ -1413,10 +1433,13 @@ mod tests {
     async fn test_memcached_provider_drop_database_validates_then_reports_unsupported() {
         let executor = Arc::new(ScriptedExecutor::new(Vec::new()));
         let client = Arc::new(MemcachedClient::with_executor(executor));
-        let provider = MemcachedProvider::new(client, Config {
-            databases: vec!["known".to_owned()],
-            ..Config::default()
-        });
+        let provider = MemcachedProvider::new(
+            client,
+            Config {
+                databases: vec!["known".to_owned()],
+                ..Config::default()
+            },
+        );
 
         assert!(matches!(
             provider.drop_database("").await,

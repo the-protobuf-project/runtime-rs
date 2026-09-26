@@ -270,13 +270,16 @@ async fn test_redis_live_public_cache_contract() -> Result<()> {
     let expected_index = redis_config.database;
     let client = Arc::new(RedisClient::connect(redis_config).await?);
     let prefix = format!("runtime-cache-live-{}", Uuid::new_v4());
-    let provider = RedisProvider::new(client.clone(), Config {
-        prefix,
-        default_ttl: TEST_TTL,
-        require_ttl: true,
-        databases: vec![NAMESPACE.to_owned()],
-        ..Config::default()
-    });
+    let provider = RedisProvider::new(
+        client.clone(),
+        Config {
+            prefix,
+            default_ttl: TEST_TTL,
+            require_ttl: true,
+            databases: vec![NAMESPACE.to_owned()],
+            ..Config::default()
+        },
+    );
 
     if let Err(error) = provider.drop_database(NAMESPACE).await {
         client.close().await;

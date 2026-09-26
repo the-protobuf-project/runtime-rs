@@ -219,13 +219,17 @@ mod tests {
 
         let keys = vol.scan("session:*").await.unwrap();
 
-        assert_eq!(keys, [
-            "app:orders:cache:vol:session:one",
-            "app:orders:cache:vol:session:two"
-        ]);
-        assert_eq!(scanner.patterns.lock().await.as_slice(), [
-            "app:orders:cache:vol:session:*"
-        ]);
+        assert_eq!(
+            keys,
+            [
+                "app:orders:cache:vol:session:one",
+                "app:orders:cache:vol:session:two"
+            ]
+        );
+        assert_eq!(
+            scanner.patterns.lock().await.as_slice(),
+            ["app:orders:cache:vol:session:*"]
+        );
     }
 
     #[tokio::test]

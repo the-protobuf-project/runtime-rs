@@ -320,13 +320,17 @@ mod tests {
     async fn test_database_build_wires_metadata_and_all_fixed_strategies() {
         let driver = Arc::new(MemoryDriver::new());
         let capabilities = Capabilities::new().with_sets(Arc::new(MemorySets::new()));
-        let db = build_database(driver, capabilities, DatabaseSpec {
-            prefix: "app".to_owned(),
-            namespace: "orders".to_owned(),
-            database: 3,
-            default_ttl: Duration::from_secs(60),
-            ..DatabaseSpec::default()
-        });
+        let db = build_database(
+            driver,
+            capabilities,
+            DatabaseSpec {
+                prefix: "app".to_owned(),
+                namespace: "orders".to_owned(),
+                database: 3,
+                default_ttl: Duration::from_secs(60),
+                ..DatabaseSpec::default()
+            },
+        );
 
         assert_eq!(db.backend, "memory");
         assert_eq!(db.name, "orders");
@@ -437,10 +441,14 @@ mod tests {
         let capabilities = Capabilities::new()
             .with_sets(Arc::new(MemorySets::new()))
             .with_leases(driver.clone());
-        let db = build_database(driver, capabilities, DatabaseSpec {
-            default_ttl: Duration::from_secs(1),
-            ..DatabaseSpec::default()
-        });
+        let db = build_database(
+            driver,
+            capabilities,
+            DatabaseSpec {
+                default_ttl: Duration::from_secs(1),
+                ..DatabaseSpec::default()
+            },
+        );
         db.volatile
             .set("session", b"volatile", &Options::default())
             .await

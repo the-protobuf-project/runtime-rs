@@ -405,9 +405,12 @@ mod tests {
         let middleware = with_retry_middleware(2, Duration::ZERO);
         let model = typed::<Model>(chain(concrete.clone(), [middleware]));
 
-        assert_eq!(model.get("id").await.unwrap(), Model {
-            name: "Ada".to_owned()
-        });
+        assert_eq!(
+            model.get("id").await.unwrap(),
+            Model {
+                name: "Ada".to_owned()
+            }
+        );
         assert_eq!(concrete.calls(), 2);
     }
 }

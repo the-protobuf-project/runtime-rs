@@ -158,20 +158,26 @@ mod tests {
     #[tokio::test]
     async fn test_middleware_chain_last_wrapper_is_outermost() {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let document = chain(base(events.clone()), [
-            recording("first", events.clone()),
-            recording("second", events.clone()),
-        ]);
+        let document = chain(
+            base(events.clone()),
+            [
+                recording("first", events.clone()),
+                recording("second", events.clone()),
+            ],
+        );
 
         document.get("id", &mut Vec::new()).await.unwrap();
 
-        assert_eq!(*events.lock().await, vec![
-            "second before",
-            "first before",
-            "base",
-            "first after",
-            "second after",
-        ]);
+        assert_eq!(
+            *events.lock().await,
+            vec![
+                "second before",
+                "first before",
+                "base",
+                "first after",
+                "second after",
+            ]
+        );
     }
 
     #[tokio::test]

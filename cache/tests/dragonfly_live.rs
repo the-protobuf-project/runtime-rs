@@ -399,13 +399,16 @@ async fn test_dragonfly_live_public_cache_contract() -> Result<()> {
     let alternate_index = derived_index(root_index);
     let client = Arc::new(DragonflyClient::connect(dragonfly_config).await?);
     let prefix = format!("runtime-cache-live-{}", Uuid::new_v4());
-    let provider = DragonflyProvider::new(client.clone(), Config {
-        prefix,
-        default_ttl: TEST_TTL,
-        require_ttl: true,
-        databases: vec![NAMESPACE.to_owned()],
-        ..Config::default()
-    });
+    let provider = DragonflyProvider::new(
+        client.clone(),
+        Config {
+            prefix,
+            default_ttl: TEST_TTL,
+            require_ttl: true,
+            databases: vec![NAMESPACE.to_owned()],
+            ..Config::default()
+        },
+    );
 
     if let Err(error) = provider.drop_database(NAMESPACE).await {
         client.close().await;

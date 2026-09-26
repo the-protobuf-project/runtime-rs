@@ -46,10 +46,13 @@ async fn exercise(db: &runtime_cache::DB) -> Result<()> {
 
     // The final middleware is outermost: logging observes the complete retry
     // sequence, while Typed performs JSON conversion outside raw middleware.
-    let users = typed::<User>(chain(db.document.clone(), [
-        with_retry_middleware(3, Duration::from_millis(25)),
-        with_logging_middleware(),
-    ]));
+    let users = typed::<User>(chain(
+        db.document.clone(),
+        [
+            with_retry_middleware(3, Duration::from_millis(25)),
+            with_logging_middleware(),
+        ],
+    ));
     let document_id = users.create(&alice, &options).await?;
     let _loaded = users.get(&document_id).await?;
     let document_ttl = users.ttl(&document_id).await?;
@@ -167,13 +170,16 @@ async fn main() -> Result<()> {
         })
         .await?,
     );
-    let provider = RedisProvider::new(client.clone(), Config {
-        prefix: format!("runtime-cache-example-{}", Uuid::new_v4()),
-        default_ttl: EXAMPLE_TTL,
-        require_ttl: true,
-        databases: vec![NAMESPACE.to_owned()],
-        ..Config::default()
-    });
+    let provider = RedisProvider::new(
+        client.clone(),
+        Config {
+            prefix: format!("runtime-cache-example-{}", Uuid::new_v4()),
+            default_ttl: EXAMPLE_TTL,
+            require_ttl: true,
+            databases: vec![NAMESPACE.to_owned()],
+            ..Config::default()
+        },
+    );
     let db = match provider.set_database(NAMESPACE).await {
         Ok(db) => db,
         Err(error) => {

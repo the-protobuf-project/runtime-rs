@@ -451,18 +451,22 @@ impl RedisProvider {
             .with_set_scanner(set_scanner)
             .with_fenced(fenced)
             .with_scanner(scanner);
-        build_database(driver, capabilities, DatabaseSpec {
-            prefix: self.config.prefix.clone(),
-            namespace,
-            database,
-            embed_db: false,
-            default_ttl: self.config.default_ttl,
-            default_stale: self.config.default_stale,
-            concurrency: self.config.concurrency,
-            require_ttl: self.config.require_ttl,
-            release,
-            ..DatabaseSpec::default()
-        })
+        build_database(
+            driver,
+            capabilities,
+            DatabaseSpec {
+                prefix: self.config.prefix.clone(),
+                namespace,
+                database,
+                embed_db: false,
+                default_ttl: self.config.default_ttl,
+                default_stale: self.config.default_stale,
+                concurrency: self.config.concurrency,
+                require_ttl: self.config.require_ttl,
+                release,
+                ..DatabaseSpec::default()
+            },
+        )
     }
 
     #[cfg(test)]
@@ -1353,11 +1357,10 @@ mod tests {
             .arg("PX")
             .arg(2_000_u64)
             .arg("XX");
-        assert_eq!(executor.commands().await, vec![
-            packed(set),
-            packed(add),
-            packed(replace)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![packed(set), packed(add), packed(replace)]
+        );
     }
 
     #[tokio::test]
@@ -1382,10 +1385,10 @@ mod tests {
         delete.arg(&["one", "two"]);
         let mut exists = redis::cmd("EXISTS");
         exists.arg("one");
-        assert_eq!(executor.commands().await, vec![
-            packed(delete),
-            packed(exists)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![packed(delete), packed(exists)]
+        );
     }
 
     #[tokio::test]
@@ -1436,11 +1439,10 @@ mod tests {
         persist.arg(script).arg(1).arg("already-permanent");
         let mut missing = redis::cmd("EVAL");
         missing.arg(script).arg(1).arg("missing");
-        assert_eq!(executor.commands().await, vec![
-            packed(expire),
-            packed(persist),
-            packed(missing)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![packed(expire), packed(persist), packed(missing)]
+        );
     }
 
     #[tokio::test]
@@ -1477,12 +1479,15 @@ mod tests {
         permanent.arg("permanent");
         let mut missing = redis::cmd("PTTL");
         missing.arg("missing");
-        assert_eq!(executor.commands().await, vec![
-            packed(leased),
-            packed(sub_millisecond),
-            packed(permanent),
-            packed(missing)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![
+                packed(leased),
+                packed(sub_millisecond),
+                packed(permanent),
+                packed(missing)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1507,13 +1512,14 @@ mod tests {
         ]);
         let keys = vec!["one".to_owned(), "missing".to_owned()];
 
-        assert_eq!(Bulk::get_many(&driver, &keys).await.unwrap(), vec![
-            Some(b"first".to_vec()),
-            None
-        ]);
-        assert_eq!(Bulk::exists_many(&driver, &keys).await.unwrap(), vec![
-            true, false
-        ]);
+        assert_eq!(
+            Bulk::get_many(&driver, &keys).await.unwrap(),
+            vec![Some(b"first".to_vec()), None]
+        );
+        assert_eq!(
+            Bulk::exists_many(&driver, &keys).await.unwrap(),
+            vec![true, false]
+        );
         assert!(Bulk::get_many(&driver, &[]).await.unwrap().is_empty());
         assert!(Bulk::exists_many(&driver, &[]).await.unwrap().is_empty());
 
@@ -1523,10 +1529,10 @@ mod tests {
         let mut exists = redis::pipe();
         exists.cmd("EXISTS").arg("one");
         exists.cmd("EXISTS").arg("missing");
-        assert_eq!(executor.commands().await, vec![
-            gets.get_packed_pipeline(),
-            exists.get_packed_pipeline()
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![gets.get_packed_pipeline(), exists.get_packed_pipeline()]
+        );
     }
 
     #[tokio::test]
@@ -1553,10 +1559,10 @@ mod tests {
         mismatch.arg(script).arg(1).arg("lock").arg(b"other");
         let mut owner = redis::cmd("EVAL");
         owner.arg(script).arg(1).arg("lock").arg(b"owner");
-        assert_eq!(executor.commands().await, vec![
-            packed(mismatch),
-            packed(owner)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![packed(mismatch), packed(owner)]
+        );
     }
 
     #[tokio::test]
@@ -1612,18 +1618,21 @@ mod tests {
 
         driver.set_scan("members", &mut visitor).await.unwrap();
 
-        assert_eq!(visitor.pages, vec![vec!["one".to_owned()], vec![
-            "one".to_owned(),
-            "two".to_owned()
-        ]]);
+        assert_eq!(
+            visitor.pages,
+            vec![
+                vec!["one".to_owned()],
+                vec!["one".to_owned(), "two".to_owned()]
+            ]
+        );
         let mut first = redis::cmd("SSCAN");
         first.arg("members").arg(0_u64).arg("COUNT").arg(256_usize);
         let mut second = redis::cmd("SSCAN");
         second.arg("members").arg(7_u64).arg("COUNT").arg(256_usize);
-        assert_eq!(executor.commands().await, vec![
-            packed(first),
-            packed(second)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![packed(first), packed(second)]
+        );
     }
 
     #[tokio::test]
@@ -1749,26 +1758,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_redis_provider_set_database_validates_pings_and_wires_capabilities() {
-        let (client, executor) = client(4, [
-            Ok(Value::SimpleString("PONG".to_owned())),
-            Ok(Value::Array(vec![
-                Value::BulkString(b"0".to_vec()),
-                Value::Array(vec![Value::BulkString(b"entry".to_vec())]),
-            ])),
-            Ok(Value::Array(vec![Value::Int(1)])),
-            Ok(Value::Int(125)),
-            Ok(Value::Array(vec![
-                Value::BulkString(b"0".to_vec()),
-                Value::Array(vec![Value::BulkString(
-                    b"app:orders:cache:vol:session:one".to_vec(),
-                )]),
-            ])),
-        ]);
-        let provider = RedisProvider::new(client, Config {
-            prefix: "app".to_owned(),
-            databases: vec!["orders".to_owned()],
-            ..Config::default()
-        });
+        let (client, executor) = client(
+            4,
+            [
+                Ok(Value::SimpleString("PONG".to_owned())),
+                Ok(Value::Array(vec![
+                    Value::BulkString(b"0".to_vec()),
+                    Value::Array(vec![Value::BulkString(b"entry".to_vec())]),
+                ])),
+                Ok(Value::Array(vec![Value::Int(1)])),
+                Ok(Value::Int(125)),
+                Ok(Value::Array(vec![
+                    Value::BulkString(b"0".to_vec()),
+                    Value::Array(vec![Value::BulkString(
+                        b"app:orders:cache:vol:session:one".to_vec(),
+                    )]),
+                ])),
+            ],
+        );
+        let provider = RedisProvider::new(
+            client,
+            Config {
+                prefix: "app".to_owned(),
+                databases: vec!["orders".to_owned()],
+                ..Config::default()
+            },
+        );
 
         let database = provider.set_database("orders").await.unwrap();
         let keys = database.document.keys().await.unwrap();
@@ -1780,9 +1795,10 @@ mod tests {
         assert_eq!(database.backend, "redis");
         assert_eq!(keys, ["entry".to_owned()]);
         assert_eq!(ttl, Duration::from_millis(125));
-        assert_eq!(volatile_keys, [
-            "app:orders:cache:vol:session:one".to_owned()
-        ]);
+        assert_eq!(
+            volatile_keys,
+            ["app:orders:cache:vol:session:one".to_owned()]
+        );
         let mut members = redis::cmd("SSCAN");
         members
             .arg("app:orders:cache:doc:index")
@@ -1799,22 +1815,28 @@ mod tests {
             .arg("app:orders:cache:vol:session:*")
             .arg("COUNT")
             .arg(256_usize);
-        assert_eq!(executor.commands().await, vec![
-            packed(redis::cmd("PING")),
-            packed(members),
-            exists.get_packed_pipeline(),
-            packed(ttl),
-            packed(scan)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![
+                packed(redis::cmd("PING")),
+                packed(members),
+                exists.get_packed_pipeline(),
+                packed(ttl),
+                packed(scan)
+            ]
+        );
     }
 
     #[tokio::test]
     async fn test_redis_provider_set_database_rejects_invalid_or_unknown_name_before_io() {
         let (client, executor) = client(0, []);
-        let provider = RedisProvider::new(client, Config {
-            databases: vec!["orders".to_owned()],
-            ..Config::default()
-        });
+        let provider = RedisProvider::new(
+            client,
+            Config {
+                databases: vec!["orders".to_owned()],
+                ..Config::default()
+            },
+        );
 
         assert!(provider.set_database("bad:name").await.is_err());
         assert!(provider.set_database("users").await.is_err());
@@ -1887,17 +1909,23 @@ mod tests {
     #[tokio::test]
     async fn test_redis_provider_drop_database_scans_literal_head_and_deletes_matches() {
         let key = "app:orders:cache:vol:session";
-        let (client, executor) = client(0, [
-            Ok(Value::Array(vec![
-                Value::BulkString(b"0".to_vec()),
-                Value::Array(vec![Value::BulkString(key.as_bytes().to_vec())]),
-            ])),
-            Ok(Value::Int(1)),
-        ]);
-        let provider = RedisProvider::new(client, Config {
-            prefix: "app".to_owned(),
-            ..Config::default()
-        });
+        let (client, executor) = client(
+            0,
+            [
+                Ok(Value::Array(vec![
+                    Value::BulkString(b"0".to_vec()),
+                    Value::Array(vec![Value::BulkString(key.as_bytes().to_vec())]),
+                ])),
+                Ok(Value::Int(1)),
+            ],
+        );
+        let provider = RedisProvider::new(
+            client,
+            Config {
+                prefix: "app".to_owned(),
+                ..Config::default()
+            },
+        );
 
         let deleted = provider.drop_database("orders").await.unwrap();
 
@@ -1910,9 +1938,9 @@ mod tests {
             .arg(256_usize);
         let mut delete = redis::cmd("DEL");
         delete.arg(&[key]);
-        assert_eq!(executor.commands().await, vec![
-            packed(scan),
-            packed(delete)
-        ]);
+        assert_eq!(
+            executor.commands().await,
+            vec![packed(scan), packed(delete)]
+        );
     }
 }

@@ -359,26 +359,32 @@ mod tests {
 
     #[tokio::test]
     async fn test_dragonfly_provider_named_database_reports_identity_and_capabilities() {
-        let (client, executor) = client(4, [
-            Ok(Value::SimpleString("PONG".to_owned())),
-            Ok(Value::Array(vec![
-                Value::BulkString(b"0".to_vec()),
-                Value::Array(vec![Value::BulkString(b"entry".to_vec())]),
-            ])),
-            Ok(Value::Array(vec![Value::Int(1)])),
-            Ok(Value::Int(125)),
-            Ok(Value::Array(vec![
-                Value::BulkString(b"0".to_vec()),
-                Value::Array(vec![Value::BulkString(
-                    b"app:orders:cache:vol:session:one".to_vec(),
-                )]),
-            ])),
-        ]);
-        let provider = DragonflyProvider::new(client, Config {
-            prefix: "app".to_owned(),
-            databases: vec!["orders".to_owned()],
-            ..Config::default()
-        });
+        let (client, executor) = client(
+            4,
+            [
+                Ok(Value::SimpleString("PONG".to_owned())),
+                Ok(Value::Array(vec![
+                    Value::BulkString(b"0".to_vec()),
+                    Value::Array(vec![Value::BulkString(b"entry".to_vec())]),
+                ])),
+                Ok(Value::Array(vec![Value::Int(1)])),
+                Ok(Value::Int(125)),
+                Ok(Value::Array(vec![
+                    Value::BulkString(b"0".to_vec()),
+                    Value::Array(vec![Value::BulkString(
+                        b"app:orders:cache:vol:session:one".to_vec(),
+                    )]),
+                ])),
+            ],
+        );
+        let provider = DragonflyProvider::new(
+            client,
+            Config {
+                prefix: "app".to_owned(),
+                databases: vec!["orders".to_owned()],
+                ..Config::default()
+            },
+        );
 
         assert_eq!(provider.backend(), "dragonfly");
         let database = provider.set_database("orders").await.unwrap();
@@ -390,9 +396,10 @@ mod tests {
             database.document.ttl("entry").await.unwrap(),
             std::time::Duration::from_millis(125)
         );
-        assert_eq!(database.volatile.scan("session:*").await.unwrap(), vec![
-            "app:orders:cache:vol:session:one"
-        ]);
+        assert_eq!(
+            database.volatile.scan("session:*").await.unwrap(),
+            vec!["app:orders:cache:vol:session:one"]
+        );
         assert_eq!(
             executor.commands().await.first(),
             Some(&redis::cmd("PING").get_packed_command())
@@ -401,10 +408,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_dragonfly_provider_current_index_and_close_preserve_root_ownership() {
-        let (client, executor) = client(3, [
-            Ok(Value::SimpleString("PONG".to_owned())),
-            Ok(Value::SimpleString("OK".to_owned())),
-        ]);
+        let (client, executor) = client(
+            3,
+            [
+                Ok(Value::SimpleString("PONG".to_owned())),
+                Ok(Value::SimpleString("OK".to_owned())),
+            ],
+        );
         let provider = DragonflyProvider::new(client.clone(), Config::default());
 
         let database = provider.select_index(3).await.unwrap();
@@ -429,14 +439,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_dragonfly_provider_drop_uses_scan_without_flush() {
-        let (client, executor) = client(0, [Ok(Value::Array(vec![
-            Value::BulkString(b"0".to_vec()),
-            Value::Array(Vec::new()),
-        ]))]);
-        let provider = DragonflyProvider::new(client, Config {
-            prefix: "app".to_owned(),
-            ..Config::default()
-        });
+        let (client, executor) = client(
+            0,
+            [Ok(Value::Array(vec![
+                Value::BulkString(b"0".to_vec()),
+                Value::Array(Vec::new()),
+            ]))],
+        );
+        let provider = DragonflyProvider::new(
+            client,
+            Config {
+                prefix: "app".to_owned(),
+                ..Config::default()
+            },
+        );
 
         assert_eq!(provider.drop_database("orders").await.unwrap(), 0);
         let commands = executor.commands().await;

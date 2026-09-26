@@ -125,13 +125,16 @@ async fn main() -> Result<()> {
         })
         .await?,
     );
-    let provider = DragonflyProvider::new(client.clone(), Config {
-        prefix: format!("runtime-cache-dragonfly-example-{}", Uuid::new_v4()),
-        default_ttl: EXAMPLE_TTL,
-        require_ttl: true,
-        databases: vec![NAMESPACE.to_owned()],
-        ..Config::default()
-    });
+    let provider = DragonflyProvider::new(
+        client.clone(),
+        Config {
+            prefix: format!("runtime-cache-dragonfly-example-{}", Uuid::new_v4()),
+            default_ttl: EXAMPLE_TTL,
+            require_ttl: true,
+            databases: vec![NAMESPACE.to_owned()],
+            ..Config::default()
+        },
+    );
     let db = match provider.set_database(NAMESPACE).await {
         Ok(db) => db,
         Err(error) => {

@@ -800,10 +800,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(destination, br#""loaded""#);
-        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
-            body: br#""loaded""#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""loaded""#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -883,10 +886,13 @@ mod tests {
         assert_eq!(destination, br#""v1""#);
         assert!(started.elapsed() < Duration::from_millis(40));
         refresher.drain(Duration::from_secs(1)).await.unwrap();
-        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
-            body: br#""v2""#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""v2""#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -906,10 +912,13 @@ mod tests {
 
         aside.refresh("item", &Options::default()).await.unwrap();
 
-        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
-            body: br#""new""#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""new""#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -946,10 +955,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, br#"{"id":"item-1"}"#);
-        assert_eq!(aside.read("item-1").await.unwrap(), StoredEntry::Value {
-            body: br#"{"id":"item-1"}"#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            aside.read("item-1").await.unwrap(),
+            StoredEntry::Value {
+                body: br#"{"id":"item-1"}"#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1031,10 +1043,13 @@ mod tests {
         aside.load_and_store("item", &opts).await.unwrap();
         tokio::time::sleep(Duration::from_millis(25)).await;
 
-        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
-            body: br#""value""#.to_vec(),
-            stale: true,
-        });
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""value""#.to_vec(),
+                stale: true,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1203,10 +1218,13 @@ mod tests {
             .unwrap();
 
         assert_eq!(value, br#""fallback""#);
-        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
-            body: br#""fallback""#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""fallback""#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1327,10 +1345,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(aside.read("item").await.unwrap(), StoredEntry::Value {
-            body: br#""v2""#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            aside.read("item").await.unwrap(),
+            StoredEntry::Value {
+                body: br#""v2""#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1522,10 +1543,13 @@ mod tests {
 
         let entry = aside.read("id").await.unwrap();
 
-        assert_eq!(entry, StoredEntry::Value {
-            body: br#"{"name":"value"}"#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            entry,
+            StoredEntry::Value {
+                body: br#"{"name":"value"}"#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1541,10 +1565,13 @@ mod tests {
 
         let entry = aside.read("id").await.unwrap();
 
-        assert_eq!(entry, StoredEntry::Value {
-            body: br#""old""#.to_vec(),
-            stale: true,
-        });
+        assert_eq!(
+            entry,
+            StoredEntry::Value {
+                body: br#""old""#.to_vec(),
+                stale: true,
+            }
+        );
     }
 
     #[tokio::test]
@@ -1678,30 +1705,39 @@ mod tests {
     fn test_aside_freshness_without_stale_uses_ttl_as_hard_expiry() {
         let value = freshness(Duration::from_secs(10), Duration::ZERO).unwrap();
 
-        assert_eq!(value, Freshness {
-            fresh_for: Duration::ZERO,
-            hard_ttl: Duration::from_secs(10),
-        });
+        assert_eq!(
+            value,
+            Freshness {
+                fresh_for: Duration::ZERO,
+                hard_ttl: Duration::from_secs(10),
+            }
+        );
     }
 
     #[test]
     fn test_aside_freshness_with_stale_extends_hard_expiry() {
         let value = freshness(Duration::from_secs(10), Duration::from_secs(5)).unwrap();
 
-        assert_eq!(value, Freshness {
-            fresh_for: Duration::from_secs(10),
-            hard_ttl: Duration::from_secs(15),
-        });
+        assert_eq!(
+            value,
+            Freshness {
+                fresh_for: Duration::from_secs(10),
+                hard_ttl: Duration::from_secs(15),
+            }
+        );
     }
 
     #[test]
     fn test_aside_freshness_permanent_ignores_stale_window() {
         let value = freshness(Duration::ZERO, Duration::from_secs(5)).unwrap();
 
-        assert_eq!(value, Freshness {
-            fresh_for: Duration::ZERO,
-            hard_ttl: Duration::ZERO,
-        });
+        assert_eq!(
+            value,
+            Freshness {
+                fresh_for: Duration::ZERO,
+                hard_ttl: Duration::ZERO,
+            }
+        );
     }
 
     #[test]
@@ -1733,10 +1769,13 @@ mod tests {
 
         let decoded = unpack(&frame, 199).unwrap();
 
-        assert_eq!(decoded, StoredEntry::Value {
-            body: br#"{"name":"value"}"#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            decoded,
+            StoredEntry::Value {
+                body: br#"{"name":"value"}"#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[test]
@@ -1745,10 +1784,13 @@ mod tests {
 
         let decoded = unpack(&frame, 200).unwrap();
 
-        assert_eq!(decoded, StoredEntry::Value {
-            body: br#""value""#.to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            decoded,
+            StoredEntry::Value {
+                body: br#""value""#.to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[test]
@@ -1757,10 +1799,13 @@ mod tests {
 
         let decoded = unpack(&frame, 201).unwrap();
 
-        assert_eq!(decoded, StoredEntry::Value {
-            body: br#""value""#.to_vec(),
-            stale: true,
-        });
+        assert_eq!(
+            decoded,
+            StoredEntry::Value {
+                body: br#""value""#.to_vec(),
+                stale: true,
+            }
+        );
     }
 
     #[test]
@@ -1769,10 +1814,13 @@ mod tests {
 
         let decoded = unpack(&frame, i64::MAX).unwrap();
 
-        assert_eq!(decoded, StoredEntry::Value {
-            body: b"null".to_vec(),
-            stale: false,
-        });
+        assert_eq!(
+            decoded,
+            StoredEntry::Value {
+                body: b"null".to_vec(),
+                stale: false,
+            }
+        );
     }
 
     #[test]
