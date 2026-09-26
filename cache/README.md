@@ -44,6 +44,20 @@ bulk reads, and fenced Aside claims. Memcached provides direct operations and
 bulk reads; enumeration, secondary lookup, remaining-TTL reporting, scans, and
 cross-process fencing return `CacheError::Unsupported` where required.
 
+## Runnable Redis example
+
+Start the repository's isolated Redis service, run the public-API walkthrough,
+then remove only that Compose project's resources:
+
+```bash
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml up -d --wait redis
+cargo run -p runtime-cache --example redis
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
+```
+
+The example defaults to `127.0.0.1:16379`. Set
+`RUNTIME_CACHE_REDIS_ADDRESS` to use another Redis endpoint.
+
 ## Live contract tests
 
 The repository includes separate Compose services and feature-gated public API
