@@ -1033,7 +1033,7 @@ fn connection_manager_config(
 /// PEXPIRE. Values outside Redis's integer range return an error.
 fn ttl_millis(backend: &str, ttl: Duration) -> Result<u64> {
     let whole = ttl.as_millis();
-    let rounded = if ttl.subsec_nanos() % 1_000_000 == 0 {
+    let rounded = if ttl.subsec_nanos().is_multiple_of(1_000_000) {
         whole
     } else {
         whole.checked_add(1).ok_or_else(|| {

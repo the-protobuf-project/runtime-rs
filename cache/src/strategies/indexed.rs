@@ -15,14 +15,14 @@ use futures::{StreamExt, TryStreamExt, stream};
 
 use crate::{
     CacheError, Result,
-    core::{Bulk, Document, Driver, Indexed, Keyspace, Leases, NewId, Options, SetScanner, Sets},
+    core::{Bulk, Document, Driver, Indexed, Keyspace, Options, SetScanner, Sets},
 };
 
 #[cfg(test)]
 use super::document::default_new_id;
 use super::{
-    DocumentImpl,
     batch::{get_all, live_members},
+    document::{DocumentImpl, DocumentWiring},
 };
 
 /// Document storage that records caller-selected secondary memberships.
@@ -60,48 +60,32 @@ impl IndexedImpl {
         require_ttl: bool,
         concurrency: usize,
     ) -> Self {
-        Self::new_with_id(
+        Self::new_with_id(DocumentWiring {
             driver,
             sets,
-            None,
-            None,
-            None,
+            leases: None,
+            bulk: None,
+            set_scanner: None,
             keyspace,
             default_ttl,
             require_ttl,
             concurrency,
-            default_new_id(),
-        )
+            new_id: default_new_id(),
+        })
     }
 
     /// Wires Indexed with the database's shared ID generator.
     ///
     /// Construction performs no backend I/O. A zero concurrency value is
     /// normalized to one so a configured zero cannot permanently stall work.
-    pub(crate) fn new_with_id(
-        driver: Arc<dyn Driver>,
-        sets: Option<Arc<dyn Sets>>,
-        leases: Option<Arc<dyn Leases>>,
-        bulk: Option<Arc<dyn Bulk>>,
-        set_scanner: Option<Arc<dyn SetScanner>>,
-        keyspace: Keyspace,
-        default_ttl: Duration,
-        require_ttl: bool,
-        concurrency: usize,
-        new_id: NewId,
-    ) -> Self {
-        let document = DocumentImpl::new_indexed(
-            driver.clone(),
-            sets.clone(),
-            leases,
-            bulk.clone(),
-            set_scanner.clone(),
-            keyspace.clone(),
-            default_ttl,
-            require_ttl,
-            concurrency,
-            new_id,
-        );
+    pub(crate) fn new_with_id(wiring: DocumentWiring) -> Self {
+        let driver = wiring.driver.clone();
+        let sets = wiring.sets.clone();
+        let bulk = wiring.bulk.clone();
+        let set_scanner = wiring.set_scanner.clone();
+        let keyspace = wiring.keyspace.clone();
+        let concurrency = wiring.concurrency;
+        let document = DocumentImpl::new_indexed(wiring);
         Self {
             document,
             driver,
@@ -209,7 +193,7 @@ impl IndexedImpl {
         let fields_key = self.keyspace.idx_fields(id);
         let previous = sets.set_members(&fields_key).await?;
         for pair in &previous {
-            let (field, value) = Self::split_pair(&pair);
+            let (field, value) = Self::split_pair(pair);
             let index_key = self.keyspace.idx_by_field(field, value);
             sets.set_remove(&index_key, &[id]).await?;
         }

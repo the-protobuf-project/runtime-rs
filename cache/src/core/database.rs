@@ -5,7 +5,7 @@ use std::{sync::Arc, time::Duration};
 use futures::future::BoxFuture;
 use tokio::sync::{Mutex, watch};
 
-use crate::strategies::document::default_new_id;
+use crate::strategies::document::{DocumentWiring, default_new_id};
 use crate::strategies::{AsideImpl, DocumentImpl, IndexedImpl, VolatileImpl};
 use crate::strategies::{batch::DEFAULT_CONCURRENCY, flight::Flight, refresher::Refresher};
 use crate::{CacheError, Result};
@@ -247,18 +247,19 @@ pub fn build_database(
     let flight = Arc::new(Flight::new(FLIGHT_BUDGET, FLIGHT_TIMEOUT));
     let refresher = Arc::new(Refresher::new(REFRESH_BUDGET, LOAD_TIMEOUT));
 
-    let document: Arc<dyn Document> = Arc::new(DocumentImpl::new_with_id(
-        driver.clone(),
-        sets.clone(),
-        leases.clone(),
-        bulk.clone(),
-        set_scanner.clone(),
-        keyspace.clone(),
-        spec.default_ttl,
-        spec.require_ttl,
+    let document_wiring = DocumentWiring {
+        driver: driver.clone(),
+        sets: sets.clone(),
+        leases: leases.clone(),
+        bulk: bulk.clone(),
+        set_scanner: set_scanner.clone(),
+        keyspace: keyspace.clone(),
+        default_ttl: spec.default_ttl,
+        require_ttl: spec.require_ttl,
         concurrency,
-        new_id.clone(),
-    ));
+        new_id,
+    };
+    let document: Arc<dyn Document> = Arc::new(DocumentImpl::new_with_id(document_wiring.clone()));
     let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new_with_capabilities(
         driver.clone(),
         leases.clone(),
@@ -267,18 +268,7 @@ pub fn build_database(
         spec.default_ttl,
         spec.require_ttl,
     ));
-    let indexed: Arc<dyn Indexed> = Arc::new(IndexedImpl::new_with_id(
-        driver.clone(),
-        sets,
-        leases,
-        bulk,
-        set_scanner,
-        keyspace.clone(),
-        spec.default_ttl,
-        spec.require_ttl,
-        concurrency,
-        new_id,
-    ));
+    let indexed: Arc<dyn Indexed> = Arc::new(IndexedImpl::new_with_id(document_wiring));
 
     DB {
         document,

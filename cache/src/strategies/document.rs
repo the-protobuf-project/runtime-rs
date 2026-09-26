@@ -71,6 +71,36 @@ enum DocumentLayout {
     Indexed,
 }
 
+/// Complete internal construction state shared by Document and Indexed.
+///
+/// Database construction resolves optional capabilities and policy once, then
+/// clones this bundle so both strategies retain the same Driver, Keyspace, and
+/// ID generator. Grouping these related values prevents long positional
+/// constructor calls from silently swapping capabilities or policy fields.
+#[derive(Clone)]
+pub(crate) struct DocumentWiring {
+    /// Required entry storage primitives.
+    pub(crate) driver: Arc<dyn Driver>,
+    /// Optional server-side enumeration and secondary-index sets.
+    pub(crate) sets: Option<Arc<dyn Sets>>,
+    /// Optional remaining-expiry reporting.
+    pub(crate) leases: Option<Arc<dyn Leases>>,
+    /// Optional ordered multi-key reads.
+    pub(crate) bulk: Option<Arc<dyn Bulk>>,
+    /// Optional cursor-based set traversal.
+    pub(crate) set_scanner: Option<Arc<dyn SetScanner>>,
+    /// Selected database's centralized key builder.
+    pub(crate) keyspace: Keyspace,
+    /// Default lease used when an operation supplies none.
+    pub(crate) default_ttl: Duration,
+    /// Whether an implicit permanent write must be rejected.
+    pub(crate) require_ttl: bool,
+    /// Bound for fallback fan-out; normalized by strategy construction.
+    pub(crate) concurrency: usize,
+    /// Database-wide ID source shared by Document and Indexed.
+    pub(crate) new_id: NewId,
+}
+
 impl DocumentImpl {
     /// Wires a Document strategy to its driver and optional Sets capability.
     ///
@@ -86,67 +116,38 @@ impl DocumentImpl {
         default_ttl: Duration,
         require_ttl: bool,
     ) -> Self {
-        Self::new_with_id(
+        Self::new_with_id(DocumentWiring {
             driver,
             sets,
-            None,
-            None,
-            None,
+            leases: None,
+            bulk: None,
+            set_scanner: None,
             keyspace,
             default_ttl,
             require_ttl,
-            DEFAULT_CONCURRENCY,
-            default_new_id(),
-        )
+            concurrency: DEFAULT_CONCURRENCY,
+            new_id: default_new_id(),
+        })
     }
 
     /// Wires a Document with database capabilities and its shared ID generator.
     ///
     /// **Cost**: Local reference ownership only. **Side effects**: None.
-    pub(crate) fn new_with_id(
-        driver: Arc<dyn Driver>,
-        sets: Option<Arc<dyn Sets>>,
-        leases: Option<Arc<dyn Leases>>,
-        bulk: Option<Arc<dyn Bulk>>,
-        set_scanner: Option<Arc<dyn SetScanner>>,
-        keyspace: Keyspace,
-        default_ttl: Duration,
-        require_ttl: bool,
-        concurrency: usize,
-        new_id: NewId,
-    ) -> Self {
-        Self::with_layout(
-            driver,
-            sets,
-            leases,
-            bulk,
-            set_scanner,
-            keyspace,
-            default_ttl,
-            require_ttl,
-            concurrency,
-            new_id,
-            DocumentLayout::Document,
-        )
+    pub(crate) fn new_with_id(wiring: DocumentWiring) -> Self {
+        Self::with_layout(wiring, DocumentLayout::Document)
     }
 
     /// Builds the Document half of Indexed with the isolated `idx` key layout.
     ///
     /// This is the only path that selects `DocumentLayout::Indexed`, ensuring
     /// all delegated operations use Indexed keys consistently.
-    pub(crate) fn new_indexed(
-        driver: Arc<dyn Driver>,
-        sets: Option<Arc<dyn Sets>>,
-        leases: Option<Arc<dyn Leases>>,
-        bulk: Option<Arc<dyn Bulk>>,
-        set_scanner: Option<Arc<dyn SetScanner>>,
-        keyspace: Keyspace,
-        default_ttl: Duration,
-        require_ttl: bool,
-        concurrency: usize,
-        new_id: NewId,
-    ) -> Self {
-        Self::with_layout(
+    pub(crate) fn new_indexed(wiring: DocumentWiring) -> Self {
+        Self::with_layout(wiring, DocumentLayout::Indexed)
+    }
+
+    /// Central constructor that binds the algorithm to exactly one key family.
+    fn with_layout(wiring: DocumentWiring, layout: DocumentLayout) -> Self {
+        let DocumentWiring {
             driver,
             sets,
             leases,
@@ -157,24 +158,7 @@ impl DocumentImpl {
             require_ttl,
             concurrency,
             new_id,
-            DocumentLayout::Indexed,
-        )
-    }
-
-    /// Central constructor that binds the algorithm to exactly one key family.
-    fn with_layout(
-        driver: Arc<dyn Driver>,
-        sets: Option<Arc<dyn Sets>>,
-        leases: Option<Arc<dyn Leases>>,
-        bulk: Option<Arc<dyn Bulk>>,
-        set_scanner: Option<Arc<dyn SetScanner>>,
-        keyspace: Keyspace,
-        default_ttl: Duration,
-        require_ttl: bool,
-        concurrency: usize,
-        new_id: NewId,
-        layout: DocumentLayout,
-    ) -> Self {
+        } = wiring;
         Self {
             driver,
             sets,
