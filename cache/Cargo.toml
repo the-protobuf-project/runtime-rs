@@ -29,7 +29,7 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
 redis = { version = "1.6", features = ["tokio-comp", "connection-manager"] }
-memcache = { version = "0.20", default-features = false, features = ["tokio"] }
+memcache = { version = "0.21", default-features = false, features = ["tokio"] }
 crc32fast = "1.4"
 
 [dev-dependencies]
