@@ -12,12 +12,12 @@
 
 use std::{env, sync::Arc, time::Duration};
 
-use futures::FutureExt;
-use runtime_cache::{
+use cache::{
     CacheError, Config, Provider, Result,
     core::{Loader, Options},
     drivers::dragonfly::{DragonflyClient, DragonflyConfig, DragonflyProvider},
 };
+use futures::FutureExt;
 use uuid::Uuid;
 
 /// Named key namespace removed after the walkthrough.
@@ -26,7 +26,7 @@ const NAMESPACE: &str = "orders";
 const EXAMPLE_TTL: Duration = Duration::from_secs(60);
 
 /// Demonstrates the RESP capabilities that distinguish Dragonfly from Memcached.
-async fn exercise(db: &runtime_cache::DB) -> Result<()> {
+async fn exercise(db: &cache::DB) -> Result<()> {
     if db.backend != "dragonfly" {
         return Err(CacheError::Internal(format!(
             "Dragonfly example: selected DB reported backend {}",

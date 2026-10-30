@@ -1,0 +1,64 @@
+[package]
+name = "tpp-agents"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+keywords = ["mcp", "a2a", "agents", "grpc", "runtime"]
+categories = ["network-programming", "asynchronous"]
+
+# Consumed by tools/docgen to build the README's "Go source" column.
+[package.metadata.docgen]
+go-source = "runtime-go/agents"
+
+[lib]
+name = "agents"
+
+[features]
+default = ["mcp", "a2a"]
+# Go compiles a subpackage only when something imports it. Cargo has no such
+# thing, so the two protocol modules are features instead — same "pay for what
+# you use", stated the way Cargo states it.
+mcp = ["dep:rmcp", "dep:serde", "dep:serde_json"]
+a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json", "dep:uuid", "dep:chrono"]
+
+
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+axum = { workspace = true }
+tonic = { workspace = true }
+tower-http = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+http = { workspace = true }
+
+rmcp = { version = "3.1", optional = true, features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+    "transport-io",
+    "elicitation",
+] }
+
+# a2a-grpc and a2a-pb are not published to crates.io, so the whole workspace is
+# taken from git and pinned to one revision rather than mixing a registry copy
+# of the core types with a git copy of the gRPC binding.
+a2a = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-lf", rev = "9d70cfd6bca55f8b3801be9d64f036f2ac9d4c42", optional = true }
+a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-server-lf", rev = "9d70cfd6bca55f8b3801be9d64f036f2ac9d4c42", optional = true }
+
+futures = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+reqwest = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }

@@ -35,12 +35,12 @@ use std::{
     time::Duration,
 };
 
-use futures::FutureExt;
-use runtime_cache::{
+use cache::{
     CacheError, Config, Provider, Result,
     core::{Aside, DB, Loader, Options},
     drivers::memcached::{MemcachedClient, MemcachedConfig, MemcachedProvider},
 };
+use futures::FutureExt;
 use uuid::Uuid;
 
 /// Stable namespace beneath the unique per-run prefix.

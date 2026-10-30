@@ -36,12 +36,12 @@ use std::{
     time::Duration,
 };
 
-use futures::FutureExt;
-use runtime_cache::{
+use cache::{
     CacheError, Config, Provider, Result,
     core::{Aside, DB, Loader, Options},
     drivers::dragonfly::{DragonflyClient, DragonflyConfig, DragonflyProvider},
 };
+use futures::FutureExt;
 use uuid::Uuid;
 
 /// Stable named namespace beneath the unique per-run prefix.

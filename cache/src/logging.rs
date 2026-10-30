@@ -13,7 +13,7 @@ use crate::{
 };
 
 /// Stable tracing target for all Document middleware events.
-const TARGET: &str = "runtime_cache::document";
+const TARGET: &str = "cache::document";
 
 /// Document wrapper that records the outcome of each delegated operation.
 ///
@@ -154,7 +154,7 @@ impl Document for LoggingDocument {
 ///
 /// Successful operations emit Debug events, NotFound emits a Warn cache-miss
 /// event, and all other failures emit Error events. Records use the
-/// `runtime_cache::document` target and include operation, elapsed duration,
+/// `cache::document` target and include operation, elapsed duration,
 /// and an ID when one is available. Cached values and Options are never logged.
 ///
 /// The active tracing subscriber controls filtering and output; this function
@@ -294,6 +294,8 @@ mod tests {
 
         fn attempt(&self) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            // `try_update`, its replacement, is newer than the workspace's minimum Rust.
+            #[allow(deprecated)]
             let failed = self
                 .failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

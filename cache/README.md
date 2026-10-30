@@ -10,7 +10,7 @@ built around async traits, explicit capabilities, and caller-owned clients.
 cargo add runtime-cache
 ```
 
-The library is imported as `runtime_cache`.
+The library is imported as `cache`.
 
 ## How it fits together
 

@@ -13,7 +13,7 @@
 //! ```no_run
 //! use std::{sync::Arc, time::Duration};
 //!
-//! use runtime_cache::{
+//! use cache::{
 //!     Config, Provider, Result, chain,
 //!     core::Options,
 //!     drivers::redis::{RedisClient, RedisConfig, RedisProvider},

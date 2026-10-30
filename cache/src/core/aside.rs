@@ -25,7 +25,7 @@ use super::Options;
 /// ```rust
 /// use std::sync::Arc;
 /// use futures::FutureExt;
-/// use runtime_cache::core::Loader;
+/// use cache::core::Loader;
 ///
 /// let loader: Loader = Arc::new(|id: String| async move {
 ///     Ok(format!("loaded:{id}").into_bytes())

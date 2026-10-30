@@ -38,12 +38,12 @@ use std::{
     time::Duration,
 };
 
-use futures::FutureExt;
-use runtime_cache::{
+use cache::{
     CacheError, Config, Provider, Result,
     core::{DB, Loader, Options},
     drivers::redis::{RedisClient, RedisConfig, RedisProvider},
 };
+use futures::FutureExt;
 use uuid::Uuid;
 
 /// Namespace deliberately contains no dynamic input; the UUID belongs in the
