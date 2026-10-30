@@ -13,14 +13,14 @@ way rather than as a line-for-line translation."""
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.93"
+rust-version = "1.99"
 license = "Apache-2.0"
 
 [workspace.dependencies]
 tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 tungstenite = "0.30"
 serde = { version = "1.0", features = ["derive"] }

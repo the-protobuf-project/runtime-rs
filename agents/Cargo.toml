@@ -48,8 +48,8 @@ rmcp = { version = "3.8", optional = true, features = [
 # a2a-grpc and a2a-pb are not published to crates.io, so the whole workspace is
 # taken from git and pinned to one revision rather than mixing a registry copy
 # of the core types with a git copy of the gRPC binding.
-a2a = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-lf", rev = "9d70cfd6bca55f8b3801be9d64f036f2ac9d4c42", optional = true }
-a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-server-lf", rev = "9d70cfd6bca55f8b3801be9d64f036f2ac9d4c42", optional = true }
+a2a = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-lf", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
+a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-server-lf", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
 
 futures = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }

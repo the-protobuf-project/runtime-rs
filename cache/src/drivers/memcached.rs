@@ -709,7 +709,11 @@ async fn connect_server(
     operation_timeout: Option<Duration>,
     max_idle: usize,
 ) -> Result<ServerClient> {
-    let connect = AsyncMetaClient::connect(address.as_str());
+    let connect = AsyncMetaClient::builder()
+        .connect_timeout(dial_timeout)
+        .io_timeout(operation_timeout)
+        .max_idle(max_idle)
+        .connect_async(address.as_str());
     let client = match dial_timeout {
         Some(timeout) => tokio::time::timeout(timeout, connect)
             .await
@@ -722,10 +726,7 @@ async fn connect_server(
         None => connect
             .await
             .map_err(|error| internal("resolve server", &address, error))?,
-    }
-    .with_connect_timeout(dial_timeout)
-    .with_io_timeout(operation_timeout)
-    .with_max_idle(max_idle);
+    };
     Ok(ServerClient { address, client })
 }
 
@@ -738,7 +739,7 @@ async fn execute_on(server: &ServerClient, operation: WireOperation) -> Result<W
                 request = request.without_value();
             }
             if let Some(expiry) = touch {
-                request = request.touch(expiry);
+                request = request.touch_raw(expiry);
             }
             let result = request
                 .send()
@@ -752,7 +753,7 @@ async fn execute_on(server: &ServerClient, operation: WireOperation) -> Result<W
             expiry,
             condition,
         } => {
-            let request = server.client.set(key, value).ttl(expiry);
+            let request = server.client.set(key, value).ttl_raw(expiry);
             let result = match condition {
                 StoreCondition::Set => request.send().await,
                 StoreCondition::Add => request.add().send().await,
@@ -799,6 +800,8 @@ async fn execute_group(
         .into_iter()
         .zip(replies)
         .map(|((position, operation), reply)| {
+            let reply =
+                reply.map_err(|error| internal("batch operation", &server.address, error))?;
             decode_batch_reply(&operation, reply).map(|reply| (position, reply))
         })
         .collect()
@@ -808,12 +811,12 @@ async fn execute_group(
 fn encode_operation(operation: &WireOperation) -> Op {
     match operation {
         WireOperation::Get { key, value, touch } => {
-            let mut operation = Get::new(key.as_bytes().to_vec());
+            let mut operation = Get::new(key.as_bytes());
             if !value {
                 operation = operation.without_value();
             }
             if let Some(expiry) = touch {
-                operation = operation.touch(*expiry);
+                operation = operation.touch_raw(*expiry);
             }
             operation.into()
         }
@@ -823,7 +826,7 @@ fn encode_operation(operation: &WireOperation) -> Op {
             expiry,
             condition,
         } => {
-            let operation = Set::new(key.as_bytes().to_vec(), value.clone()).ttl(*expiry);
+            let operation = Set::new(key.as_bytes(), value).ttl_raw(*expiry);
             match condition {
                 StoreCondition::Set => operation,
                 StoreCondition::Add => operation.add(),
@@ -831,7 +834,7 @@ fn encode_operation(operation: &WireOperation) -> Op {
             }
             .into()
         }
-        WireOperation::Delete { key } => Delete::new(key.as_bytes().to_vec()).into(),
+        WireOperation::Delete { key } => Delete::new(key.as_bytes()).into(),
     }
 }
 
@@ -865,7 +868,7 @@ fn decode_get(status: GetStatus, value: Option<Vec<u8>>) -> Result<WireReply> {
 /// Maps typed mutation outcomes without treating a condition conflict as I/O.
 fn decode_mutation(result: MutationResult) -> Result<WireReply> {
     match result.status {
-        MutationStatus::Stored => Ok(WireReply::Stored),
+        MutationStatus::Applied => Ok(WireReply::Stored),
         MutationStatus::NotFound => Ok(WireReply::Miss),
         MutationStatus::AlreadyExists => Ok(WireReply::AlreadyExists),
         status => Err(CacheError::Internal(format!(
@@ -1146,6 +1149,37 @@ mod tests {
         );
         let too_late = UNIX_EPOCH + Duration::from_secs(u32::MAX as u64);
         assert!(to_expiry_at(Duration::from_secs(THIRTY_DAYS_SECONDS + 1), too_late).is_err());
+    }
+
+    #[test]
+    fn test_memcached_dependency_preserves_wire_expiry() {
+        use memcache::exp::Operation;
+
+        for expiry in [0, 1, THIRTY_DAYS_SECONDS as u32, 1_702_592_001, u32::MAX] {
+            let store = encode_operation(&WireOperation::Store {
+                key: "key".to_owned(),
+                value: b"value".to_vec(),
+                expiry,
+                condition: StoreCondition::Set,
+            });
+            let touch = encode_operation(&WireOperation::Get {
+                key: "key".to_owned(),
+                value: false,
+                touch: Some(expiry),
+            });
+            for operation in [store, touch] {
+                let command = match operation {
+                    Op::Set(set) => set.prepare().unwrap(),
+                    Op::Get(get) => get.prepare().unwrap(),
+                    _ => unreachable!(),
+                };
+                let wire = String::from_utf8(command.encode().unwrap()).unwrap();
+                assert!(
+                    wire.split_whitespace()
+                        .any(|flag| flag == format!("T{expiry}"))
+                );
+            }
+        }
     }
 
     #[tokio::test]
