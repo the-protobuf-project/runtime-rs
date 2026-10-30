@@ -37,7 +37,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 http = { workspace = true }
 
-rmcp = { version = "3.1", optional = true, features = [
+rmcp = { version = "3.8", optional = true, features = [
     "server",
     "macros",
     "transport-streamable-http-server",

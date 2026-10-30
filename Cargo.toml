@@ -17,7 +17,7 @@ rust-version = "1.93"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-tokio = { version = "1.53", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
+tokio = { version = "1.54", features = ["rt-multi-thread", "macros", "time", "sync", "net", "io-util"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "webpki-roots", "stream"] }
@@ -34,12 +34,12 @@ owo-colors = "4"
 unicode-width = "0.2"
 opentelemetry = "0.33"
 opentelemetry-http = "0.33"
-http = "1.4"
+http = "1.5"
 bytes = "1"
 http-body-util = "0.1"
 http-body = "1"
 async-trait = "0.1"
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.29", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # gRPC and the transports the hybrid server speaks. tonic is the repo the gRPC
@@ -57,7 +57,7 @@ axum = "0.8"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "server-graceful", "service"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", features = ["set-header", "trace", "timeout", "cors"] }
+tower-http = { version = "0.7", features = ["set-header", "trace", "timeout", "cors"] }
 
 # The REST/JSON gateway: google.api.http routes served in-process against the
 # tonic services, replacing grpc-gateway. A git tag rather than a crates.io
