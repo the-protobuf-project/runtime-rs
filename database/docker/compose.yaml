@@ -1,0 +1,29 @@
+# Latest InfluxDB 3 Core; override the image with a release digest to pin it.
+services:
+  influxdb:
+    image: ${INFLUXDB_IMAGE:-influxdb:3-core}
+    restart: unless-stopped
+    healthcheck:
+      # Authentication-enabled servers return 401 before a token is supplied.
+      # Both statuses establish HTTP liveness; the Rust probe checks read access.
+      test:
+        - CMD-SHELL
+        - >-
+          code=$$(curl --silent --output /dev/null --write-out '%{http_code}' http://localhost:8181/health);
+          [ "$$code" = 200 ] || [ "$$code" = 401 ]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    ports:
+      - "127.0.0.1:8181:8181"
+    command:
+      - influxdb3
+      - serve
+      - --node-id=runtime-rs
+      - --object-store=file
+      - --data-dir=/var/lib/influxdb3/data
+    volumes:
+      - influxdb-data:/var/lib/influxdb3
+volumes:
+  influxdb-data:
