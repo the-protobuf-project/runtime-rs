@@ -36,14 +36,15 @@ impl Loopback {
         routes: Routes,
         chain: Option<UnaryInterceptorFn>,
         messages: InterceptLayer,
+        streams: crate::stream_intercept::StreamInterceptLayer,
+        telemetry: crate::otel::OtelLayer,
     ) -> Self {
         use tower::Layer;
         let intercepted = chain.is_some();
         Self {
-            inner: tower::util::BoxCloneSyncService::new(Chained::new(
-                messages.layer(routes),
-                chain,
-            )),
+            inner: tower::util::BoxCloneSyncService::new(
+                telemetry.layer(Chained::new(streams.layer(messages.layer(routes)), chain)),
+            ),
             intercepted,
         }
     }

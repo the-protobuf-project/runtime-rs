@@ -202,7 +202,7 @@ impl HybridServer {
     /// Enables protovalidate request validation for every unary RPC the server dispatches.
     ///
     /// The interceptor is built during [`HybridServer::start`] and runs before the
-    /// caller-supplied chain, so validation always goes first.
+    /// caller-supplied chain, unless [`HybridServer::with_validation_last`] moved it.
     #[must_use]
     pub fn with_validation(mut self) -> Self {
         self.enable_validation = true;
@@ -217,6 +217,21 @@ impl HybridServer {
     pub fn with_validator(mut self, validator: impl Validator) -> Self {
         self.validator = Some(Arc::new(validator));
         self.enable_validation = true;
+        self
+    }
+
+    /// Enables validation, as [`HybridServer::with_validation`] does, but runs it after the
+    /// interceptors given to [`HybridServer::with_unary_interceptor`] rather than before.
+    ///
+    /// Go's `WithValidationLast`. Use it when one of those interceptors decides whether the
+    /// caller may ask at all: a request without credentials is then answered
+    /// `UNAUTHENTICATED`, and only an admitted one learns what is wrong with its fields.
+    /// Given both options, validation runs last.
+    #[must_use]
+    pub fn with_validation_last(mut self) -> Self {
+        tracing::debug!("with_validation_last: validation moves to the end of the chain");
+        self.enable_validation = true;
+        self.validation_last = true;
         self
     }
 }

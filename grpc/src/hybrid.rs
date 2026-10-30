@@ -79,6 +79,13 @@ pub struct HybridServer {
     /// Whether the REST gateway should emit proto (snake_case) field names.
     pub(crate) rest_snake_case: bool,
 
+    /// The cross-origin policy for the HTTP listeners, which is Go's `WithCORS`.
+    pub(crate) cors: Option<crate::cors::CorsPolicy>,
+    /// Interceptors for streaming calls, which is Go's `WithStreamInterceptors`.
+    pub(crate) stream_interceptors: Vec<Arc<dyn crate::stream_intercept::StreamInterceptor>>,
+    /// Runs validation after the caller's unary interceptors rather than before them.
+    pub(crate) validation_last: bool,
+
     pub(crate) state: Mutex<Running>,
 }
 
@@ -111,6 +118,9 @@ impl HybridServer {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             descriptor_sets: Vec::new(),
             rest_snake_case: false,
+            cors: None,
+            stream_interceptors: Vec::new(),
+            validation_last: false,
             state: Mutex::new(Running::default()),
         }
     }

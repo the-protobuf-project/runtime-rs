@@ -287,7 +287,7 @@ where
         let descriptor = lookup(&self.pool, &path);
         // A streaming method passes through untouched: there is no single message to hand
         // an interceptor, and buffering a stream would break it. Stream interceptors are a
-        // separate seam.
+        // separate seam: see `crate::stream_intercept`.
         if descriptor
             .as_ref()
             .is_some_and(|m| m.is_client_streaming() || m.is_server_streaming())
@@ -452,14 +452,14 @@ fn unframe(bytes: &Bytes) -> Option<(bool, Bytes)> {
     (buf.remaining() == len).then_some((compressed, buf))
 }
 
-fn lookup(pool: &DescriptorPool, path: &str) -> Option<MethodDescriptor> {
+pub(crate) fn lookup(pool: &DescriptorPool, path: &str) -> Option<MethodDescriptor> {
     let (service, method) = split_path(path);
     pool.get_service_by_name(service)?
         .methods()
         .find(|m| m.name() == method)
 }
 
-fn split_path(path: &str) -> (&str, &str) {
+pub(crate) fn split_path(path: &str) -> (&str, &str) {
     path.trim_start_matches('/')
         .split_once('/')
         .unwrap_or((path, ""))

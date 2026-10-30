@@ -86,6 +86,11 @@ pub enum Error {
     #[error("shutdown did not finish within {0:?}")]
     ShutdownTimeout(std::time::Duration),
 
+    /// [`crate::CorsPolicy::validate`] refused the policy given to
+    /// [`crate::HybridServer::with_cors`].
+    #[error("cors: {0}")]
+    InvalidCors(String),
+
     /// An I/O failure with no more specific home.
     #[error(transparent)]
     Io(#[from] std::io::Error),

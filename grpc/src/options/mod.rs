@@ -20,6 +20,7 @@
 
 mod agents;
 mod environment;
+pub mod opentelemetry;
 
 pub use agents::{A2aOptions, A2aTransport, DEFAULT_A2A_BASE_PATH, McpOptions, McpTransport};
 pub use environment::ServerEnvironment;

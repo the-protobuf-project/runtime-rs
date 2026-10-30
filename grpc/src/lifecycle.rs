@@ -28,6 +28,7 @@ impl HybridServer {
     pub async fn start(&mut self) -> Result<()> {
         self.load_certificate()?;
         crate::validate::validate_options(&mut self.opts, self.cert.is_some())?;
+        self.validate_cors()?;
         tracing::debug!(
             grpc = %self.opts.grpc.addr(),
             http = self.opts.enable_http,
@@ -53,7 +54,7 @@ impl HybridServer {
     async fn start_components(&mut self) -> Result<()> {
         self.start_grpc_server().await?;
 
-        let router = self.http_router()?;
+        let router = self.apply_cors(self.http_router()?)?;
         if self.opts.experimental_http3 {
             self.start_http3(router.clone()).await?;
         }

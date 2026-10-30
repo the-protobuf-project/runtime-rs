@@ -50,7 +50,18 @@ impl HybridServer {
             self.message_interceptors.clone(),
             crate::intercept::descriptor_pool(&self.descriptor_sets),
         );
-        let loopback = Loopback::new(routes.routes(), chain.clone(), messages.clone());
+        let streams = crate::stream_intercept::StreamInterceptLayer::new(
+            self.stream_interceptors.clone(),
+            crate::intercept::descriptor_pool(&self.descriptor_sets),
+        );
+        let telemetry = crate::otel::OtelLayer::new();
+        let loopback = Loopback::new(
+            routes.routes(),
+            chain.clone(),
+            messages.clone(),
+            streams.clone(),
+            telemetry.clone(),
+        );
 
         let mut builder = Server::builder();
         if let Some(cert) = &self.cert {
@@ -61,7 +72,9 @@ impl HybridServer {
         }
 
         let router = builder
+            .layer(telemetry)
             .layer(ChainLayer(chain))
+            .layer(streams)
             .layer(messages)
             .add_routes(routes.routes());
         let token = CancellationToken::new();
@@ -88,7 +101,8 @@ impl HybridServer {
     }
 
     /// The unary interceptor chain: validation first, unless it has no engine, then the
-    /// caller's interceptors in the order they were chained.
+    /// caller's interceptors in the order they were chained. With
+    /// [`HybridServer::with_validation_last`], validation goes last instead.
     fn interceptor_chain(&self) -> Option<crate::types::UnaryInterceptorFn> {
         let mut chain = Vec::new();
         if self.enable_validation {
@@ -103,6 +117,10 @@ impl HybridServer {
             }
         }
         chain.extend(self.interceptors.iter().cloned());
+        // Moved rather than pushed last above, so the no-engine case keeps one path.
+        if self.validation_last && self.enable_validation && self.validator.is_some() {
+            chain.rotate_left(1);
+        }
         match chain.len() {
             0 => None,
             1 => chain.pop(),
