@@ -55,7 +55,7 @@ prost-reflect = "0.16"
 prost = "0.14"
 axum = "0.8"
 hyper = { version = "1", features = ["http1", "http2", "server"] }
-hyper-util = { version = "0.1", features = ["tokio", "server", "service"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-auto", "server-graceful", "service"] }
 tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["set-header", "trace", "timeout", "cors"] }
 

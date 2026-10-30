@@ -38,6 +38,14 @@ use axum::Router;
 
 pub use health::health_router;
 
+/// The largest request body a listener buffers before routing, in bytes: 4 MiB, gRPC's own
+/// default maximum message size and the limit a `transcode` gateway applies.
+///
+/// Only HTTP/3 buffers before routing — it has to rebuild the request for the router — so
+/// it is the path that needs a limit of its own. HTTP/1.1 streams the body to the router,
+/// where the gateway enforces the same limit as it reads.
+pub const MAX_REQUEST_BODY: usize = 4 * 1024 * 1024;
+
 /// Everything this server answers over HTTP, before a listener is bound to it.
 #[derive(Clone, Default)]
 pub struct Surface {

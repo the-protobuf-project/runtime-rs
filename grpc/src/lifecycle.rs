@@ -36,6 +36,21 @@ impl HybridServer {
             "start: options valid"
         );
 
+        if let Err(err) = self.start_components().await {
+            // Whatever came up before the failure is stopped, so its ports are free and a
+            // later start can retry. The original error is the one worth reporting.
+            if let Err(stop) = self.stop().await {
+                tracing::warn!(error = %stop, "start: cleanup after a failed start did not finish");
+            }
+            return Err(err);
+        }
+
+        banner::print(&self.opts, &self.summary());
+        Ok(())
+    }
+
+    /// The components [`HybridServer::start`] brings up, in order.
+    async fn start_components(&mut self) -> Result<()> {
         self.start_grpc_server().await?;
 
         let router = self.http_router()?;
@@ -47,8 +62,6 @@ impl HybridServer {
         } else {
             tracing::debug!("start: HTTP/1.1 gateway disabled");
         }
-
-        banner::print(&self.opts, &self.summary());
         Ok(())
     }
 
@@ -91,6 +104,14 @@ impl HybridServer {
             )
         };
 
+        // Kept apart from the join handles the drain consumes, so a drain that times out
+        // can still stop the tasks rather than leave them running detached.
+        let aborts: Vec<_> = tasks
+            .iter()
+            .chain(grpc_task.iter())
+            .map(JoinHandle::abort_handle)
+            .collect();
+
         let drain = async {
             if let Some(grpc) = &grpc {
                 grpc.cancel();
@@ -107,7 +128,12 @@ impl HybridServer {
 
         match tokio::time::timeout(self.shutdown_timeout, drain).await {
             Ok(result) => result,
-            Err(_) => Err(Error::ShutdownTimeout(self.shutdown_timeout)),
+            Err(_) => {
+                for task in aborts {
+                    task.abort();
+                }
+                Err(Error::ShutdownTimeout(self.shutdown_timeout))
+            }
         }
     }
 
@@ -148,6 +174,7 @@ impl HybridServer {
         let target = GatewayTarget {
             endpoint: self.opts.grpc.addr(),
             tls: self.cert.is_some(),
+            rest_snake_case: self.rest_snake_case,
         };
         for register in &self.http_gateways {
             router = register(router, &target).map_err(Error::Gateway)?;

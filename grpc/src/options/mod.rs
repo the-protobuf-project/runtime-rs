@@ -49,14 +49,21 @@ impl Endpoint {
     }
 
     /// The `host:port` form a listener or dial target wants.
+    ///
+    /// An IPv6 host is bracketed — `[::1]:50051` — because its own colons would otherwise
+    /// make the port ambiguous and the address unparseable.
     pub fn addr(&self) -> String {
-        format!("{}:{}", self.host, self.port)
+        self.to_string()
     }
 }
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}", self.host, self.port)
+        if self.host.contains(':') && !self.host.starts_with('[') {
+            write!(f, "[{}]:{}", self.host, self.port)
+        } else {
+            write!(f, "{}:{}", self.host, self.port)
+        }
     }
 }
 

@@ -46,12 +46,18 @@ where
 /// It runs before the caller-supplied interceptors, so validation always goes first.
 pub fn validation_interceptor(validator: Arc<dyn Validator>) -> crate::types::UnaryInterceptorFn {
     Arc::new(move |request: tonic::Request<()>| {
-        // tonic exposes the target method on the request extensions rather than the
-        // metadata, and only once routing has picked one.
+        // A loopback call carries the method as `GrpcMethod`, set by the client that made
+        // it. A call over the TCP listener has only its path, which the chain recorded.
         let method = request
             .extensions()
             .get::<tonic::GrpcMethod<'static>>()
             .map(|m| format!("/{}/{}", m.service(), m.method()))
+            .or_else(|| {
+                request
+                    .extensions()
+                    .get::<crate::loopback::MethodPath>()
+                    .map(|path| path.0.clone())
+            })
             .unwrap_or_default();
         validator.validate(&method, request.metadata())?;
         Ok(request)

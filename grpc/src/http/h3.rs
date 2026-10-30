@@ -72,6 +72,9 @@ pub async fn serve(
                 }
             });
         }
+        // Close every connection before waiting for them to go idle: without it, wait_idle
+        // waits on clients that have no reason to hang up, and the stop runs out its timeout.
+        endpoint.close(0u32.into(), b"server shutting down");
         endpoint.wait_idle().await;
     }))
 }
@@ -86,11 +89,17 @@ async fn serve_connection(
     loop {
         match h3.accept().await {
             Ok(Some(resolver)) => {
-                let (request, stream) = resolver.resolve_request().await?;
+                // Resolved inside the task, so a client slow to send its headers holds up only
+                // its own request, and one malformed request does not end the connection.
                 let router = router.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = respond(router, request, stream).await {
-                        tracing::debug!(?err, "HTTP/3 request failed");
+                    match resolver.resolve_request().await {
+                        Ok((request, stream)) => {
+                            if let Err(err) = respond(router, request, stream).await {
+                                tracing::debug!(?err, "HTTP/3 request failed");
+                            }
+                        }
+                        Err(err) => tracing::debug!(?err, "HTTP/3 request could not be resolved"),
                     }
                 });
             }
@@ -112,6 +121,19 @@ where
 {
     let mut body = Vec::new();
     while let Some(mut chunk) = stream.recv_data().await? {
+        // Rejected as soon as it would pass the limit, before the chunk is copied, so an
+        // oversized body costs at most the limit in memory.
+        if body.len() + chunk.remaining() > super::MAX_REQUEST_BODY {
+            stream
+                .send_response(
+                    http::Response::builder()
+                        .status(http::StatusCode::PAYLOAD_TOO_LARGE)
+                        .body(())?,
+                )
+                .await?;
+            stream.finish().await?;
+            return Ok(());
+        }
         body.extend_from_slice(chunk.copy_to_bytes(chunk.remaining()).as_ref());
     }
 

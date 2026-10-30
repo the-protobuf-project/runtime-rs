@@ -26,17 +26,18 @@ pub fn validate_options(opts: &mut Options, has_certificate: bool) -> Result<()>
         opts.grpc.port = DEFAULT_GRPC_PORT;
     }
 
-    if opts.enable_http {
-        if opts.http.host.is_empty() {
-            return Err(Error::EmptyHttpHost);
-        }
-        if opts.http.port == 0 {
-            tracing::debug!(
-                port = DEFAULT_HTTP_PORT,
-                "validateOptions: applying default HTTP port"
-            );
-            opts.http.port = DEFAULT_HTTP_PORT;
-        }
+    // Defaulted whether or not HTTP is enabled, because the MCP, A2A and HTTP/3 ports below
+    // are derived from it. Go defaults it only with HTTP on, so with HTTP off it derives MCP
+    // on port 1; this does not.
+    if opts.http.port == 0 {
+        tracing::debug!(
+            port = DEFAULT_HTTP_PORT,
+            "validateOptions: applying default HTTP port"
+        );
+        opts.http.port = DEFAULT_HTTP_PORT;
+    }
+    if opts.enable_http && opts.http.host.is_empty() {
+        return Err(Error::EmptyHttpHost);
     }
 
     // MCP over stdio talks on the process's own pipes, so it needs no address at all.

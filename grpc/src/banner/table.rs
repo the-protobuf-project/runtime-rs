@@ -58,9 +58,9 @@ pub fn render(rows: &[Row]) -> String {
     // "✓" would be padded one short.
     let widths: Vec<usize> = (0..HEADERS.len())
         .map(|i| {
-            let header = HEADERS[i].to_uppercase().width();
+            let header = display_width(&HEADERS[i].to_uppercase());
             rows.iter()
-                .map(|row| row.cells()[i].width())
+                .map(|row| display_width(row.cells()[i]))
                 .chain(std::iter::once(header))
                 .max()
                 .unwrap_or(0)
@@ -133,7 +133,7 @@ fn continuation(widths: &[usize]) -> String {
 fn line(cells: &[String], widths: &[usize], align: Align) -> String {
     let mut out = String::from("│");
     for (cell, width) in cells.iter().zip(widths) {
-        let pad = width.saturating_sub(cell.width());
+        let pad = width.saturating_sub(display_width(cell));
         match align {
             Align::Left => out.push_str(&format!(" {cell}{} ", " ".repeat(pad))),
             Align::Center => {
@@ -149,4 +149,71 @@ fn line(cells: &[String], widths: &[usize], align: Align) -> String {
     }
     out.push('\n');
     out
+}
+
+/// The columns `text` occupies on a terminal.
+///
+/// CSI escape sequences — the colour codes a section label carries — are skipped, because
+/// they occupy no columns. Counting them would pad every coloured cell short.
+fn display_width(text: &str) -> usize {
+    let mut visible = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' && chars.peek() == Some(&'[') {
+            chars.next();
+            // Parameter and intermediate bytes, up to and including the final byte.
+            for c in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&c) {
+                    break;
+                }
+            }
+            continue;
+        }
+        visible.push(c);
+    }
+    visible.width()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Row, display_width, render};
+    use unicode_width::UnicodeWidthStr;
+
+    #[test]
+    fn escape_sequences_occupy_no_columns() {
+        assert_eq!(display_width("\u{1b}[1;36mgRPC\u{1b}[0m"), 4);
+        assert_eq!(display_width("TLS ✓"), 5);
+    }
+
+    #[test]
+    fn a_pre_coloured_section_keeps_every_line_the_same_width() {
+        let rows = vec![
+            Row::new(
+                "\u{1b}[1;36mgRPC\u{1b}[0m",
+                "Health Check",
+                "0.0.0.0:50051",
+                "grpc.health.v1",
+            ),
+            Row::new(
+                "\u{1b}[1;36mgRPC\u{1b}[0m",
+                "Reflection",
+                "0.0.0.0:50051",
+                "grpcurl",
+            ),
+            Row::new(
+                "\u{1b}[1;35mHTTP/1.1\u{1b}[0m",
+                "REST",
+                "0.0.0.0:8080",
+                "http",
+            ),
+        ];
+        let table = render(&rows);
+        let widths: Vec<usize> = table.lines().map(display_width).collect();
+        assert!(
+            widths.windows(2).all(|pair| pair[0] == pair[1]),
+            "lines differ in width {widths:?}:\n{table}"
+        );
+        // The plain width check would have failed: the escapes are really there.
+        assert!(table.lines().any(|line| line.width() != widths[0]));
+    }
 }

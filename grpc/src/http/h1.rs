@@ -62,7 +62,18 @@ pub async fn serve(
     }
 }
 
-/// Accepts TLS connections until cancelled.
+/// How long to wait before accepting again after `accept` fails.
+///
+/// An accept error is usually the process running out of file descriptors; retrying at once
+/// would spin a core against a limit that only clears as connections close.
+const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Accepts TLS connections until cancelled, then drains the ones in flight.
+///
+/// Every connection is tracked, so on cancellation each is told to finish its current
+/// requests and close, and this returns only once they have — the same drain the plaintext
+/// path gets from axum's graceful shutdown. The shutdown timeout in
+/// [`crate::HybridServer::stop`] bounds it.
 async fn serve_tls(
     listener: tokio::net::TcpListener,
     acceptor: tokio_rustls::TlsAcceptor,
@@ -70,21 +81,31 @@ async fn serve_tls(
     cancel: CancellationToken,
 ) {
     let service = router.into_make_service();
+    let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+    let mut connections = tokio::task::JoinSet::new();
 
     loop {
         let accepted = tokio::select! {
             biased;
-            () = cancel.cancelled() => return,
+            () = cancel.cancelled() => break,
             accepted = listener.accept() => accepted,
         };
 
-        let Ok((stream, peer)) = accepted else {
-            continue;
+        let (stream, peer) = match accepted {
+            Ok(accepted) => accepted,
+            Err(err) => {
+                tracing::warn!(error = %err, "HTTP/1.1: accept failed; backing off");
+                tokio::select! {
+                    () = cancel.cancelled() => break,
+                    () = tokio::time::sleep(ACCEPT_BACKOFF) => continue,
+                }
+            }
         };
         let acceptor = acceptor.clone();
         let mut service = service.clone();
+        let watcher = graceful.watcher();
 
-        tokio::spawn(async move {
+        connections.spawn(async move {
             let Ok(tls) = acceptor.accept(stream).await else {
                 // A failed handshake is one client's problem — a bad SNI, an old cipher suite,
                 // a port scanner — and not a reason to stop serving everyone else.
@@ -108,13 +129,20 @@ async fn serve_tls(
                 async move { tower::Service::call(&mut tower_service, request).await }
             });
 
-            if let Err(err) =
-                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new())
-                    .serve_connection_with_upgrades(io, hyper_service)
-                    .await
-            {
+            let builder =
+                hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+            let connection = builder.serve_connection_with_upgrades(io, hyper_service);
+            if let Err(err) = watcher.watch(connection).await {
                 tracing::debug!(%peer, ?err, "connection closed");
             }
         });
+
+        // Reap finished connections as we go, so a long-lived listener does not hold a
+        // handle for every connection it ever served.
+        while connections.try_join_next().is_some() {}
     }
+
+    drop(listener);
+    graceful.shutdown().await;
+    while connections.join_next().await.is_some() {}
 }

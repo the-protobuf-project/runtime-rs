@@ -38,6 +38,9 @@ pub struct GatewayTarget {
     pub endpoint: String,
     /// Whether that endpoint speaks TLS.
     pub tls: bool,
+    /// Whether the gateway should emit and accept `snake_case` (proto) field names, as
+    /// [`crate::HybridServer::with_rest_snake_case`] asked.
+    pub rest_snake_case: bool,
 }
 
 impl GatewayTarget {

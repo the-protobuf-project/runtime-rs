@@ -123,3 +123,42 @@ async fn a_message_interceptor_reads_and_rewrites_requests_and_replies() {
     );
     server.stop().await.expect("the server stops");
 }
+
+#[tokio::test]
+async fn a_validator_over_the_tcp_listener_is_told_the_method() {
+    let grpc_port = free_port();
+    let seen = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let recorder = Arc::clone(&seen);
+    let mut server = HybridServer::new(Options {
+        service_name: "validator-test".into(),
+        grpc: Endpoint::new("127.0.0.1", grpc_port),
+        enable_health: true,
+        ..Default::default()
+    })
+    .with_validator(
+        move |method: &str, _metadata: &tonic::metadata::MetadataMap| -> Result<(), Status> {
+            recorder.lock().unwrap().push(method.to_string());
+            Ok(())
+        },
+    );
+    server.start().await.expect("the server starts");
+
+    let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{grpc_port}"))
+        .expect("a valid endpoint")
+        .connect()
+        .await
+        .expect("connects");
+    HealthClient::new(channel)
+        .check(HealthCheckRequest {
+            service: String::new(),
+        })
+        .await
+        .expect("the check is served");
+
+    assert_eq!(
+        *seen.lock().unwrap(),
+        ["/grpc.health.v1.Health/Check"],
+        "the validator saw the method a TCP caller reached"
+    );
+    server.stop().await.expect("the server stops");
+}

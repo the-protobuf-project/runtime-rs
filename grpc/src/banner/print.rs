@@ -40,8 +40,14 @@ pub fn render(opts: &Options, state: &Summary) -> String {
 }
 
 /// Prints the banner to stdout.
+///
+/// A write failure is ignored: `print!` would panic on a closed or broken stdout, and a
+/// banner nobody can read is no reason to take the server down with it.
 pub fn print(opts: &Options, state: &Summary) {
-    print!("{}", render(opts, state));
+    use std::io::Write;
+    let _ = std::io::stdout()
+        .lock()
+        .write_all(render(opts, state).as_bytes());
 }
 
 /// The version, environment and build line under the art.

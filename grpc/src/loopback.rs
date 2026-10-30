@@ -109,6 +109,13 @@ where
         };
 
         let (mut parts, body) = request.into_parts();
+        // The path names the method, and a request over the TCP listener carries nothing
+        // else that does: tonic sets `GrpcMethod` only on a client's own requests, so only a
+        // loopback call has one. Recorded here, before the chain runs, so every interceptor
+        // can name the method either way.
+        parts
+            .extensions
+            .insert(MethodPath(parts.uri.path().to_string()));
         let intercepted = tonic::Request::from_parts(
             MetadataMap::from_headers(std::mem::take(&mut parts.headers)),
             std::mem::take(&mut parts.extensions),
@@ -127,6 +134,12 @@ where
         }
     }
 }
+
+/// The full method path of a call, `/package.Service/Method`, as a request extension.
+///
+/// Set on every call before the metadata-level interceptors run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MethodPath(pub String);
 
 /// Installs [`Chained`] in front of whatever tonic serves.
 #[derive(Clone)]

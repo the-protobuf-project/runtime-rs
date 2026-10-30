@@ -133,8 +133,13 @@ impl HybridServer {
     /// Makes the REST gateway emit and accept `snake_case` (proto) field names instead of
     /// the default `camelCase`. This matches the field naming the MCP layer uses.
     ///
-    /// The flag is carried to the gateway handlers, which own their own codecs; this crate
-    /// does not marshal protobuf itself.
+    /// The flag reaches each [`HybridServer::with_http_gateways`] registration as
+    /// [`GatewayTarget::rest_snake_case`](crate::GatewayTarget::rest_snake_case), because
+    /// those handlers own their codecs and this crate does not marshal protobuf itself.
+    ///
+    /// It does not reach a [`HybridServer::with_gateway`] gateway: a `transcode` gateway's
+    /// field names are fixed by the serde impls of the generated message types, and
+    /// `transcode` has no option to rename them at runtime.
     #[must_use]
     pub fn with_rest_snake_case(mut self) -> Self {
         tracing::debug!("with_rest_snake_case: enabling proto field names");
