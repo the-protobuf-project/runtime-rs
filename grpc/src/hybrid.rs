@@ -78,6 +78,8 @@ pub struct HybridServer {
     pub(crate) descriptor_sets: Vec<&'static [u8]>,
     /// Whether the REST gateway should emit proto (snake_case) field names.
     pub(crate) rest_snake_case: bool,
+    /// A2A service functions, turned into services at start once `opts.a2a` is resolved.
+    pub(crate) a2a_service_funcs: Vec<crate::a2a::A2aServiceFunc>,
 
     /// The cross-origin policy for the HTTP listeners, which is Go's `WithCORS`.
     pub(crate) cors: Option<crate::cors::CorsPolicy>,
@@ -124,6 +126,7 @@ impl HybridServer {
             cors: None,
             stream_interceptors: Vec::new(),
             validation_last: false,
+            a2a_service_funcs: Vec::new(),
             state: Mutex::new(Running::default()),
             mcp: crate::mcp_options::McpSettings::default(),
         }

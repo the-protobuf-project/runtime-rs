@@ -106,7 +106,10 @@ async fn a_text_agent_failure_becomes_a_terminal_status_carrying_the_code() {
         .as_ref()
         .and_then(|m| m.text())
         .unwrap_or_default();
-    assert!(text.contains("PERMISSION_DENIED"), "{text}");
+    assert!(
+        text.starts_with("PermissionDenied: "),
+        "Go names the code in CamelCase: {text}"
+    );
     assert!(text.contains("not yours"), "{text}");
 }
 
@@ -129,7 +132,7 @@ async fn cancelling_reports_cancelled_rather_than_failed() {
 fn error_text_reads_the_same_wherever_it_is_built() {
     assert_eq!(
         a2a::error_text(&tonic::Status::not_found("no such agent")),
-        "NOT_FOUND: no such agent"
+        "NotFound: no such agent"
     );
     // An Unknown code carries nothing a reader can act on, so it is left off.
     assert_eq!(
@@ -151,5 +154,70 @@ fn a_status_code_maps_onto_the_state_that_describes_the_work() {
         TaskState::Rejected
     );
     assert_eq!(state_for_code(tonic::Code::Internal), TaskState::Failed);
-    assert_eq!(state_for_code(tonic::Code::Ok), TaskState::Completed);
+    // Go maps only a nil error to completed; a status carrying Ok was still an error.
+    assert_eq!(state_for_code(tonic::Code::Ok), TaskState::Failed);
+}
+
+#[test]
+fn code_names_match_grpc_go() {
+    assert_eq!(a2a::code_name(tonic::Code::Cancelled), "Canceled");
+    assert_eq!(
+        a2a::code_name(tonic::Code::DeadlineExceeded),
+        "DeadlineExceeded"
+    );
+    assert_eq!(a2a::code_name(tonic::Code::Ok), "OK");
+    assert_eq!(
+        a2a::error_text(&tonic::Status::new(tonic::Code::Ok, "odd")),
+        "OK: odd"
+    );
+    assert_eq!(a2a::error_text(None), "");
+}
+
+#[test]
+fn no_error_reports_completed_as_go_nil_does() {
+    let Event::StatusUpdate(update) = a2a::handle_error(&context(None), None) else {
+        panic!("expected a status update");
+    };
+    assert_eq!(update.status.state, a2a::STATE_COMPLETED);
+    assert!(update.status.message.is_none());
+
+    // An Unknown status is a plain failure, its message unprefixed.
+    let Event::StatusUpdate(update) =
+        a2a::handle_error(&context(None), &tonic::Status::unknown("broke"))
+    else {
+        panic!("expected a status update");
+    };
+    assert_eq!(update.status.state, a2a::STATE_FAILED);
+    assert_eq!(
+        update.status.message.as_ref().and_then(|m| m.text()),
+        Some("broke")
+    );
+}
+
+#[tokio::test]
+async fn an_executor_func_runs_the_function_and_cancels_honestly() {
+    let agent = a2a::ExecutorFunc::new(|ctx: ExecutorContext| {
+        let reply = format!("echo {}", a2a::request_text(&ctx));
+        a2a::once(a2a::status_event(
+            &ctx,
+            a2a::STATE_WORKING,
+            Some(a2a::agent_message(vec![a2a::text_part(reply)])),
+        ))
+    });
+
+    let events: Vec<_> = agent.execute(context(Some("hi"))).collect().await;
+    let Event::StatusUpdate(update) = events[0].as_ref().expect("an event") else {
+        panic!("expected a status update");
+    };
+    assert_eq!(update.status.state, TaskState::Working);
+    assert_eq!(
+        update.status.message.as_ref().and_then(|m| m.text()),
+        Some("echo hi")
+    );
+
+    let cancelled: Vec<_> = agent.cancel(context(None)).collect().await;
+    let Event::StatusUpdate(update) = cancelled[0].as_ref().expect("an event") else {
+        panic!("expected a status update");
+    };
+    assert_eq!(update.status.state, a2a::STATE_CANCELED);
 }

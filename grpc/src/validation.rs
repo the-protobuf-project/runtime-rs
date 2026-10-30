@@ -169,7 +169,7 @@ impl HybridServer {
     /// order they were chained — or validation last, after them, with
     /// [`HybridServer::with_validation_last`].
     pub(crate) fn message_chain(&self) -> Vec<Arc<dyn Interceptor>> {
-        let mut chain: Vec<_> = self.message_interceptors.iter().cloned().collect();
+        let mut chain = self.message_interceptors.to_vec();
         if let Some(validation) = self.validation() {
             if self.validation_last {
                 chain.push(validation);

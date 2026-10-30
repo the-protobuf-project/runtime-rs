@@ -1,116 +1,83 @@
-//! Assembling the card a client fetches first, and resolving the URLs that go on it.
+//! Assembling the card a client fetches first.
 //!
-//! The identity on it is the runtime's, not the agent's own, so the card and the process's
-//! other protocols cannot disagree about what this service is. Everything else here exists so
-//! the common case does not have to restate what the runtime already knows — that is how a
-//! card and the server behind it drift apart.
+//! A caller who already has a card — from a config file, a registry, or a signed manifest —
+//! sets [`ServerConfig::card`] and gets it back untouched. Everything else here exists so the
+//! common case does not have to: the identity, the skills, and the addresses the agent
+//! actually listens on are all things the config knows, and restating them in a card by hand
+//! is how the card and the server drift apart.
 
 use a2a::{AgentCard, AgentInterface};
 
 use crate::agents::Placement;
 
-use super::endpoint::{Endpoint, host_port_or_default};
+use super::DEFAULT_MODE;
+use super::config::ServerConfig;
+use super::endpoint::{Endpoint, public_url_for, server_endpoints};
 use super::service::Service;
-use super::{AGENT_CARD_PATH, DEFAULT_MODE, Transport};
+
+/// Assembles the public agent card from `cfg`.
+///
+/// The advertised URLs come from [`ServerConfig::public_url`] when it is set, because a
+/// server behind a proxy or inside a container cannot infer the address a client will use.
+/// Without one they fall back to the listen address, which is right for local development
+/// and wrong the moment there is a hop.
+pub fn build_card(cfg: &ServerConfig) -> AgentCard {
+    if let Some(card) = &cfg.card {
+        return card.clone();
+    }
+
+    let modes_or_default = |modes: &[String]| {
+        if modes.is_empty() {
+            vec![DEFAULT_MODE.to_string()]
+        } else {
+            modes.to_vec()
+        }
+    };
+
+    // Every transport the agent serves is declared, in configured order. A client picks from
+    // this list, so a transport served but unlisted is one nobody will use, and one listed
+    // but unserved is a failed dial.
+    let supported_interfaces = cfg
+        .resolved_transports()
+        .into_iter()
+        .map(|transport| {
+            AgentInterface::new(public_url_for(cfg, transport), transport.protocol_binding())
+        })
+        .collect();
+
+    AgentCard {
+        name: cfg.name.clone(),
+        description: cfg.description.clone(),
+        version: cfg.version.clone(),
+        supported_interfaces,
+        capabilities: cfg.capabilities.clone(),
+        default_input_modes: modes_or_default(&cfg.default_input_modes),
+        default_output_modes: modes_or_default(&cfg.default_output_modes),
+        // The field is required on the wire; a Vec is never null, so an agent with no skills
+        // still sends `[]` rather than a client-side failure that is hard to trace back here.
+        skills: cfg.skills.clone(),
+        provider: cfg.provider.clone(),
+        documentation_url: cfg.documentation_url.clone(),
+        icon_url: cfg.icon_url.clone(),
+        security_schemes: None,
+        security_requirements: None,
+        signatures: None,
+    }
+}
 
 impl Service {
-    /// The base URL clients should be told to use.
-    ///
-    /// [`crate::Config::public_url`] wins when it is set, because a server behind a proxy or
-    /// inside a container cannot infer the address a client will use. Without one this falls
-    /// back to the listen address, which is right locally and wrong past any hop.
-    pub(super) fn base_url(&self, placement: &Placement) -> String {
-        if placement.public_url.is_empty() {
-            format!("http://{}", host_port_or_default(&placement.addr))
-        } else {
-            placement.public_url.trim_end_matches('/').to_string()
-        }
-    }
-
-    /// Where a client should reach this agent over `transport`.
-    pub(super) fn url_for(&self, transport: Transport, base_url: &str) -> String {
-        if transport == Transport::Grpc {
-            // A gRPC target is host:port, not a URL. A scheme here is what turns a client's
-            // dial into a confusing name-resolution error.
-            return base_url
-                .split_once("://")
-                .map_or_else(|| base_url.to_string(), |(_, host)| host.to_string());
-        }
-        // REST routes on paths of its own beneath the base path; JSON-RPC answers at the base
-        // path itself. Both are reached through the same prefix.
-        format!("{base_url}{}", self.base_path)
-    }
-
-    /// Where this server publishes its card, or empty when it publishes none.
-    pub(super) fn card_url(&self, base_url: &str) -> String {
-        if !self.serve_agent_card {
-            return String::new();
-        }
-        // The card is at the host root by protocol, not under the agent's base path — clients
-        // look for exactly one place and this is it.
-        format!("{base_url}{AGENT_CARD_PATH}")
-    }
-
-    /// Every endpoint this agent resolves to, in the order they are advertised.
+    /// Every endpoint this agent resolves to at `placement`, in the order they are
+    /// advertised.
     ///
     /// An agent serving both JSON-RPC and gRPC has two, and a host printing a startup summary
     /// wants both lines.
     pub fn endpoints(&self, placement: &Placement) -> Vec<Endpoint> {
-        let base_url = self.base_url(placement);
-        let card_url = self.card_url(&base_url);
-        self.transports
-            .iter()
-            .map(|transport| Endpoint {
-                transport: *transport,
-                protocol: transport.protocol_binding(),
-                url: self.url_for(*transport, &base_url),
-                card_url: card_url.clone(),
-            })
-            .collect()
+        server_endpoints(&self.config_for(placement))
     }
 
-    /// Builds the card from the runtime's identity and this agent's skills, unless the caller
-    /// supplied one.
-    ///
-    /// A caller who already has a card — from a config file, a registry, or a signed manifest
-    /// — gets it back untouched, because rebuilding it would invalidate the signature.
+    /// Builds the card this agent serves at `placement`, from the runtime's identity and this
+    /// agent's skills, unless the caller supplied one.
     pub fn build_card(&self, placement: &Placement) -> AgentCard {
-        if let Some(card) = &self.card {
-            return card.clone();
-        }
-
-        let base_url = self.base_url(placement);
-        // Every transport the agent serves is declared, in configured order. A client picks
-        // from this list, so a transport served but unlisted is one nobody will use, and one
-        // listed but unserved is a failed dial.
-        let supported_interfaces = self
-            .transports
-            .iter()
-            .map(|transport| {
-                AgentInterface::new(
-                    self.url_for(*transport, &base_url),
-                    transport.protocol_binding(),
-                )
-            })
-            .collect();
-
-        AgentCard {
-            name: placement.identity.name.clone(),
-            description: placement.identity.description.clone(),
-            version: placement.identity.version.clone(),
-            supported_interfaces,
-            capabilities: self.capabilities.clone(),
-            default_input_modes: vec![DEFAULT_MODE.to_string()],
-            default_output_modes: vec![DEFAULT_MODE.to_string()],
-            // The field is required on the wire, and a null there is a client-side failure in
-            // a place that is hard to trace back to here.
-            skills: self.skills.clone(),
-            provider: self.provider.clone(),
-            documentation_url: self.documentation_url.clone(),
-            icon_url: self.icon_url.clone(),
-            security_schemes: None,
-            security_requirements: None,
-            signatures: None,
-        }
+        build_card(&self.config_for(placement))
     }
 }

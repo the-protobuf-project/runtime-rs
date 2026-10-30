@@ -103,6 +103,60 @@ pub fn once(event: StreamResponse) -> Events {
     Box::pin(stream::once(async move { Ok(event) }))
 }
 
+/// The task states an executor emits, re-exported under Go's names so a ported agent reads
+/// the same.
+pub const STATE_SUBMITTED: TaskState = TaskState::Submitted;
+/// The task is being worked on.
+pub const STATE_WORKING: TaskState = TaskState::Working;
+/// The agent needs more input from the client before it can go on.
+pub const STATE_INPUT_REQUIRED: TaskState = TaskState::InputRequired;
+/// The agent needs the client to authenticate before it can go on.
+pub const STATE_AUTH_REQUIRED: TaskState = TaskState::AuthRequired;
+/// The work finished. Terminal.
+pub const STATE_COMPLETED: TaskState = TaskState::Completed;
+/// The client stopped the work. Terminal.
+pub const STATE_CANCELED: TaskState = TaskState::Canceled;
+/// The work failed. Terminal.
+pub const STATE_FAILED: TaskState = TaskState::Failed;
+/// The agent declined the work. Terminal.
+pub const STATE_REJECTED: TaskState = TaskState::Rejected;
+
+/// Adapts a plain function to [`AgentExecutor`], for an agent with nothing to cancel — a
+/// request that either completes within one call or not at all.
+///
+/// Cancel yields a cancelled status and stops, which is the honest answer for work that is
+/// not interruptible: the client learns the task will produce nothing more, rather than
+/// waiting on an execution that ignored the request. An agent that can genuinely abort
+/// mid-flight should implement [`AgentExecutor`] itself.
+///
+/// Go's `ExecutorFunc` also receives a `context.Context`; the Rust SDK's executor carries no
+/// cancellation token, so neither does this.
+pub struct ExecutorFunc<F>(F);
+
+impl<F> ExecutorFunc<F>
+where
+    F: Fn(ExecutorContext) -> Events + Send + Sync + 'static,
+{
+    /// Wraps `f` as an executor.
+    pub fn new(f: F) -> Self {
+        Self(f)
+    }
+}
+
+impl<F> AgentExecutor for ExecutorFunc<F>
+where
+    F: Fn(ExecutorContext) -> Events + Send + Sync + 'static,
+{
+    fn execute(&self, ctx: ExecutorContext) -> Events {
+        (self.0)(ctx)
+    }
+
+    /// Reports the task cancelled without interrupting anything.
+    fn cancel(&self, ctx: ExecutorContext) -> Events {
+        once(status_event(&ctx, TaskState::Canceled, None))
+    }
+}
+
 /// The smallest useful agent: text in, text out, one reply per request.
 ///
 /// It exists because [`AgentExecutor`] is built for streaming — a sequence of events over a

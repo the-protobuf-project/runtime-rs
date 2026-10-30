@@ -33,7 +33,7 @@ mcp = [
     "dep:bytes",
     "dep:http-body",
 ]
-a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json", "dep:uuid", "dep:chrono"]
+a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json", "dep:uuid", "dep:chrono", "dep:a2a-grpc", "dep:a2a-pb", "dep:tower"]
 
 
 
@@ -61,6 +61,13 @@ rmcp = { version = "3.8", optional = true, features = [
 # of the core types with a git copy of the gRPC binding.
 a2a = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-lf", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
 a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-server-lf", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
+# The gRPC binding (`GrpcHandler`) and the generated `lf.a2a.v1` service it implements, from
+# the same pinned revision as the two crates above, so the proto the binding speaks is the one the core types model.
+# Default features are off: they only pick a TLS stack for the SDK's own client.
+a2a-grpc = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-grpc", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true, default-features = false }
+a2a-pb = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-pb", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
+# Probes a router for an existing route without running any handler on it.
+tower = { workspace = true, optional = true }
 
 futures = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }

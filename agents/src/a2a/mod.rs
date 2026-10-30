@@ -29,21 +29,52 @@
 //! # }
 //! ```
 
+//!
+//! # Serving without a runtime
+//!
+//! [`start_server`] serves one agent from a [`ServerConfig`] — on a listener of its own, or
+//! onto a host's [`crate::Mux`] and [`crate::GrpcRoutes`]. A [`Service`] registered on a
+//! runtime goes through the same function; the runtime only decides where.
+//!
+//! # Differences from the Go original
+//!
+//! - Go's `ServiceFrom(fn, opts...)` and `ServiceOption`s are [`Service::from_fn`] and chained
+//!   setters; `context.Context` is a [`tokio_util::sync::CancellationToken`].
+//! - The gRPC binding is the SDK's own (`a2a-grpc`, over the `lf.a2a.v1` service `a2a-pb`
+//!   generates from the protocol's `a2a.proto` at the pinned revision), registered on
+//!   [`crate::GrpcRoutes`] where Go registers on a `*grpc.Server`.
+//! - `HandlerOptions` and `TransportOptions` are structs naming what the Rust SDK can vary,
+//!   not variadic option lists; see [`HandlerOptions`] and [`TransportOptions`].
+//! - Go's `HandleError(ctx, err)` takes any `error`; here the error is a [`tonic::Status`],
+//!   and `None` stands for Go's `nil`.
+
 mod card;
+mod config;
 mod endpoint;
 mod error;
 mod executor;
+mod grpc;
+mod handler;
 mod serve;
 mod service;
 mod transport;
 
-pub use endpoint::{Endpoint, host_port_or_default, normalize_base_path, resolve_base_path};
-pub use error::{Error, error_text, handle_error, state_for_code};
-pub use executor::{
-    Events, TextAgent, agent_message, artifact_event, data_part, once, request_text, status_event,
-    text_part,
+pub use card::build_card;
+pub use config::{HandlerLayer, HandlerOptions, OnReady, ServerConfig, TransportOptions};
+pub use endpoint::{
+    Endpoint, host_port_or_default, normalize_base_path, resolve_base_path, server_endpoint,
+    server_endpoints,
 };
-pub use service::Service;
+pub use error::{Error, code_name, error_text, handle_error, state_for_code};
+pub use executor::{
+    Events, ExecutorFunc, STATE_AUTH_REQUIRED, STATE_CANCELED, STATE_COMPLETED, STATE_FAILED,
+    STATE_INPUT_REQUIRED, STATE_REJECTED, STATE_SUBMITTED, STATE_WORKING, TextAgent, agent_message,
+    artifact_event, data_part, once, request_text, status_event, text_part,
+};
+pub use grpc::{GRPC_SERVICE_NAME, pb, register_grpc};
+pub use handler::{Handler, new_request_handler};
+pub use serve::{SHUTDOWN_TIMEOUT, agent_card_handler, start_server};
+pub use service::{Service, ServiceFunc, service_fn};
 pub use transport::{Transport, parse_transports};
 
 use a2a_server::WELL_KNOWN_AGENT_CARD_PATH;

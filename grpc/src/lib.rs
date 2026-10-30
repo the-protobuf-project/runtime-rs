@@ -45,3 +45,6 @@ pub use stream_intercept::{StreamCall, StreamInterceptor, StreamNext};
 pub use types::{GatewayTarget, GrpcServiceFn, HttpGatewayFn, UnaryInterceptorFn};
 pub use validation::Validator;
 pub use validation::{ProtoValidator, ValidationInterceptor};
+
+mod a2a;
+pub use a2a::{A2aAgent, A2aServerConfig, A2aServiceFunc, A2aSkill};

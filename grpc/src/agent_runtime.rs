@@ -25,13 +25,26 @@ impl HybridServer {
     /// address of its own rather than sharing the runtime's. A process that wants them on
     /// one port builds a runtime directly instead of going through a `HybridServer`.
     pub(crate) async fn start_agents(&mut self, routes: &GrpcRoutes) -> Result<()> {
-        let mcp_groups = self.mcp_groups();
-        if self.agent_services.is_empty() && mcp_groups.is_empty() {
+        // Services registered directly start only when their protocol is enabled, as Go's
+        // `EnableMCP`/`EnableA2A` gate theirs. The MCP groups and A2A services built from the
+        // server's own options check their flag where they are built.
+        let services: Vec<Arc<dyn agents::Service>> = self
+            .agent_services
+            .iter()
+            .filter(|service| match service.protocol() {
+                agents::Protocol::Mcp => self.opts.enable_mcp,
+                agents::Protocol::A2a => self.opts.enable_a2a,
+            })
+            .cloned()
+            .chain(self.mcp_groups())
+            .chain(self.a2a_services())
+            .collect();
+        if services.is_empty() {
             tracing::debug!("agents: nothing registered, no runtime started");
             return Ok(());
         }
 
-        let runtime = self.agent_services.iter().cloned().chain(mcp_groups).fold(
+        let runtime = services.into_iter().fold(
             Runtime::new(Config {
                 identity: Identity {
                     name: self.opts.service_name.clone(),

@@ -146,25 +146,6 @@ async fn an_agent_and_a_tool_server_share_one_listener() {
 }
 
 #[tokio::test]
-async fn the_grpc_transport_refuses_rather_than_silently_not_serving() {
-    let runtime = Runtime::new(Config {
-        identity: Identity {
-            name: "grpc-agent".into(),
-            ..Default::default()
-        },
-        host: "127.0.0.1".into(),
-        port: free_port().await,
-        grpc_routes: Some(agents::GrpcRoutes::new()),
-        ..Default::default()
-    })
-    .register(a2a_svc::Service::new(EchoAgent, vec![]).transports([a2a_svc::Transport::Grpc]));
-
-    let err = runtime.start(CancellationToken::new()).await.unwrap_err();
-    let message = err.to_string();
-    assert!(message.contains("gRPC transport"), "{message}");
-}
-
-#[tokio::test]
 async fn transports_parse_from_an_environment_style_list() {
     assert_eq!(
         a2a_svc::parse_transports("jsonrpc, grpc ,nonsense,rest"),

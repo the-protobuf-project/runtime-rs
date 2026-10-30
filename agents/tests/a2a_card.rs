@@ -126,17 +126,136 @@ fn a_base_path_is_rooted_and_unslashed_whatever_was_written() {
 }
 
 #[test]
+fn a_base_path_is_cleaned_the_way_go_cleans_it() {
+    use agents::a2a::normalize_base_path;
+    // Go runs path.Clean, so doubled slashes, dot segments and climbs resolve the same way.
+    assert_eq!(normalize_base_path("//a2a//v1/"), "/a2a/v1");
+    assert_eq!(normalize_base_path("/a2a/./v1"), "/a2a/v1");
+    assert_eq!(normalize_base_path("/a2a/x/../v1"), "/a2a/v1");
+    assert_eq!(normalize_base_path("/../.."), "/");
+    assert_eq!(normalize_base_path("."), "/");
+}
+
+#[test]
 fn a_generated_base_path_wins_over_a_configured_one() {
-    use agents::a2a::resolve_base_path;
+    use agents::a2a::{ServerConfig, resolve_base_path};
+    let cfg = |generated: &str, configured: &str| ServerConfig {
+        generated_base_path: generated.into(),
+        base_path: configured.into(),
+        ..Default::default()
+    };
     // A generated path is part of a contract clients already hold; a hand-set one is a
     // preference.
     assert_eq!(
-        resolve_base_path(Some("/todo/v1/agent"), Some("/mine")),
+        resolve_base_path(&cfg("/todo/v1/agent", "/mine"), ""),
         "/todo/v1/agent"
     );
-    assert_eq!(resolve_base_path(None, Some("/mine")), "/mine");
-    assert_eq!(resolve_base_path(None, None), a2a::DEFAULT_BASE_PATH);
-    assert_eq!(resolve_base_path(Some("  "), Some("/mine")), "/mine");
+    assert_eq!(resolve_base_path(&cfg("", "/mine"), ""), "/mine");
+    assert_eq!(resolve_base_path(&cfg("", ""), ""), a2a::DEFAULT_BASE_PATH);
+    assert_eq!(resolve_base_path(&cfg("  ", "/mine"), ""), "/mine");
+    // The caller's generated default outranks both.
+    assert_eq!(
+        resolve_base_path(&cfg("/gen", "/mine"), "/first/"),
+        "/first"
+    );
+}
+
+#[test]
+fn a_card_url_is_empty_only_when_a_host_mux_serves_the_card() {
+    use agents::a2a::{ServerConfig, server_endpoints};
+    let off = ServerConfig {
+        addr: "127.0.0.1:9000".into(),
+        serve_agent_card: false,
+        ..Default::default()
+    };
+    // Without a mux the server owns its listener and always serves the card.
+    assert_eq!(
+        server_endpoints(&off)[0].card_url,
+        "http://127.0.0.1:9000/.well-known/agent-card.json"
+    );
+    let shared = ServerConfig {
+        mux: Some(agents::Mux::new()),
+        ..off
+    };
+    assert!(server_endpoints(&shared)[0].card_url.is_empty());
+}
+
+#[test]
+fn the_preferred_endpoint_is_the_first_transport() {
+    use agents::a2a::{ServerConfig, server_endpoint};
+    let cfg = ServerConfig {
+        transports: vec![Transport::Grpc, Transport::JsonRpc],
+        addr: "127.0.0.1:50051".into(),
+        ..Default::default()
+    };
+    let first = server_endpoint(&cfg).expect("an endpoint");
+    assert_eq!(first.transport, Transport::Grpc);
+    assert_eq!(first.url, "127.0.0.1:50051");
+
+    // The singular field is the common case; the list wins when both are set.
+    let single = ServerConfig {
+        transport: Some(Transport::Rest),
+        ..Default::default()
+    };
+    assert_eq!(server_endpoint(&single).unwrap().transport, Transport::Rest);
+    assert_eq!(
+        server_endpoint(&ServerConfig::default()).unwrap().url,
+        "http://127.0.0.1:9000/a2a"
+    );
+}
+
+#[test]
+fn a_public_url_replaces_the_path_as_go_does() {
+    use agents::a2a::{ServerConfig, server_endpoints};
+    let cfg = ServerConfig {
+        public_url: "https://agents.example.com/ignored/".into(),
+        transports: vec![Transport::JsonRpc, Transport::Grpc],
+        ..Default::default()
+    };
+    let endpoints = server_endpoints(&cfg);
+    assert_eq!(endpoints[0].url, "https://agents.example.com/a2a");
+    assert_eq!(endpoints[1].url, "agents.example.com");
+    assert_eq!(
+        endpoints[0].card_url,
+        "https://agents.example.com/.well-known/agent-card.json"
+    );
+}
+
+#[test]
+fn default_modes_are_configurable() {
+    use agents::a2a::{ServerConfig, build_card};
+    let card = build_card(&ServerConfig {
+        default_input_modes: vec!["application/json".into()],
+        ..Default::default()
+    });
+    assert_eq!(card.default_input_modes, vec!["application/json"]);
+    assert_eq!(card.default_output_modes, vec!["text/plain"]);
+
+    let service = a2a::Service::new(echo_agent(), vec![])
+        .default_output_modes(["image/png".to_string()])
+        .provider(a2a::Provider {
+            organization: "Acme".into(),
+            url: "https://acme.example".into(),
+        })
+        .documentation_url("https://docs.example")
+        .icon_url("https://icon.example/i.png");
+    let card = service.build_card(&placement("127.0.0.1:9000", ""));
+    assert_eq!(card.default_output_modes, vec!["image/png"]);
+    assert_eq!(card.provider.unwrap().organization, "Acme");
+    assert_eq!(
+        card.documentation_url.as_deref(),
+        Some("https://docs.example")
+    );
+    assert_eq!(card.icon_url.as_deref(), Some("https://icon.example/i.png"));
+}
+
+#[test]
+fn an_ipv6_listen_address_keeps_its_brackets() {
+    use agents::a2a::host_port_or_default;
+    assert_eq!(host_port_or_default("[::1]:9000"), "[::1]:9000");
+    assert_eq!(host_port_or_default("[::]:9000"), "127.0.0.1:9000");
+    assert_eq!(host_port_or_default(":9000"), "127.0.0.1:9000");
+    assert_eq!(host_port_or_default("example.com"), "example.com");
 }
 
 #[tokio::test]
