@@ -73,6 +73,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 rustls-pemfile = "2"
 tokio-rustls = "0.26"
 
+# Rich error details (google.rpc.ErrorInfo, BadRequest, ...) on gRPC statuses.
+tonic-types = "0.14"
+# The buf.validate rules engine: reads the rules from the descriptors at runtime and
+# checks a prost-reflect message against them, which is what protovalidate does in Go.
+prost-protovalidate = "0.6"
+# Idempotency key names are a SHA-256 of (method, request_id), as in Go.
+sha2 = "0.10"
+# Compiles the test protos; dev-only.
+tonic-prost-build = "0.14"
+
 # Dev-only, but pinned here so every crate tests against the same versions.
 tokio-test = "0.4"
 wiremock = "0.6"

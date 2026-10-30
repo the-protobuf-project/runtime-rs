@@ -59,6 +59,9 @@ unicode-width = { workspace = true }
 async-trait = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry-http = { workspace = true }
+tonic-types = { workspace = true }
+prost-protovalidate = { workspace = true }
+sha2 = { workspace = true }
 
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
@@ -70,3 +73,5 @@ reqwest = { workspace = true }
 agents = { workspace = true }
 unicode-width = { workspace = true }
 opentelemetry_sdk = { version = "0.33", features = ["testing", "trace", "metrics"] }
+tonic-prost = { workspace = true }
+tonic-prost-build = { workspace = true }

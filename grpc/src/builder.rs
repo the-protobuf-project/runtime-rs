@@ -201,8 +201,13 @@ impl HybridServer {
 
     /// Enables protovalidate request validation for every unary RPC the server dispatches.
     ///
-    /// The interceptor is built during [`HybridServer::start`] and runs before the
-    /// caller-supplied chain, unless [`HybridServer::with_validation_last`] moved it.
+    /// The request is checked against its `buf.validate` rules by
+    /// [`crate::validation::ProtoValidator`]; a violation is `INVALID_ARGUMENT` with a
+    /// `BadRequest` detail per field (see [`crate::validation_hints`]). The rules are read
+    /// from the descriptor sets registered with [`HybridServer::with_reflection`]. The
+    /// interceptor is built during [`HybridServer::start`] and runs before every
+    /// [`HybridServer::with_interceptor`], unless [`HybridServer::with_validation_last`]
+    /// moved it to the end.
     #[must_use]
     pub fn with_validation(mut self) -> Self {
         self.enable_validation = true;
@@ -211,8 +216,8 @@ impl HybridServer {
 
     /// Supplies the rules engine [`HybridServer::with_validation`] runs, and enables it.
     ///
-    /// Go's validation is protovalidate, found in the global registry; Rust has no such
-    /// engine yet, so the caller names one. See [`crate::validation`].
+    /// Use it to replace the default `buf.validate` engine with another check — a
+    /// hand-written rule, or the engine with options of its own. See [`crate::validation`].
     #[must_use]
     pub fn with_validator(mut self, validator: impl Validator) -> Self {
         self.validator = Some(Arc::new(validator));

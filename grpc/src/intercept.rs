@@ -125,6 +125,20 @@ pub struct UnaryReply {
 }
 
 impl UnaryReply {
+    /// A reply the interceptor answers with itself, without calling the service — a cached
+    /// or replayed response. `descriptor` is the method's output type, when known, so the
+    /// interceptors before this one can still [`UnaryReply::message`] it.
+    #[must_use]
+    pub fn new(payload: Bytes, descriptor: Option<MessageDescriptor>) -> Self {
+        Self {
+            metadata: MetadataMap::new(),
+            trailers: MetadataMap::new(),
+            payload,
+            compressed: false,
+            descriptor,
+        }
+    }
+
     /// The encoded response message.
     #[must_use]
     pub fn payload(&self) -> &Bytes {

@@ -47,7 +47,7 @@ impl HybridServer {
 
         let chain = self.interceptor_chain();
         let messages = InterceptLayer::new(
-            self.message_interceptors.clone(),
+            self.message_chain(),
             crate::intercept::descriptor_pool(&self.descriptor_sets),
         );
         let streams = crate::stream_intercept::StreamInterceptLayer::new(
@@ -100,27 +100,11 @@ impl HybridServer {
         Ok(())
     }
 
-    /// The unary interceptor chain: validation first, unless it has no engine, then the
-    /// caller's interceptors in the order they were chained. With
-    /// [`HybridServer::with_validation_last`], validation goes last instead.
+    /// The metadata-level unary interceptor chain: the caller's interceptors in the order
+    /// they were chained. Validation is message-level; see [`HybridServer::message_chain`].
     fn interceptor_chain(&self) -> Option<crate::types::UnaryInterceptorFn> {
         let mut chain = Vec::new();
-        if self.enable_validation {
-            match &self.validator {
-                Some(validator) => {
-                    chain.push(crate::validation::validation_interceptor(validator.clone()));
-                }
-                None => tracing::warn!(
-                    "gRPC: validation was enabled with no validator — call \
-                     HybridServer::with_validator to supply one"
-                ),
-            }
-        }
         chain.extend(self.interceptors.iter().cloned());
-        // Moved rather than pushed last above, so the no-engine case keeps one path.
-        if self.validation_last && self.enable_validation && self.validator.is_some() {
-            chain.rotate_left(1);
-        }
         match chain.len() {
             0 => None,
             1 => chain.pop(),

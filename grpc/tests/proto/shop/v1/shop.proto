@@ -1,0 +1,131 @@
+// A small API the error/validation tests run against: shelves and the books on them,
+// carrying the annotations the interceptors read — buf.validate rules, google.api.resource
+// patterns, google.api.http bindings, and the request_id / validate_only fields AIP-155
+// idempotency keys on.
+//
+// The generated code and descriptor set live in ../../fixtures; regenerate them with
+//   cargo test -p tpp-grpc --test fixtures_regen -- --ignored
+syntax = "proto3";
+
+package shop.v1;
+
+import "buf/validate/validate.proto";
+import "google/api/annotations.proto";
+import "google/api/resource.proto";
+
+service ShopService {
+  rpc GetShelf(GetShelfRequest) returns (Shelf) {
+    option (google.api.http) = {get: "/v1/{name=shelves/*}"};
+  }
+  rpc ListShelves(ListShelvesRequest) returns (ListShelvesResponse) {
+    option (google.api.http) = {get: "/v1/shelves"};
+  }
+  rpc GetBook(GetBookRequest) returns (Book) {
+    option (google.api.http) = {get: "/v1/{name=shelves/*/books/*}"};
+  }
+  rpc ListBooks(ListBooksRequest) returns (ListBooksResponse) {
+    option (google.api.http) = {get: "/v1/{parent=shelves/*}/books"};
+  }
+  rpc CreateBook(CreateBookRequest) returns (Book) {
+    option (google.api.http) = {
+      post: "/v1/{parent=shelves/*}/books"
+      body: "book"
+    };
+  }
+  rpc UpdateShelf(UpdateShelfRequest) returns (Shelf) {
+    option (google.api.http) = {
+      patch: "/v1/{shelf.name=shelves/*}"
+      body: "shelf"
+    };
+  }
+  rpc UndeleteShelf(UndeleteShelfRequest) returns (Shelf) {
+    option (google.api.http) = {
+      post: "/v1/{name=shelves/*}:undelete"
+      body: "*"
+    };
+  }
+}
+
+message Shelf {
+  option (google.api.resource) = {
+    type: "shop.example.com/Shelf"
+    pattern: "shelves/{shelf}"
+    singular: "shelf"
+    plural: "shelves"
+  };
+  string name = 1;
+  string theme = 2;
+}
+
+message Book {
+  option (google.api.resource) = {
+    type: "shop.example.com/Book"
+    pattern: "shelves/{shelf}/books/{book}"
+    singular: "book"
+    plural: "books"
+  };
+  string name = 1;
+  string title = 2;
+}
+
+message BookCase {
+  option (google.api.resource) = {
+    type: "shop.example.com/BookCase"
+    pattern: "bookCases/{book_case}"
+    singular: "bookCase"
+    plural: "bookCases"
+  };
+  string name = 1;
+}
+
+message GetShelfRequest {
+  // No rules: the hints tests send names of every shape through it.
+  string name = 1 [(google.api.resource_reference).type = "shop.example.com/Shelf"];
+}
+
+message ListShelvesRequest {}
+
+message ListShelvesResponse {
+  repeated Shelf shelves = 1;
+}
+
+message GetBookRequest {
+  string name = 1 [
+    (google.api.resource_reference).type = "shop.example.com/Book",
+    (buf.validate.field).required = true
+  ];
+}
+
+message ListBooksRequest {
+  // A parent is described by its child's pattern less the last collection.
+  string parent = 1 [
+    (google.api.resource_reference).child_type = "shop.example.com/Book",
+    (buf.validate.field).string.pattern = "^shelves/[^/]+$"
+  ];
+  int32 page_size = 2 [(buf.validate.field).int32.gte = 0];
+  // A pattern no resource explains is rewritten from the regex itself.
+  string label = 3 [(buf.validate.field).string.pattern = "^labels/[^/]+$"];
+}
+
+message ListBooksResponse {
+  repeated Book books = 1;
+}
+
+message CreateBookRequest {
+  string parent = 1 [
+    (google.api.resource_reference).child_type = "shop.example.com/Book",
+    (buf.validate.field).string.pattern = "^shelves/[^/]+$"
+  ];
+  string book_id = 2;
+  Book book = 3;
+  string request_id = 4;
+  bool validate_only = 5;
+}
+
+message UpdateShelfRequest {
+  Shelf shelf = 1;
+}
+
+message UndeleteShelfRequest {
+  string name = 1;
+}

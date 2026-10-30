@@ -135,12 +135,13 @@ async fn a_validator_over_the_tcp_listener_is_told_the_method() {
         enable_health: true,
         ..Default::default()
     })
-    .with_validator(
-        move |method: &str, _metadata: &tonic::metadata::MetadataMap| -> Result<(), Status> {
-            recorder.lock().unwrap().push(method.to_string());
-            Ok(())
-        },
-    );
+    .with_validator(move |call: &UnaryCall| -> Result<(), Status> {
+        recorder
+            .lock()
+            .unwrap()
+            .push(call.full_method().to_string());
+        Ok(())
+    });
     server.start().await.expect("the server starts");
 
     let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{grpc_port}"))

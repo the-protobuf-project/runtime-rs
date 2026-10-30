@@ -1,11 +1,14 @@
-//! `with_validation_last` moves validation behind the caller's unary interceptors, so an
-//! unauthenticated caller learns it is unauthenticated before it learns anything else.
+//! `with_validation_last` moves validation behind the caller's message-level interceptors,
+//! so an unauthenticated caller learns it is unauthenticated before it learns anything else.
+//!
+//! Validation is a message-level interceptor, so the order it changes is against
+//! [`HybridServer::with_interceptor`]. Metadata-level interceptors registered with
+//! `with_unary_interceptor` run before the whole message chain either way.
 
 use std::net::TcpListener;
-use std::sync::Arc;
 
-use grpc::HybridServer;
 use grpc::options::{Endpoint, Options};
+use grpc::{HybridServer, Interceptor, Next, UnaryCall, UnaryReply};
 use tonic::Status;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
@@ -17,18 +20,20 @@ fn free_port() -> u16 {
         .expect("a free port")
 }
 
-fn authenticate(request: tonic::Request<()>) -> Result<tonic::Request<()>, Status> {
-    if request.metadata().contains_key("authorization") {
-        Ok(request)
-    } else {
-        Err(Status::unauthenticated("who are you?"))
+/// Refuses any call without an `authorization` header.
+struct Authenticate;
+
+#[async_trait::async_trait]
+impl Interceptor for Authenticate {
+    async fn intercept(&self, call: UnaryCall, next: Next<'_>) -> Result<UnaryReply, Status> {
+        if !call.metadata.contains_key("authorization") {
+            return Err(Status::unauthenticated("who are you?"));
+        }
+        next.run(call).await
     }
 }
 
-fn refuse_everything(
-    _method: &str,
-    _metadata: &tonic::metadata::MetadataMap,
-) -> Result<(), Status> {
+fn refuse_everything(_call: &UnaryCall) -> Result<(), Status> {
     Err(Status::invalid_argument("every field is wrong"))
 }
 
@@ -42,7 +47,7 @@ async fn anonymous_check(last: bool) -> tonic::Code {
         enable_health: true,
         ..Default::default()
     })
-    .with_unary_interceptor(Arc::new(authenticate))
+    .with_interceptor(Authenticate)
     .with_validator(refuse_everything);
     if last {
         server = server.with_validation_last();
