@@ -17,6 +17,7 @@ pub mod idempotency;
 pub mod intercept;
 mod lifecycle;
 pub mod loopback;
+mod mcp_options;
 pub mod observe;
 pub mod options;
 mod otel;

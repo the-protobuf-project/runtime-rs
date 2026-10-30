@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use rmcp::model::{CompleteResult, CompletionInfo};
+use rmcp::model::{CompleteRequestParams, CompleteResult, CompletionInfo, Reference};
 
 /// Serves autocomplete values for prompt arguments, keyed by `"promptName:argName"`.
 ///
@@ -20,6 +20,20 @@ impl EnumCompletions {
     /// Whether anything was declared.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Answers a `completion/complete` request, as Go's `CompletionHandlerFromEnums` does:
+    /// only a prompt reference is answered from prompt argument values, so a resource
+    /// reference completes to an empty list.
+    pub fn complete_request(&self, request: &CompleteRequestParams) -> CompleteResult {
+        match &request.r#ref {
+            Reference::Prompt(prompt) => self.complete(
+                &prompt.name,
+                &request.argument.name,
+                &request.argument.value,
+            ),
+            _ => CompleteResult::default(),
+        }
     }
 
     /// The completions for one prompt argument, narrowed by `typed`.

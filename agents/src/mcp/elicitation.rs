@@ -1,19 +1,107 @@
 //! Asking the user for input in the middle of a tool call.
 //!
-//! # How this differs from the Go runtime
+//! # Two ways to ask
 //!
-//! Go implements the SEP-2322 handshake by hand: a handler returns a result carrying an
-//! `InputRequests` map, the client answers, and the handler runs a second time. rmcp models
-//! elicitation as an ordinary server-to-client request instead — [`elicit`] awaits the answer
-//! inline — so there is no pending result to return and no second invocation to guard
-//! against. `ElicitRequestId` and `RunElicitation`'s two-phase shape have no counterpart here
-//! because the round trip they exist to manage is handled by the SDK.
+//! [`run_elicitation`] is the SEP-2322 handshake Go uses: a handler returns a result carrying
+//! an `InputRequests` map, the client answers, and the handler runs a second time with the
+//! answer in `input_responses`. A client on a protocol older than 2026-07-28 never sees that:
+//! the hosting layer (see [`crate::mcp::Service`]) performs the round trip for it over an
+//! ordinary server-to-client request and reinvokes the handler, as Go's SDK does, so a
+//! handler needs only the one code path.
+//!
+//! [`elicit`] is rmcp's ordinary server-to-client request, for a handler that wants to await
+//! the answer inline on a legacy client that allows it.
+
+use std::collections::BTreeMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use rmcp::model::{
-    ElicitRequestParams, ElicitationAction, ElicitationSchema, PrimitiveSchemaDefinition,
+    CallToolRequestParams, ElicitRequest, ElicitRequestParams, ElicitResult, ElicitationAction,
+    ElicitationSchema, InputRequest, InputRequiredResult, PrimitiveSchemaDefinition,
 };
 use rmcp::service::{Peer, RoleServer};
 use serde_json::{Map, Value};
+
+/// The input-request id a confirmation elicitation is attached under, and under which the
+/// client echoes its answer in `input_responses`.
+pub const ELICIT_REQUEST_ID: &str = "elicitation";
+
+/// Called before an elicitation is asked, so a caller can change its fields at runtime —
+/// injecting dynamic enum values, say. It is given the tool name; an error aborts the call.
+///
+/// A hosted service puts the hook it was configured with on each tool call's
+/// `RequestContext::extensions`, where a handler finds it with
+/// `context.extensions.get::<ElicitHook>()`.
+pub type ElicitHook = Arc<
+    dyn Fn(
+            String,
+            Vec<ElicitField>,
+        ) -> Pin<Box<dyn Future<Output = Result<Vec<ElicitField>, tonic::Status>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Where one tool call stands in the [`run_elicitation`] handshake.
+#[derive(Debug, Clone)]
+pub enum Elicitation {
+    /// The client answered. Anything but an accepting action means the user declined.
+    Answered(ElicitResult),
+    /// No answer yet. Return this from the handler unchanged to ask the client.
+    Pending(InputRequiredResult),
+}
+
+/// Advances the multi round-trip elicitation handshake for one tool call, building the form
+/// from `fields`.
+///
+/// # Errors
+///
+/// The client answered under [`ELICIT_REQUEST_ID`] with something that is not an elicitation
+/// result.
+pub fn run_elicitation(
+    request: &CallToolRequestParams,
+    message: &str,
+    fields: &[ElicitField],
+) -> Result<Elicitation, String> {
+    if let Some(response) = request
+        .input_responses
+        .as_ref()
+        .and_then(|responses| responses.get(ELICIT_REQUEST_ID))
+    {
+        return serde_json::from_value(response.clone())
+            .map(Elicitation::Answered)
+            .map_err(|err| format!("elicitation {message:?}: bad input response: {err}"));
+    }
+    let params = ElicitRequestParams::FormElicitationParams {
+        meta: None,
+        message: message.to_string(),
+        requested_schema: elicit_schema(fields),
+    };
+    let requests = BTreeMap::from([(
+        ELICIT_REQUEST_ID.to_string(),
+        InputRequest::Elicitation(ElicitRequest::new(params)),
+    )]);
+    Ok(Elicitation::Pending(InputRequiredResult::new(
+        Some(requests),
+        None,
+    )))
+}
+
+/// The fields of a form that `arguments` does not already carry: absent, null or an empty
+/// string. A static elicitation with `ask_missing_only` asks only these and is skipped when
+/// none are left, so a caller who said everything is not asked again.
+pub fn missing_elicit_fields(arguments: &Value, fields: &[ElicitField]) -> Vec<ElicitField> {
+    fields
+        .iter()
+        .filter(|field| match arguments.get(&field.name) {
+            None | Some(Value::Null) => true,
+            Some(Value::String(text)) => text.is_empty(),
+            Some(_) => false,
+        })
+        .cloned()
+        .collect()
+}
 
 /// One field on an elicitation form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

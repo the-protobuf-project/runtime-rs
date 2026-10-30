@@ -87,11 +87,73 @@ fn a_grpc_failure_keeps_its_code_in_the_payload() {
     let result = mcp::handle_error(&tonic::Status::not_found("no such todo"));
     assert_eq!(result.is_error, Some(true));
 
-    let text = serde_json::to_string(&result.content).expect("content serialises");
-    assert!(text.contains("NOT_FOUND"), "code should survive: {text}");
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content[0].as_text().expect("a text block").text)
+            .expect("the payload is JSON");
+    // Go's codes.Code.String(), which is what clients of the Go runtime already parse.
+    assert_eq!(payload["code"], "NotFound");
+    assert_eq!(payload["message"], "no such todo");
     assert!(
-        text.contains("no such todo"),
-        "message should survive: {text}"
+        payload.get("details").is_none(),
+        "empty details are omitted: {payload}"
+    );
+}
+
+#[test]
+fn every_code_is_spelled_as_go_spells_it() {
+    assert_eq!(
+        mcp::code_string(tonic::Code::PermissionDenied),
+        "PermissionDenied"
+    );
+    assert_eq!(mcp::code_string(tonic::Code::Cancelled), "Canceled");
+    assert_eq!(mcp::code_string(tonic::Code::Ok), "OK");
+}
+
+#[test]
+fn status_details_reach_the_payload() {
+    use tonic_types::{ErrorDetails, StatusExt};
+
+    let mut details = ErrorDetails::with_error_info(
+        "QUOTA",
+        "example.com",
+        [("limit".to_string(), "5".to_string())],
+    );
+    details.add_bad_request_violation("name", "must not be empty");
+    let status =
+        tonic::Status::with_error_details(tonic::Code::InvalidArgument, "bad request", details);
+
+    let result = mcp::handle_error(&status);
+    let payload: serde_json::Value =
+        serde_json::from_str(&result.content[0].as_text().expect("a text block").text)
+            .expect("the payload is JSON");
+    assert_eq!(payload["code"], "InvalidArgument");
+    let details = payload["details"].as_array().expect("details");
+    assert!(
+        details.iter().any(|d| d["reason"] == "QUOTA"
+            && d["domain"] == "example.com"
+            && d["metadata"]["limit"] == "5"),
+        "{payload}"
+    );
+    assert!(
+        details
+            .iter()
+            .any(|d| d["field_violations"][0]["field"] == "name"),
+        "{payload}"
+    );
+}
+
+#[test]
+fn any_error_with_a_status_inside_keeps_its_code() {
+    let status = tonic::Status::unavailable("down");
+    let result = mcp::handle_any_error(&status);
+    let text = &result.content[0].as_text().expect("text").text;
+    assert!(text.contains("\"Unavailable\""), "{text}");
+
+    let plain = std::io::Error::other("disk on fire");
+    let result = mcp::handle_any_error(&plain);
+    assert_eq!(
+        result.content[0].as_text().expect("text").text,
+        "disk on fire"
     );
 }
 

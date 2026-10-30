@@ -87,6 +87,9 @@ pub struct HybridServer {
     pub(crate) validation_last: bool,
 
     pub(crate) state: Mutex<Running>,
+
+    /// The MCP services and how they are served; see `crate::mcp_options`.
+    pub(crate) mcp: crate::mcp_options::McpSettings,
 }
 
 impl HybridServer {
@@ -122,6 +125,7 @@ impl HybridServer {
             stream_interceptors: Vec::new(),
             validation_last: false,
             state: Mutex::new(Running::default()),
+            mcp: crate::mcp_options::McpSettings::default(),
         }
     }
 

@@ -13,6 +13,13 @@ use axum::extract::Request;
 use axum::middleware::Next;
 use axum::response::Response;
 
+mod incoming;
+
+pub use incoming::{
+    CallContext, apply_call_context, current_call_context, forward_metadata, incoming_headers,
+    with_call_context,
+};
+
 /// Names one HTTP header to read and the gRPC metadata key to write it as.
 ///
 /// Mappings are explicit rather than a blanket copy because the two namespaces are not the

@@ -67,8 +67,56 @@ impl tower::Service<http::Request<Body>> for Loopback {
         tower::Service::<http::Request<Body>>::poll_ready(&mut self.inner, cx)
     }
 
-    fn call(&mut self, request: http::Request<Body>) -> Self::Future {
+    fn call(&mut self, mut request: http::Request<Body>) -> Self::Future {
+        // A call made while serving an MCP tool carries that caller's headers, as Go's
+        // `ForwardMetadata` puts them on the outgoing context, so the chain below sees them.
+        agents::shared::apply_call_context(request.headers_mut());
         self.inner.call(request)
+    }
+}
+
+impl Loopback {
+    /// A loopback that reaches whatever `slot` holds when it is called.
+    ///
+    /// The agent protocols are built before the gRPC routes are final — A2A registers on
+    /// them — so an MCP service is handed this and the server fills the slot once the real
+    /// loopback exists. Calls made before then, which only a misbehaving service could
+    /// make, are answered `UNAVAILABLE`.
+    pub(crate) fn deferred(slot: LoopbackSlot) -> Self {
+        let service = tower::service_fn(move |request: http::Request<Body>| {
+            let current = slot.get();
+            async move {
+                match current {
+                    Some(mut loopback) => {
+                        tower::Service::<http::Request<Body>>::call(&mut loopback.inner, request)
+                            .await
+                    }
+                    None => Ok(
+                        tonic::Status::unavailable("the gRPC server is not running").into_http()
+                    ),
+                }
+            }
+        });
+        Self {
+            inner: tower::util::BoxCloneSyncService::new(service),
+            intercepted: true,
+        }
+    }
+}
+
+/// Where the running server's [`Loopback`] is published for [`Loopback::deferred`].
+#[derive(Clone, Default)]
+pub(crate) struct LoopbackSlot(std::sync::Arc<std::sync::RwLock<Option<Loopback>>>);
+
+impl LoopbackSlot {
+    /// Publishes the loopback of the server that just started.
+    pub(crate) fn set(&self, loopback: Loopback) {
+        *self.0.write().expect("grpc: loopback slot poisoned") = Some(loopback);
+    }
+
+    /// The published loopback, if the server is running.
+    fn get(&self) -> Option<Loopback> {
+        self.0.read().expect("grpc: loopback slot poisoned").clone()
     }
 }
 

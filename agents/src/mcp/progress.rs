@@ -1,16 +1,118 @@
 //! Progress notifications for a tool call that streams.
 //!
 //! A server-streaming RPC exposed as an MCP tool reports incremental progress through this,
-//! so a client watching a long call sees movement rather than a stall.
-//!
-//! Go's runtime also carries an `InProcessServerStream` here, because a Go streaming handler
-//! is *handed* a `grpc.ServerStream` to write into, and calling one in-process means supplying
-//! that sink. A tonic streaming handler instead *returns* a `Stream`, so generated code just
-//! consumes what the method already gave it — there is nothing for an adapter to bridge, which
-//! is why this module has no counterpart to it.
+//! so a client watching a long call sees movement rather than a stall. Chunks arrive as a
+//! generated `MCPProgress`, which [`ProgressMessage`] reads without tying this crate to any
+//! one build of that schema; [`crate::mcp::InProcessServerStream`] carries them in-process.
 
-use rmcp::model::{ProgressNotificationParam, ProgressToken};
+use rmcp::model::{
+    NotificationMetaObject, NumberOrString, ProgressNotificationParam, ProgressToken,
+};
 use rmcp::service::{Peer, RoleServer};
+use serde_json::{Map, Value};
+
+/// The shape of a generated `mcp.v1.MCPProgress`.
+///
+/// It is a trait rather than the generated struct for the reason Go's is an interface: a
+/// dependency on one build of the annotations would clash with a differently-built one in the
+/// same binary. The token and meta accessors default to empty because older schemas have
+/// neither; a total of 0 is what the spec means by unknown.
+pub trait ProgressMessage: Send + Sync {
+    /// The progress so far.
+    fn progress(&self) -> f64;
+    /// What to show alongside it. Empty means nothing.
+    fn message(&self) -> &str;
+    /// The expected final value, or 0 when unknown.
+    fn total(&self) -> f64;
+    /// The chunk's own string token, which wins over the request's.
+    fn token_string(&self) -> &str {
+        ""
+    }
+    /// The chunk's own integer token, which wins over the request's.
+    fn token_int(&self) -> i64 {
+        0
+    }
+    /// Arbitrary metadata carried alongside the update, as the notification's `_meta`.
+    fn meta(&self) -> Map<String, Value> {
+        Map::new()
+    }
+}
+
+/// Maps a chunk onto the notification a client receives.
+///
+/// `fallback` is the request's token; a chunk carrying its own overrides it, so a gRPC
+/// server fanning one stream out to several MCP requests can tag each chunk.
+pub fn progress_params(
+    fallback: ProgressToken,
+    chunk: &dyn ProgressMessage,
+) -> ProgressNotificationParam {
+    let token = if !chunk.token_string().is_empty() {
+        ProgressToken(NumberOrString::String(chunk.token_string().into()))
+    } else if chunk.token_int() != 0 {
+        ProgressToken(NumberOrString::Number(chunk.token_int()))
+    } else {
+        fallback
+    };
+    let mut params = ProgressNotificationParam::new(token, chunk.progress());
+    if chunk.total() != 0.0 {
+        params = params.with_total(chunk.total());
+    }
+    if !chunk.message().is_empty() {
+        params = params.with_message(chunk.message().to_string());
+    }
+    let meta = chunk.meta();
+    if !meta.is_empty() {
+        params.meta = Some(NotificationMetaObject(rmcp::model::MetaObject(meta)));
+    }
+    params
+}
+
+/// Sends a notification for `chunk`. With no peer, token or chunk it does nothing, as Go's
+/// `SendProgressFromProto` does with a nil one.
+///
+/// # Errors
+///
+/// The notification could not be sent.
+pub async fn send_progress_from_proto(
+    peer: Option<&Peer<RoleServer>>,
+    token: Option<ProgressToken>,
+    chunk: Option<&dyn ProgressMessage>,
+) -> Result<(), rmcp::ServiceError> {
+    let (Some(peer), Some(token), Some(chunk)) = (peer, token, chunk) else {
+        return Ok(());
+    };
+    peer.notify_progress(progress_params(token, chunk)).await
+}
+
+/// The final update [`send_done_progress`] sends, built without a generated value.
+struct DoneProgress(String);
+
+impl ProgressMessage for DoneProgress {
+    fn progress(&self) -> f64 {
+        1.0
+    }
+    fn message(&self) -> &str {
+        &self.0
+    }
+    fn total(&self) -> f64 {
+        1.0
+    }
+}
+
+/// Sends progress=1, total=1 with `result_json` as the message, telling the client a
+/// streaming call has finished.
+///
+/// # Errors
+///
+/// The notification could not be sent.
+pub async fn send_done_progress(
+    peer: Option<&Peer<RoleServer>>,
+    token: Option<ProgressToken>,
+    result_json: impl Into<String>,
+) -> Result<(), rmcp::ServiceError> {
+    let done = DoneProgress(result_json.into());
+    send_progress_from_proto(peer, token, Some(&done)).await
+}
 
 /// Sends MCP progress notifications for one tool call.
 ///
@@ -56,6 +158,11 @@ impl ProgressSink {
         // A client that has gone away should not fail the tool call it is no longer
         // watching, so a failed notification is dropped rather than propagated.
         let _ = peer.notify_progress(param).await;
+    }
+
+    /// Reports one generated `MCPProgress` chunk; its own token, if any, wins.
+    pub async fn send_chunk(&self, chunk: &dyn ProgressMessage) {
+        let _ = send_progress_from_proto(self.peer.as_ref(), self.token.clone(), Some(chunk)).await;
     }
 
     /// Reports completion, carrying the final result as the message.

@@ -8,9 +8,10 @@ use serde_json::{Map, Value};
 
 /// One property injected into tool schemas and extracted from incoming arguments.
 ///
-/// Go carries a `ContextKey any` here and stashes the value on the request context. Rust has
-/// no untyped context to stash into, so [`extract_extras`] returns the values instead and the
-/// caller decides where they go — which is also what makes them visible rather than ambient.
+/// Go carries a `ContextKey any` here and stashes the value on the request context. A hosted
+/// service does the same with [`ExtraValues`], a request extension keyed by
+/// [`ExtraProperty::context_key`]; [`extract_extras`] is the same split for a caller that
+/// wants the values in hand.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExtraProperty {
     /// The JSON property name, as it appears in tool arguments.
@@ -19,7 +20,17 @@ pub struct ExtraProperty {
     pub description: String,
     /// Whether the schema marks it required.
     pub required: bool,
+    /// The key the value is stored under in [`ExtraValues`]. `None` means the name.
+    pub context_key: Option<String>,
 }
+
+/// The extras one tool call carried, keyed by [`ExtraProperty::context_key`].
+///
+/// A hosted service lifts them out of the arguments before the handler sees them and puts
+/// them on the call's `RequestContext::extensions`, which is where Go's `ContextKey` puts them
+/// on its context.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ExtraValues(pub Map<String, Value>);
 
 impl ExtraProperty {
     /// An optional extra property.
@@ -28,7 +39,20 @@ impl ExtraProperty {
             name: name.into(),
             description: description.into(),
             required: false,
+            context_key: None,
         }
+    }
+
+    /// Stores the value under `key` in [`ExtraValues`] rather than under the property name.
+    #[must_use]
+    pub fn with_context_key(mut self, key: impl Into<String>) -> Self {
+        self.context_key = Some(key.into());
+        self
+    }
+
+    /// The key the value is stored under.
+    pub fn key(&self) -> &str {
+        self.context_key.as_deref().unwrap_or(&self.name)
     }
 
     /// Marks it required, so a client that omits it is rejected by schema validation rather

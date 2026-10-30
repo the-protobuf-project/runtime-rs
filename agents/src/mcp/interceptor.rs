@@ -56,6 +56,13 @@ impl Interceptors {
         self
     }
 
+    /// Adds every interceptor of `other` to the end of the chain.
+    #[must_use]
+    pub fn extend(mut self, other: Interceptors) -> Self {
+        self.0.extend(other.0);
+        self
+    }
+
     /// Whether anything is installed.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

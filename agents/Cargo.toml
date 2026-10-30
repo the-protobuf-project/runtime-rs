@@ -21,7 +21,18 @@ default = ["mcp", "a2a"]
 # Go compiles a subpackage only when something imports it. Cargo has no such
 # thing, so the two protocol modules are features instead — same "pay for what
 # you use", stated the way Cargo states it.
-mcp = ["dep:rmcp", "dep:serde", "dep:serde_json"]
+mcp = [
+    "dep:rmcp",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:futures",
+    "dep:uuid",
+    "dep:sha2",
+    "dep:tonic-types",
+    "dep:tonic-health",
+    "dep:bytes",
+    "dep:http-body",
+]
 a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json", "dep:uuid", "dep:chrono"]
 
 
@@ -56,6 +67,11 @@ serde = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
+tonic-types = { version = "0.14", optional = true }
+tonic-health = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http-body = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

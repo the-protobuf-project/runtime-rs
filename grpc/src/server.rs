@@ -62,6 +62,8 @@ impl HybridServer {
             streams.clone(),
             telemetry.clone(),
         );
+        // MCP services were handed a deferred loopback while the routes were still open.
+        self.mcp.loopback.set(loopback.clone());
 
         let mut builder = Server::builder();
         if let Some(cert) = &self.cert {

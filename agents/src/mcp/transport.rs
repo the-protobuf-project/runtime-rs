@@ -6,11 +6,8 @@ pub enum Transport {
     /// The modern Streamable HTTP transport.
     #[default]
     StreamableHttp,
-    /// The legacy SSE transport from the 2024-11-05 spec.
-    ///
-    /// rmcp folds SSE into the Streamable HTTP service — that transport already answers with
-    /// `text/event-stream` when a response streams — so asking for this serves the same
-    /// endpoint rather than a second, separate one.
+    /// The legacy HTTP+SSE transport from the 2024-11-05 spec, served at the base path plus
+    /// `/` as Go mounts it.
     Sse,
     /// Runs over the process's own stdin and stdout, for an IDE launching a subprocess.
     Stdio,
@@ -32,15 +29,22 @@ impl Transport {
     }
 }
 
-impl std::str::FromStr for Transport {
-    type Err = ();
+/// A transport name this runtime does not speak.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("runtime: unsupported transport {0:?}")]
+pub struct UnsupportedTransport(pub String);
 
+impl std::str::FromStr for Transport {
+    type Err = UnsupportedTransport;
+
+    /// Parses the exact wire name, as Go compares it. There are no aliases and no case
+    /// folding, so a value the Go server refuses is refused here too.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "streamable-http" | "streamable_http" | "http" => Ok(Self::StreamableHttp),
+        match s {
+            "streamable-http" => Ok(Self::StreamableHttp),
             "sse" => Ok(Self::Sse),
             "stdio" => Ok(Self::Stdio),
-            _ => Err(()),
+            other => Err(UnsupportedTransport(other.to_string())),
         }
     }
 }

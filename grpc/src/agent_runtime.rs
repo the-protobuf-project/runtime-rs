@@ -25,12 +25,13 @@ impl HybridServer {
     /// address of its own rather than sharing the runtime's. A process that wants them on
     /// one port builds a runtime directly instead of going through a `HybridServer`.
     pub(crate) async fn start_agents(&mut self, routes: &GrpcRoutes) -> Result<()> {
-        if self.agent_services.is_empty() {
+        let mcp_groups = self.mcp_groups();
+        if self.agent_services.is_empty() && mcp_groups.is_empty() {
             tracing::debug!("agents: nothing registered, no runtime started");
             return Ok(());
         }
 
-        let runtime = self.agent_services.iter().cloned().fold(
+        let runtime = self.agent_services.iter().cloned().chain(mcp_groups).fold(
             Runtime::new(Config {
                 identity: Identity {
                     name: self.opts.service_name.clone(),
