@@ -64,3 +64,28 @@ Provider/admin operations, writes/reads/aggregation, pages, complete stream
 lifetimes and ingestion admission/batches/flush/close share correlated signals.
 Record bodies, queries, keys, page tokens and database names are not exported.
 The collector logs are a development inspection sink; InfluxDB stays running.
+
+## Reusing typed access
+
+Generated-style model binding is independent of the provider:
+
+```rust
+use database::{IngestConfig, store::{DB, For, Model, RangeOptions}};
+
+async fn ingest_then_read<T: Model>(db: &DB, values: &[T], start: i64, end: i64)
+    -> database::Result<Vec<T>>
+{
+    let rows = For::<T>::new(db);
+    let writer = rows.batch_writer(IngestConfig::default())?;
+    for value in values { writer.write(value).await?; }
+    writer.flush().await?;
+    writer.close().await?;
+    let (page, _next_token) = rows.range(&RangeOptions { start, end, ..Default::default() }).await?;
+    Ok(page)
+}
+```
+
+This helper returns one page; continue with the returned token for a complete
+large window, or use the model's stream API. Provision/select the DB first
+with the pattern in `provision.rs`. The descriptor/model implementation in
+`model.rs` is the full concrete example behind the generic helper above.

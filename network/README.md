@@ -3,9 +3,7 @@
 GraphQL, HTTP, and WebSocket clients, each constructed directly and configured with consistent
 connection options and optional connectivity verification. A Rust port of
 [`runtime-go/network`](https://github.com/the-protobuf-project/runtime-go/tree/main/network),
-built the Rust way — see the
-[workspace README](https://github.com/the-protobuf-project/runtime-rs#differences-from-the-go-implementation)
-for the full list of deliberate deviations from the Go original.
+built around async clients and explicit lifecycle/error handling.
 
 ## Install
 
@@ -50,9 +48,9 @@ See [`examples/`](examples) for complete, runnable programs against live public 
 and Morty's GraphQL API, an httpbin-compatible HTTP service, and a WebSocket echo server):
 
 ```bash
-cargo run --example rickandmorty_graphql
-cargo run --example httpbin_http
-cargo run --example websocket_echo
+cargo run -p tpp-network --example rickandmorty_graphql
+cargo run -p tpp-network --example httpbin_http
+cargo run -p tpp-network --example websocket_echo
 ```
 
 ## What's here
@@ -71,3 +69,23 @@ once published).
 ## License
 
 Apache-2.0
+
+## Execution and shutdown
+
+Connection settings -> URL validation -> independent pooled client or WebSocket
+handshake -> optional HTTP/GraphQL reachability check -> operations -> close.
+The factory and direct constructors share this flow. Reconnect uses remembered
+options; errors return to the caller. The ten-second default is applied when
+the configured timeout is zero. Retry counts and cancellation are explicit on
+HTTP request calls; generic WebSocket listening can opt into reconnect.
+
+Use [HTTP](src/http/README.md), [GraphQL](src/graphql/README.md), and
+[WebSocket](src/websocket/README.md) for complete copyable programs, method
+semantics, and failure behavior. [Source map](src/README.md) explains common
+options/factory/pooling, while [tests](tests/README.md) describes controlled
+local verification and [examples](examples/README.md) describes live programs.
+
+```bash
+cargo test -p tpp-network
+cargo doc -p tpp-network --no-deps
+```
