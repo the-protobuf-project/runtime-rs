@@ -216,13 +216,9 @@ async fn serve_owned(
     mut router: Router,
     cancel: CancellationToken,
 ) -> Result<(), ServiceError> {
-    // Go's ":9000" binds every interface; a Rust socket address needs the host spelled out.
-    let bind = if cfg.addr.starts_with(':') {
-        format!("0.0.0.0{}", cfg.addr)
-    } else {
-        cfg.addr.clone()
-    };
-    let listener = tokio::net::TcpListener::bind(&bind).await?;
+    // A TCP address, Go's ":9000" meaning every interface, or a Unix socket's `unix:PATH`.
+    let bind = cfg.addr.clone();
+    let listener = crate::listen::Bound::bind(&bind).await?;
 
     // net/http bounds reads and writes separately; hyper does not split them, so the larger
     // bound covers the whole exchange and neither is tightened silently.
@@ -237,8 +233,8 @@ async fn serve_owned(
     let drain = CancellationToken::new();
     let stop = drain.clone();
     let mut serving = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move { stop.cancelled().await })
+        listener
+            .serve(router, async move { stop.cancelled().await })
             .await
     });
 

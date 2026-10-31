@@ -48,6 +48,7 @@ mod config;
 mod elicitation;
 mod error;
 mod extras;
+mod guard;
 mod handler;
 mod health;
 mod hosted;

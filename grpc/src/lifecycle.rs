@@ -213,7 +213,7 @@ impl HybridServer {
         }
 
         let token = CancellationToken::new();
-        let handle = crate::http::h1::serve(
+        let (handle, bound) = crate::http::h1::serve_bound(
             router,
             &self.opts.http.addr(),
             self.cert.as_ref(),
@@ -222,6 +222,7 @@ impl HybridServer {
         .await?;
         let mut state = self.state.lock().expect("grpc: server state poisoned");
         state.http = Some(token);
+        state.http_addr = Some(bound);
         state.tasks.push(handle);
         Ok(())
     }

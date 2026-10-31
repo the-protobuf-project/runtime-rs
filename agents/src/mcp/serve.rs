@@ -35,7 +35,16 @@ pub(crate) struct Mount {
     pub(crate) transports: Vec<Transport>,
     pub(crate) headers: Vec<HeaderMapping>,
     pub(crate) stateless: bool,
+    pub(crate) guard: Guard,
     pub(crate) health: Option<(String, HealthCheck)>,
+}
+
+/// Which `Host` and `Origin` a server's HTTP transports answer: `None` hosts leaves rmcp's
+/// loopback-only default for Streamable HTTP and SSE unchecked; empty origins checks none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Guard {
+    pub(crate) hosts: Option<Vec<String>>,
+    pub(crate) origins: Vec<String>,
 }
 
 /// The router serving one server's HTTP transports.
@@ -54,6 +63,10 @@ pub(crate) fn http_router<S: ServerHandler>(
                 let mut config = StreamableHttpServerConfig::default();
                 config.cancellation_token = cancel.clone();
                 config.legacy_session_mode = !mount.stateless;
+                if let Some(hosts) = &mount.guard.hosts {
+                    config.allowed_hosts.clone_from(hosts);
+                }
+                config.allowed_origins.clone_from(&mount.guard.origins);
                 let factory = Arc::clone(&factory);
                 let service = StreamableHttpService::new(
                     move || factory(),
@@ -64,11 +77,11 @@ pub(crate) fn http_router<S: ServerHandler>(
             }
             Transport::Sse => {
                 let path = format!("{}/", base.trim_end_matches('/'));
-                router = router.merge(super::sse::router(
-                    &path,
-                    Arc::clone(&factory),
-                    cancel.clone(),
-                ));
+                let sse = super::sse::router(&path, Arc::clone(&factory), cancel.clone());
+                router = router.merge(match &mount.guard.hosts {
+                    Some(hosts) => super::guard::hosts(sse, hosts.clone()),
+                    None => sse,
+                });
             }
             Transport::Stdio => {}
         }
@@ -122,6 +135,7 @@ where
         transports,
         headers: config.header_mappings.clone(),
         stateless: config.stateless,
+        guard: Guard::default(),
         health: config.health_check.clone().map(|check| {
             let path = if config.health_check_path.is_empty() {
                 super::server::DEFAULT_HEALTH_CHECK_PATH.to_string()
@@ -217,6 +231,11 @@ impl ServiceGroup {
                 .or_else(|| member.map(|m| m.headers.clone()))
                 .unwrap_or_default(),
             stateless: self.stateless || member.is_some_and(|m| m.stateless),
+            guard: self
+                .guard
+                .clone()
+                .or_else(|| member.map(|m| m.guard.clone()))
+                .unwrap_or_default(),
             health: None,
         }
     }

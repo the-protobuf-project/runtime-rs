@@ -27,6 +27,19 @@ pub async fn serve(
     certificate: Option<&Certificate>,
     cancel: CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>> {
+    serve_bound(router, addr, certificate, cancel)
+        .await
+        .map(|(task, _)| task)
+}
+
+/// [`serve`], also returning the address bound: the port the operating system chose when
+/// `addr` asked for port 0.
+pub async fn serve_bound(
+    router: Router,
+    addr: &str,
+    certificate: Option<&Certificate>,
+    cancel: CancellationToken,
+) -> Result<(tokio::task::JoinHandle<()>, SocketAddr)> {
     let listener = tokio::net::TcpListener::bind(addr)
         .await
         .map_err(|source| Error::Listen {
@@ -42,14 +55,17 @@ pub async fn serve(
     match certificate {
         None => {
             tracing::debug!(%bound, "HTTP/1.1: serving plaintext");
-            Ok(tokio::spawn(async move {
-                let served = axum::serve(listener, router)
-                    .with_graceful_shutdown(async move { cancel.cancelled().await })
-                    .await;
-                if let Err(err) = served {
-                    tracing::error!(%bound, error = %err, "HTTP/1.1 server stopped");
-                }
-            }))
+            Ok((
+                tokio::spawn(async move {
+                    let served = axum::serve(listener, router)
+                        .with_graceful_shutdown(async move { cancel.cancelled().await })
+                        .await;
+                    if let Err(err) = served {
+                        tracing::error!(%bound, error = %err, "HTTP/1.1 server stopped");
+                    }
+                }),
+                bound,
+            ))
         }
         Some(certificate) => {
             // The gateway advertises HTTP/1.1 and HTTP/2 over ALPN. HTTP/3 is advertised by
@@ -57,7 +73,10 @@ pub async fn serve(
             let config = certificate.rustls_config(&["h2", "http/1.1"])?;
             let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
             tracing::debug!(%bound, "HTTP/1.1: serving over TLS 1.3");
-            Ok(tokio::spawn(serve_tls(listener, acceptor, router, cancel)))
+            Ok((
+                tokio::spawn(serve_tls(listener, acceptor, router, cancel)),
+                bound,
+            ))
         }
     }
 }

@@ -93,11 +93,14 @@ mod agents;
 mod config;
 pub mod error;
 mod lifecycle;
+pub mod listen;
 mod mux;
 mod placement;
 mod runtime;
 pub mod shared;
 mod start;
+#[cfg(unix)]
+mod unix;
 
 #[cfg(feature = "a2a")]
 pub mod a2a;

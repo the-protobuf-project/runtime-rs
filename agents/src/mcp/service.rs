@@ -16,6 +16,7 @@ use crate::shared::HeaderMapping;
 use super::config::{Config, ResourceHandler};
 use super::handler::BoxedHandler;
 use super::hosted::{Hosted, Hosting};
+use super::serve::Guard;
 use super::server::TryFactory;
 use super::{
     CacheHints, DEFAULT_BASE_PATH, ElicitHook, ExtraProperty, HealthCheck, Interceptors, Transport,
@@ -37,6 +38,7 @@ pub struct Service<H: ServerHandler> {
     pub(super) interceptors: Interceptors,
     pub(super) cache: CacheHints,
     pub(super) stateless: bool,
+    pub(super) guard: Guard,
     pub(super) health: Option<(String, HealthCheck)>,
     pub(super) resource_handlers: HashMap<String, ResourceHandler>,
     pub(super) elicit_hook: Option<ElicitHook>,
@@ -90,6 +92,7 @@ impl<H: ServerHandler> Service<H> {
             interceptors: Interceptors::new(),
             cache: CacheHints::default(),
             stateless: false,
+            guard: Guard::default(),
             health: None,
             resource_handlers: HashMap::new(),
             elicit_hook: None,
@@ -185,6 +188,26 @@ impl<H: ServerHandler> Service<H> {
         self
     }
 
+    /// Answers only requests whose `Host` is one of `hosts` — a name, or `name:port` — against
+    /// DNS rebinding: a page on another site cannot reach a server on this machine through a
+    /// name it controls. Without it, Streamable HTTP answers loopback names only, as rmcp's
+    /// default does, and SSE does not check. A server behind a tunnel or a proxy lists the
+    /// public name it is reached by.
+    #[must_use]
+    pub fn allowed_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.guard.hosts = Some(hosts.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Refuses a browser request whose `Origin` is not one of `origins`, each with its
+    /// scheme: `https://app.example.com`, `http://localhost:*`. A request with no `Origin` —
+    /// any non-browser client — is unaffected. Unset, `Origin` is not checked.
+    #[must_use]
+    pub fn allowed_origins(mut self, origins: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.guard.origins = origins.into_iter().map(Into::into).collect();
+        self
+    }
+
     /// Mounts a health probe at `path` running `check`; see [`super::health_check_handler`].
     #[must_use]
     pub fn health_check(mut self, path: impl Into<String>, check: HealthCheck) -> Self {
@@ -269,6 +292,7 @@ impl<H: ServerHandler> Service<H> {
             interceptors: Interceptors::new(),
             cache: CacheHints::default(),
             stateless: self.stateless,
+            guard: self.guard.clone(),
             health: self.health.clone(),
             resource_handlers: HashMap::new(),
             elicit_hook: None,
@@ -290,6 +314,7 @@ pub struct ServiceGroup {
     pub(super) headers: Option<Vec<HeaderMapping>>,
     pub(super) interceptors: Interceptors,
     pub(super) stateless: bool,
+    pub(super) guard: Option<Guard>,
     pub(super) combined: bool,
     pub(super) base_path: Option<String>,
     pub(super) health: Option<(String, HealthCheck)>,
@@ -306,6 +331,7 @@ impl ServiceGroup {
             headers: None,
             interceptors: Interceptors::new(),
             stateless: false,
+            guard: None,
             combined: false,
             base_path: None,
             health: None,
@@ -358,6 +384,24 @@ impl ServiceGroup {
     #[must_use]
     pub fn stateless(mut self) -> Self {
         self.stateless = true;
+        self
+    }
+
+    /// [`Service::allowed_hosts`] for every member, over what each set.
+    #[must_use]
+    pub fn allowed_hosts(mut self, hosts: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut guard = self.guard.take().unwrap_or_default();
+        guard.hosts = Some(hosts.into_iter().map(Into::into).collect());
+        self.guard = Some(guard);
+        self
+    }
+
+    /// [`Service::allowed_origins`] for every member, over what each set.
+    #[must_use]
+    pub fn allowed_origins(mut self, origins: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        let mut guard = self.guard.take().unwrap_or_default();
+        guard.origins = origins.into_iter().map(Into::into).collect();
+        self.guard = Some(guard);
         self
     }
 
