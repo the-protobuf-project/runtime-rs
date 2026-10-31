@@ -207,7 +207,7 @@ pub fn server_endpoint_with(
             transport: transport.as_str().into(),
             url: format!(
                 "http+unix://{}{}",
-                path.replace('/', "%2F"),
+                crate::listen::unix_authority(path),
                 config.resolved_base_path()
             ),
         };

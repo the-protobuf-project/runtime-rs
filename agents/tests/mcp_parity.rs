@@ -71,6 +71,20 @@ fn the_endpoint_follows_go_server_endpoint() {
 }
 
 #[test]
+fn a_unix_endpoint_encodes_the_complete_socket_path() {
+    let config = ServerConfig {
+        addr: "unix:/tmp/mcp #?%é.sock".into(),
+        base_path: "/tools".into(),
+        ..Default::default()
+    };
+    let endpoint = mcp::server_endpoint_with(&config, |_| None);
+    assert_eq!(
+        endpoint.url,
+        "http+unix://%2Ftmp%2Fmcp%20%23%3F%25%C3%A9.sock/tools"
+    );
+}
+
+#[test]
 fn base_paths_resolve_as_go_resolves_them() {
     let empty = ServerConfig::default();
     assert_eq!(mcp::resolve_base_path(&empty, "/gen"), "/gen");

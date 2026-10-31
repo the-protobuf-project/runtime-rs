@@ -204,7 +204,7 @@ impl<H: ServerHandler> Service<H> {
     /// any non-browser client — is unaffected. Unset, `Origin` is not checked.
     #[must_use]
     pub fn allowed_origins(mut self, origins: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        self.guard.origins = origins.into_iter().map(Into::into).collect();
+        self.guard.origins = Some(origins.into_iter().map(Into::into).collect());
         self
     }
 
@@ -400,7 +400,7 @@ impl ServiceGroup {
     #[must_use]
     pub fn allowed_origins(mut self, origins: impl IntoIterator<Item = impl Into<String>>) -> Self {
         let mut guard = self.guard.take().unwrap_or_default();
-        guard.origins = origins.into_iter().map(Into::into).collect();
+        guard.origins = Some(origins.into_iter().map(Into::into).collect());
         self.guard = Some(guard);
         self
     }

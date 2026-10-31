@@ -19,6 +19,20 @@ pub fn unix_path(addr: &str) -> Option<&str> {
     addr.strip_prefix(UNIX_PREFIX).filter(|p| !p.is_empty())
 }
 
+/// Encodes a socket path as the authority of an `http+unix` URL.
+pub(crate) fn unix_authority(path: &str) -> String {
+    use std::fmt::Write as _;
+    let mut encoded = String::new();
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            encoded.push(char::from(byte));
+        } else {
+            write!(encoded, "%{byte:02X}").expect("writing to a String cannot fail");
+        }
+    }
+    encoded
+}
+
 /// A bound listener, not yet serving. Dropping a Unix one removes its socket file.
 pub(crate) enum Bound {
     /// A TCP listener.

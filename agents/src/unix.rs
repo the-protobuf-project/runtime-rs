@@ -58,11 +58,15 @@ impl Socket {
         };
         match std::fs::symlink_metadata(path) {
             Ok(meta) if meta.file_type().is_socket() => {
-                if std::os::unix::net::UnixStream::connect(path).is_ok() {
-                    return Err(failed(
-                        io::ErrorKind::AddrInUse,
-                        &"a server is listening there",
-                    ));
+                match std::os::unix::net::UnixStream::connect(path) {
+                    Ok(_) => {
+                        return Err(failed(
+                            io::ErrorKind::AddrInUse,
+                            &"a server is listening there",
+                        ));
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {}
+                    Err(e) => return Err(failed(e.kind(), &e)),
                 }
                 std::fs::remove_file(path).map_err(|e| failed(e.kind(), &e))?;
             }
