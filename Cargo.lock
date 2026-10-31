@@ -4375,6 +4375,7 @@ version = "0.1.0"
 dependencies = [
  "arrow-array",
  "arrow-flight",
+ "arrow-ipc",
  "arrow-schema",
  "async-trait",
  "base64 0.22.1",

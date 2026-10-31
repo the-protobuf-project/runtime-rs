@@ -1,6 +1,6 @@
 //! Pin-safe lifetime wrapper; no worker polls ahead of a stream's consumer.
 use super::outcome;
-use crate::{Record, RecordStream, Result};
+use crate::store::{Record, RecordStream, Result};
 use futures::Stream;
 use std::{
     pin::Pin,

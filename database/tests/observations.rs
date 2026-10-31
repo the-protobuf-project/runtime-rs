@@ -7,7 +7,9 @@ mod common;
 use backend::Backend;
 use capture::Harness;
 use common::{record, resource};
-use database::{Aggregate, Capabilities, DB, DeleteRange, Range, Scan, instrument};
+use database::store::{
+    AggregateOptions, Capabilities, DB, ListOptions, RangeOptions, Scan, instrument,
+};
 use futures::TryStreamExt;
 use opentelemetry_sdk::trace::SpanData;
 use std::sync::{Arc, atomic::Ordering};
@@ -16,15 +18,16 @@ fn spans(h: &Harness) -> Vec<SpanData> {
     h.traces.get_finished_spans().unwrap()
 }
 fn db(backend: Arc<Backend>) -> DB {
-    DB::new(
+    DB::build(
         "fake",
-        "private_tenant".into(),
+        "private_tenant",
         Capabilities {
-            records: Some(backend.clone()),
+            driver: Some(backend.clone()),
+            batch: Some(backend.clone()),
             series: Some(backend.clone()),
-            reader: Some(backend.clone()),
-            maintenance: Some(backend.clone()),
-            row_deletion: Some(backend),
+            schema: Some(backend.clone()),
+            streams: Some(backend),
+            ..Capabilities::default()
         },
     )
 }
@@ -41,56 +44,30 @@ async fn rewiring_preserves_all_capabilities_and_emits_once_without_sensitive_da
     let res = resource();
     let _: common::Reading =
         serde_json::from_value(serde_json::to_value(record()).unwrap()).unwrap();
-    let range = Range::new(0, 2_000_000_000);
-    db.series().unwrap().write(&res, &[record()]).await.unwrap();
-    db.series().unwrap().range(&res, &range).await.unwrap();
-    db.series()
-        .unwrap()
-        .aggregate(
-            &res,
-            &Aggregate {
-                range: range.clone(),
-                every_seconds: 1,
-                reduce: vec![],
-                group_by: vec![],
-            },
-        )
-        .await
-        .unwrap();
-    db.records().unwrap().create(&res, &record()).await.unwrap();
-    db.records().unwrap().get(&res, "secret-key").await.unwrap();
-    db.records().unwrap().update(&res, &record()).await.unwrap();
-    db.records()
-        .unwrap()
-        .delete(&res, "secret-key")
-        .await
-        .unwrap();
-    db.reader()
-        .unwrap()
-        .page(&res, &range, Some("secret-token"))
-        .await
-        .unwrap();
-    db.reader()
-        .unwrap()
+    let range = RangeOptions {
+        end: 2_000_000_000,
+        page_token: "secret-token".into(),
+        filter: "device = \"boiler\"".into(),
+        ..RangeOptions::default()
+    };
+    db.batch.create_many(&res, &[record()]).await.unwrap();
+    db.series.range(&res, &range).await.unwrap();
+    let aggregate = AggregateOptions::default();
+    db.series.aggregate(&res, &aggregate).await.unwrap();
+    db.create(&res, &record()).await.unwrap();
+    db.get(&res, "secret-key").await.unwrap();
+    db.update(&res, &record()).await.unwrap();
+    db.delete(&res, "secret-key").await.unwrap();
+    db.exists(&res, "secret-key").await.unwrap();
+    db.list(&res, &ListOptions::default()).await.unwrap();
+    db.streams
         .stream(&res, &Scan::new(0, 2_000_000_000))
         .await
         .unwrap()
         .try_collect::<Vec<_>>()
         .await
         .unwrap();
-    db.maintenance().unwrap().drop_table(&res).await.unwrap();
-    db.row_deletion()
-        .unwrap()
-        .delete_range(
-            &res,
-            &DeleteRange {
-                start: 0,
-                end: 1,
-                predicates: vec![],
-            },
-        )
-        .await
-        .unwrap();
+    db.schema.drop_schema(&res).await.unwrap();
     assert_eq!(backend.calls.load(Ordering::SeqCst), 11);
     assert_eq!(spans(&h).len(), 11);
     assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 11);
@@ -123,8 +100,7 @@ async fn stream_errors_and_early_drop_finish_lifetimes_and_count_delivered_rows(
         let h = Harness::new();
         let db = instrument(db(Arc::new(Backend::new(mode))), h.signals.clone());
         let mut stream = db
-            .reader()
-            .unwrap()
+            .streams
             .stream(&resource(), &Scan::new(0, 2_000_000_000))
             .await
             .unwrap();
@@ -166,9 +142,8 @@ async fn backend_errors_are_returned_intact_but_never_exported_as_raw_messages()
     let h = Harness::new();
     let db = instrument(db(Arc::new(Backend::new(3))), h.signals.clone());
     let error = db
-        .series()
-        .unwrap()
-        .write(&resource(), &[record()])
+        .batch
+        .create_many(&resource(), &[record()])
         .await
         .unwrap_err();
     assert!(error.to_string().contains("secret-token"));

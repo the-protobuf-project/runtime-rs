@@ -1,6 +1,6 @@
 //! One operation guard surrounds the entire awaited capability call.
 use super::outcome;
-use crate::Result;
+use crate::store::Result;
 use std::future::Future;
 use telemetry::{FutureExt, Observer, SpanKind};
 

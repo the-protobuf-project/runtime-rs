@@ -1,12 +1,12 @@
-//! Unified database observations preserve optional capabilities and errors.
+//! Unified database observations preserve capabilities and errors.
 mod calls;
 mod classify;
+mod driver;
 mod reader;
-mod records;
 mod series;
 mod stream;
 
-use crate::{Capabilities, DB};
+use crate::store::{Capabilities, DB};
 pub(crate) use calls::run;
 pub(crate) use classify::outcome;
 use std::sync::Arc;
@@ -18,21 +18,19 @@ pub(super) struct Observed<T: ?Sized> {
     backend: &'static str,
 }
 
-/// Instruments every capability while preserving its availability and ownership.
-/// Rewiring replaces earlier instrumentation rather than nesting wrappers.
-/// No names, keys, SQL, predicates or raw error strings are recorded.
-pub fn instrument(mut db: DB, telemetry: Telemetry) -> DB {
-    let raw = db
-        .original
-        .take()
-        .unwrap_or_else(|| db.capabilities.clone());
-    db.telemetry = telemetry.clone();
+/// Instruments every capability the backend has, as runtime-go's
+/// `store.Instrument`. Refusals stay unwrapped. Rewiring starts again from the
+/// backend's own capabilities, so instrumenting twice never nests wrappers.
+/// No names, keys, SQL, filters or raw error strings are recorded.
+pub fn instrument(db: DB, telemetry: Telemetry) -> DB {
+    let raw = db.raw.clone();
     if !telemetry.is_enabled() {
-        db.capabilities = raw;
-        return db;
+        let mut plain = DB::build(db.backend, db.name, raw);
+        plain.telemetry = telemetry;
+        return plain;
     }
     let observer = telemetry.observer("database");
-    let backend = db.backend();
+    let backend = db.backend;
     macro_rules! wrap {
         ($field:ident) => {
             raw.$field.as_ref().map(|next| {
@@ -44,13 +42,17 @@ pub fn instrument(mut db: DB, telemetry: Telemetry) -> DB {
             })
         };
     }
-    db.capabilities = Capabilities {
-        records: wrap!(records),
+    let wrapped = Capabilities {
+        driver: wrap!(driver),
+        batch: wrap!(batch),
         series: wrap!(series),
-        reader: wrap!(reader),
-        maintenance: wrap!(maintenance),
-        row_deletion: wrap!(row_deletion),
+        schema: wrap!(schema),
+        streams: wrap!(streams),
+        tx: raw.tx.clone(),
+        release: raw.release.clone(),
     };
-    db.original = Some(raw);
-    db
+    let mut observed = DB::build(backend, db.name, wrapped);
+    observed.raw = raw;
+    observed.telemetry = telemetry;
+    observed
 }

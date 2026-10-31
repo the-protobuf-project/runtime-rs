@@ -1,73 +1,43 @@
-//! Series and lifecycle capability wrappers share one observation policy.
+//! Time-series and schema observations share one policy.
 use super::{Observed, run};
-use crate::{
-    Aggregate, Buckets, DeleteRange, Range, Record, Resource, Result, RowDeletion,
-    SeriesMaintenance, TimeSeries,
+use crate::store::{
+    AggregateOptions, Bucket, HypertableOptions, ListResult, Migrator, RangeOptions, Resource,
+    Result, TimeSeries,
 };
+
+macro_rules! observe {
+    ($self:ident, $name:literal, $call:expr, $read:expr) => {
+        run(&$self.observer, $self.backend, $name, $call, 0, $read).await
+    };
+}
 
 #[async_trait::async_trait]
 impl TimeSeries for Observed<dyn TimeSeries> {
-    async fn write(&self, res: &Resource, records: &[Record]) -> Result<()> {
-        run(
-            &self.observer,
-            self.backend,
-            "write",
-            self.next.write(res, records),
-            records.len(),
-            |_| 0,
+    async fn ensure_hypertable(&self, res: &Resource, opts: &HypertableOptions) -> Result<()> {
+        observe!(
+            self,
+            "ensure_hypertable",
+            self.next.ensure_hypertable(res, opts),
+            |_| 0
         )
-        .await
     }
-    async fn range(&self, res: &Resource, range: &Range) -> Result<Vec<Record>> {
-        run(
-            &self.observer,
-            self.backend,
-            "range",
-            self.next.range(res, range),
-            0,
-            Vec::len,
-        )
-        .await
+    async fn range(&self, res: &Resource, opts: &RangeOptions) -> Result<ListResult> {
+        observe!(self, "range", self.next.range(res, opts), |r| r.items.len())
     }
-    async fn aggregate(&self, res: &Resource, query: &Aggregate) -> Result<Buckets> {
-        run(
-            &self.observer,
-            self.backend,
-            "aggregate",
-            self.next.aggregate(res, query),
-            0,
-            Vec::len,
-        )
-        .await
+    async fn aggregate(&self, res: &Resource, opts: &AggregateOptions) -> Result<Vec<Bucket>> {
+        observe!(self, "aggregate", self.next.aggregate(res, opts), Vec::len)
     }
 }
 
 #[async_trait::async_trait]
-impl SeriesMaintenance for Observed<dyn SeriesMaintenance> {
-    async fn drop_table(&self, res: &Resource) -> Result<()> {
-        run(
-            &self.observer,
-            self.backend,
-            "drop_table",
-            self.next.drop_table(res),
-            0,
-            |_| 0,
-        )
-        .await
+impl Migrator for Observed<dyn Migrator> {
+    async fn ensure_schema(&self, res: &Resource) -> Result<()> {
+        observe!(self, "ensure_schema", self.next.ensure_schema(res), |_| 0)
     }
-}
-
-#[async_trait::async_trait]
-impl RowDeletion for Observed<dyn RowDeletion> {
-    async fn delete_range(&self, res: &Resource, range: &DeleteRange) -> Result<()> {
-        run(
-            &self.observer,
-            self.backend,
-            "delete_range",
-            self.next.delete_range(res, range),
-            0,
-            |_| 0,
-        )
-        .await
+    async fn drop_schema(&self, res: &Resource) -> Result<()> {
+        observe!(self, "drop_schema", self.next.drop_schema(res), |_| 0)
+    }
+    async fn has_schema(&self, res: &Resource) -> Result<bool> {
+        observe!(self, "has_schema", self.next.has_schema(res), |_| 0)
     }
 }

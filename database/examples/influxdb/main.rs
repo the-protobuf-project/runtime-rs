@@ -9,7 +9,7 @@ mod queries;
 mod records;
 mod retention;
 
-use database::drivers::influxdb::ClientConfig;
+use database::influxdb::ClientConfig;
 
 pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -39,14 +39,13 @@ async fn run(signals: telemetry::Telemetry) -> Result<()> {
         .ok_or("time out of range")?;
     let name = format!("runtime_example_{now}");
     let start = now - now.rem_euclid(60_000_000_000);
-    let resource = model::resource()?;
     let (admin, db) = provision::run(config, &name, signals).await?;
     let result: Result<()> = async {
-        records::run(&db, &resource, start).await?;
-        queries::run(&db, &resource, start).await?;
-        ingest::run(&db, &resource, start).await?;
-        retention::run(&db, &resource, now).await?;
-        cleanup::run(&db, &resource).await
+        records::run(&db, start).await?;
+        queries::run(&db, start).await?;
+        ingest::run(&db, start).await?;
+        retention::run(&db, now).await?;
+        cleanup::run(&db).await
     }
     .await;
     // Only this run's newly created database is removed, also on stage failure.

@@ -1,6 +1,6 @@
 //! Management requests are explicit, authenticated, and never widen deletion.
-use database::drivers::influxdb::{ClientConfig, InfluxAdmin};
-use database::{Error, Retention};
+use database::Error;
+use database::influxdb::{ClientConfig, InfluxAdmin, Retention};
 use serde_json::json;
 use std::time::Duration;
 use wiremock::{

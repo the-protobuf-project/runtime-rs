@@ -9,14 +9,29 @@ never initializes that SDK, replaces global providers or shuts them down.
 ## Bind the application's signals
 
 ```rust
+use opentelemetry::{logs::LoggerProvider, metrics::MeterProvider, trace::TracerProvider};
+use opentelemetry_sdk::{logs::SdkLoggerProvider, metrics::SdkMeterProvider, trace::SdkTracerProvider};
 use telemetry::Telemetry;
-// meter, tracer and logger come from application-owned OTel providers.
-let signals = Telemetry::default()
-    .with_meter(meter)
-    .with_tracer(tracer)
-    .with_logger(logger);
+
+fn main() {
+    // Configure your exporters on these builders before build().
+    let meters = SdkMeterProvider::builder().build();
+    let traces = SdkTracerProvider::builder().build();
+    let logs = SdkLoggerProvider::builder().build();
+    let signals = Telemetry::default()
+        .with_meter(meters.meter("runtime"))
+        .with_tracer(traces.tracer("runtime"))
+        .with_logger(logs.logger("runtime"));
+    let operation = signals.observer("example").start("memory", "read", telemetry::SpanKind::Internal);
+    operation.finish(telemetry::Outcome::Ok);
+    meters.shutdown().unwrap();
+    traces.shutdown().unwrap();
+    logs.shutdown().unwrap();
+}
 ```
 
+The binding example needs `tpp-telemetry`, `opentelemetry` 0.33 and
+`opentelemetry_sdk` 0.33; configure exporters to send observations anywhere.
 Default bindings emit nothing. Signals are independent: meter-only/log-only
 observers never modify or end an application's parent span. Each Observer
 constructs its instruments once and shares immutable handles across calls.
@@ -24,12 +39,17 @@ constructs its instruments once and shares immutable handles across calls.
 With the optional `tpp-sdk` feature:
 
 ```rust
-let owner = telemetry::sdk::Telemetry::new()
-    .with_service("my-service", "1.0.0")
-    .with_local_otel_collector()
-    .with_tracing()
-    .build()?;
-let signals = telemetry::Telemetry::from_tpp(&owner, "runtime");
+async fn bind_tpp_sdk() -> Result<(), Box<dyn std::error::Error>> {
+    let mut owner = telemetry::sdk::Telemetry::new()
+        .with_service("my-service", "1.0.0")
+        .with_local_otel_collector()
+        .with_tracing()
+        .build()?;
+    let _signals = telemetry::Telemetry::from_tpp(&owner, "runtime");
+    // Run and drain application work using the signals before this shutdown.
+    tokio::task::spawn_blocking(move || owner.close()).await??;
+    Ok(())
+}
 ```
 
 `from_tpp` uses the SDK's public meter/log handles and explicitly snapshots the
@@ -41,12 +61,16 @@ The integration is pinned to inspected SDK revision `5b18b2cb02bb`.
 ## Instrument packages
 
 ```rust
-let admin = InfluxAdmin::new(&config, timeout)?.with_telemetry(signals.clone());
-let provider = InfluxProvider::new(config).with_telemetry(signals.clone());
-let db = provider.set_database("sensors").await?;
-// Or instrument any already-selected backend:
-let db = database::instrument(db, signals.clone());
-let document = cache::with_observability(document, signals.clone());
+use std::sync::Arc;
+use cache::core::Document;
+use database::{DB, store};
+use telemetry::Telemetry;
+
+fn instrument(db: DB, document: Arc<dyn Document>, signals: Telemetry)
+    -> (DB, Arc<dyn Document>)
+{
+    (store::instrument(db, signals.clone()), cache::with_observability(document, signals))
+}
 ```
 
 Database wrappers preserve every optional capability. Re-instrumenting a DB
@@ -128,3 +152,13 @@ The linked SDK adapter compiles with its real provider types. The live InfluxDB
 workflow exported all three signals to the local OTLP collector; tests separately
 verify credentials, tenant-like names and raw error text never reach outputs.
 Every new source/test file stays below 200 lines including documentation.
+
+## Source and tests
+
+[Source walkthrough and asynchronous guard example](src/README.md) ·
+[Exporter tests](tests/README.md).
+
+```bash
+cargo test -p tpp-telemetry
+cargo test -p tpp-telemetry --features tpp-sdk
+```

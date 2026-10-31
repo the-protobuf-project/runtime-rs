@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Descriptor-driven database capabilities with an InfluxDB 3 time-series backend"
+description = "runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
 keywords = ["database", "influxdb", "timeseries", "async"]
 categories = ["database", "asynchronous"]
@@ -32,13 +32,14 @@ futures.workspace = true
 base64 = "0.22"
 sha2 = "0.10"
 reqwest = { workspace = true, features = ["query"] }
+arrow-array = "59"
+arrow-schema = "59"
+arrow-ipc = "59"
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "signal"] }
 wiremock.workspace = true
-arrow-array = "59"
-arrow-schema = "59"
 arrow-flight = "59"
 tonic.workspace = true
 tokio-stream.workspace = true

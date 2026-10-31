@@ -3,8 +3,17 @@ mod common;
 #[path = "common/flight.rs"]
 mod flight;
 use common::{Reading, record, resource};
-use database::drivers::influxdb::{ClientConfig, InfluxProvider, RetryConfig};
-use database::{Aggregate, Collection, Error, Provider, Range, Reduce, Reduction};
+use database::influxdb::{ClientConfig, InfluxProvider, RetryConfig};
+use database::store::{AggregateOptions, Error, Provider, RangeOptions, Reducer, Reduction};
+use std::time::Duration;
+
+fn window() -> RangeOptions {
+    RangeOptions {
+        start: 0,
+        end: 2_000_000_000,
+        ..RangeOptions::default()
+    }
+}
 
 fn provider(host: &str) -> InfluxProvider {
     InfluxProvider::new(
@@ -24,10 +33,11 @@ async fn selection_and_typed_reads_send_database_and_decode_arrow_timestamps() {
     let provider = provider(&fixture.host);
     let first = provider.set_database("tenant_a").await.unwrap();
     let second = provider.set_database("tenant_b").await.unwrap();
-    let rows = Collection::<Reading>::new(first.clone(), resource())
-        .range(&Range::new(0, 2_000_000_000))
+    let (rows, next) = database::collection::<Reading>(&first, resource())
+        .range(&window())
         .await
         .unwrap();
+    assert!(next.is_empty());
     assert_eq!(
         rows,
         vec![Reading {
@@ -37,9 +47,9 @@ async fn selection_and_typed_reads_send_database_and_decode_arrow_timestamps() {
         }]
     );
     resource().validate(&record()).unwrap();
-    assert!(first.records().is_err());
-    assert_eq!(first.name(), "tenant_a");
-    assert_eq!(second.name(), "tenant_b");
+    assert!(first.get(&resource(), "k").await.is_err());
+    assert_eq!(first.name, "tenant_a");
+    assert_eq!(second.name, "tenant_b");
     let tickets = fixture.tickets.lock().unwrap();
     assert_eq!(tickets[0]["database"], "tenant_a");
     assert_eq!(tickets[1]["database"], "tenant_b");
@@ -57,24 +67,16 @@ async fn aggregation_uses_the_same_sdk_and_returns_named_buckets() {
         .set_database("sensors")
         .await
         .unwrap();
-    let query = Aggregate {
-        range: Range::new(0, 2_000_000_000),
-        every_seconds: 60,
-        reduce: vec![Reduce {
-            column: "temperature".into(),
-            function: Reduction::Mean,
-            alias: "mean".into(),
-        }],
-        group_by: vec![],
+    let query = AggregateOptions {
+        start: 0,
+        end: 2_000_000_000,
+        every: Duration::from_secs(60),
+        reduce: vec![Reduction::new(Reducer::Avg, "temperature", "mean")],
+        ..AggregateOptions::default()
     };
-    let buckets = db
-        .series()
-        .unwrap()
-        .aggregate(&resource(), &query)
-        .await
-        .unwrap();
-    assert_eq!(buckets[0]["observed_at"], 0);
-    assert_eq!(buckets[0]["mean"], 22.5);
+    let buckets = db.series.aggregate(&resource(), &query).await.unwrap();
+    assert_eq!(buckets[0].start, 0);
+    assert_eq!(buckets[0].values["mean"], 22.5);
     assert!(
         fixture.tickets.lock().unwrap()[1]["sql_query"]
             .as_str()
@@ -93,10 +95,8 @@ async fn selection_propagates_query_permission_failure() {
 
 #[tokio::test]
 async fn streamed_rows_decode_incrementally_and_midstream_failures_are_not_retried() {
-    use database::{
-        SeriesReader,
-        drivers::influxdb::{Client, InfluxDriver},
-    };
+    use database::influxdb::{Client, InfluxDriver};
+    use database::store::{Scan, SeriesReader};
     use futures::TryStreamExt;
     use std::{sync::Arc, time::Duration};
     for mode in ["stall", "broken"] {
@@ -114,7 +114,7 @@ async fn streamed_rows_decode_incrementally_and_midstream_failures_are_not_retri
         )
         .unwrap();
         let mut stream = driver
-            .stream(&resource(), &database::Scan::new(0, 2_000_000_000))
+            .stream(&resource(), &Scan::new(0, 2_000_000_000))
             .await
             .unwrap();
         assert_eq!(

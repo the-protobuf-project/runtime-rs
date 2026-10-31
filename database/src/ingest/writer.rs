@@ -4,7 +4,7 @@ use super::{
     IngestConfig,
     worker::{self, Command, Failure, Outcome},
 };
-use crate::{Error, Resource, Result, TimeSeries};
+use crate::store::{Batcher, Error, Resource, Result};
 use std::sync::{Arc, Mutex};
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -27,13 +27,9 @@ pub struct BatchWriter {
 
 impl BatchWriter {
     /// Starts a worker on the active Tokio runtime; no backend request yet.
-    pub fn new(
-        series: Arc<dyn TimeSeries>,
-        resource: Resource,
-        config: IngestConfig,
-    ) -> Result<Self> {
+    pub fn new(batch: Arc<dyn Batcher>, resource: Resource, config: IngestConfig) -> Result<Self> {
         Self::observed(
-            series,
+            batch,
             resource,
             config,
             telemetry::Telemetry::default(),
@@ -42,7 +38,7 @@ impl BatchWriter {
     }
 
     pub(crate) fn observed(
-        series: Arc<dyn TimeSeries>,
+        batch: Arc<dyn Batcher>,
         resource: Resource,
         config: IngestConfig,
         signals: telemetry::Telemetry,
@@ -59,7 +55,7 @@ impl BatchWriter {
         let failure = Arc::new(Mutex::new(None));
         let max_record_bytes = config.max_record_bytes;
         let task = runtime.spawn(worker::start(
-            series,
+            batch,
             resource.clone(),
             config,
             receiver,
@@ -74,6 +70,11 @@ impl BatchWriter {
             max_record_bytes,
             wiring,
         })
+    }
+
+    /// The descriptor this writer is bound to.
+    pub fn resource(&self) -> &Resource {
+        &self.resource
     }
 
     pub(super) fn stopped(&self) -> Error {

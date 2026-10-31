@@ -1,5 +1,5 @@
 //! Queue ownership balances depth even when a failed worker drops pending work.
-use crate::Record;
+use crate::store::Record;
 use telemetry::{Context, Observer};
 
 #[derive(Clone)]

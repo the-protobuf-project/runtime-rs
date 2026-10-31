@@ -1,6 +1,6 @@
 //! Instrument queue admission/barriers without confusing admission with commit.
 use super::{BatchWriter, queue::Entry, worker::Command};
-use crate::{Error, Record, Result};
+use crate::store::{Error, Record, Result};
 use telemetry::{FutureExt, SpanKind};
 use tokio::sync::oneshot;
 
