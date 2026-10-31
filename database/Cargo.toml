@@ -34,7 +34,7 @@ sha2 = "0.10"
 reqwest = { workspace = true, features = ["query"] }
 arrow-array = "59"
 arrow-schema = "59"
-arrow-ipc = "59"
+arrow-ipc = "60"
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
