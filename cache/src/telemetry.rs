@@ -370,6 +370,8 @@ mod tests {
 
         fn attempt(&self) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            // `try_update`, its replacement, is newer than the workspace's minimum Rust.
+            #[allow(deprecated)]
             let failed = self
                 .failures
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {

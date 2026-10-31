@@ -1,5 +1,5 @@
 [package]
-name = "runtime-cache"
+name = "tpp-cache"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -13,11 +13,15 @@ categories = ["caching", "asynchronous"]
 [package.metadata.docgen]
 go-source = "runtime-go/cache"
 
+[lib]
+name = "cache"
+
 [features]
 default = []
 live-tests = []
 
 [dependencies]
+telemetry.workspace = true
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
@@ -28,9 +32,9 @@ bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
-redis = { version = "1.6", features = ["tokio-comp", "connection-manager"] }
-memcache = { version = "0.20", default-features = false, features = ["tokio"] }
-crc32fast = "1.4"
+redis = { version = "1.8", features = ["tokio-comp", "connection-manager"] }
+memcache = { version = "0.21", default-features = false, features = ["tokio"] }
+crc32fast = "1.5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

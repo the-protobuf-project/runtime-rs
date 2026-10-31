@@ -10,7 +10,7 @@ built around async traits, explicit capabilities, and caller-owned clients.
 cargo add runtime-cache
 ```
 
-The library is imported as `runtime_cache`.
+The library is imported as `cache`.
 
 ## How it fits together
 
@@ -91,3 +91,12 @@ cargo test -p runtime-cache --features live-tests --test memcached_live
 ## License
 
 Apache-2.0
+
+## Shared runtime observability
+
+`cache::with_observability(document, telemetry::Telemetry)` and its middleware
+form add the shared runtime metrics, correlated logs and cancellation-safe
+traces. Supply the same handles used by database operations. Existing logging
+and metrics APIs remain compatible. See [runtime telemetry](../telemetry/README.md)
+for provider ownership and the bounded-label policy. Keys and values are never
+exported by the shared wrapper; no-op bindings return the original document.

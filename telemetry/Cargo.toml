@@ -1,0 +1,30 @@
+[package]
+name = "tpp-telemetry"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+
+[package.metadata.docgen]
+go-source = "runtime-go/telemetry"
+
+[lib]
+name = "telemetry"
+
+[features]
+default = []
+tpp-sdk = ["dep:telemetry-sdk"]
+
+[dependencies]
+opentelemetry.workspace = true
+tracing.workspace = true
+tracing-opentelemetry = "0.34"
+telemetry-sdk = { package = "telemetry", git = "https://github.com/the-protobuf-project/telemetry", rev = "5b18b2cb02bb88d7dd1948333efb8e29ee688489", optional = true }
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
+tokio.workspace = true
+futures.workspace = true

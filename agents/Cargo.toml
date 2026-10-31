@@ -1,0 +1,87 @@
+[package]
+name = "tpp-agents"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+keywords = ["mcp", "a2a", "agents", "grpc", "runtime"]
+categories = ["network-programming", "asynchronous"]
+
+# Consumed by tools/docgen to build the README's "Go source" column.
+[package.metadata.docgen]
+go-source = "runtime-go/agents"
+
+[lib]
+name = "agents"
+
+[features]
+default = ["mcp", "a2a"]
+# Go compiles a subpackage only when something imports it. Cargo has no such
+# thing, so the two protocol modules are features instead — same "pay for what
+# you use", stated the way Cargo states it.
+mcp = [
+    "dep:rmcp",
+    "dep:serde",
+    "dep:serde_json",
+    "dep:futures",
+    "dep:uuid",
+    "dep:sha2",
+    "dep:tonic-types",
+    "dep:tonic-health",
+    "dep:bytes",
+    "dep:http-body",
+]
+a2a = ["dep:a2a", "dep:a2a-server", "dep:futures", "dep:serde_json", "dep:uuid", "dep:chrono", "dep:a2a-grpc", "dep:a2a-pb", "dep:tower"]
+
+
+
+[dependencies]
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+axum = { workspace = true }
+tonic = { workspace = true }
+tower-http = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+async-trait = { workspace = true }
+http = { workspace = true }
+
+rmcp = { version = "3.8", optional = true, features = [
+    "server",
+    "macros",
+    "transport-streamable-http-server",
+    "transport-io",
+    "elicitation",
+] }
+
+# a2a-grpc and a2a-pb are not published to crates.io, so the whole workspace is
+# taken from git and pinned to one revision rather than mixing a registry copy
+# of the core types with a git copy of the gRPC binding.
+a2a = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-lf", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
+a2a-server = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-server-lf", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
+# The gRPC binding (`GrpcHandler`) and the generated `lf.a2a.v1` service it implements, from
+# the same pinned revision as the two crates above, so the proto the binding speaks is the one the core types model.
+# Default features are off: they only pick a TLS stack for the SDK's own client.
+a2a-grpc = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-grpc", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true, default-features = false }
+a2a-pb = { git = "https://github.com/a2aproject/a2a-rs", package = "a2a-pb", rev = "9a8d77eb9458e4a7d3673d3e11f00c8536cf0318", optional = true }
+# Probes a router for an existing route without running any handler on it.
+tower = { workspace = true, optional = true }
+
+futures = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+uuid = { workspace = true, optional = true }
+chrono = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+sha2 = { version = "0.10", optional = true }
+tonic-types = { version = "0.14", optional = true }
+tonic-health = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http-body = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+reqwest = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }

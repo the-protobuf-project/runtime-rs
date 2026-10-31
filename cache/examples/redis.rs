@@ -12,13 +12,13 @@
 
 use std::{env, sync::Arc, time::Duration};
 
-use futures::FutureExt;
-use runtime_cache::{
+use cache::{
     CacheError, Config, Provider, Result, chain,
     core::{Loader, Options},
     drivers::redis::{RedisClient, RedisConfig, RedisProvider},
     typed, with_logging_middleware, with_retry_middleware,
 };
+use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -37,7 +37,7 @@ struct User {
 }
 
 /// Demonstrates every strategy over one selected Redis database.
-async fn exercise(db: &runtime_cache::DB) -> Result<()> {
+async fn exercise(db: &cache::DB) -> Result<()> {
     let options = Options::default();
     let alice = User {
         name: "Alice".to_owned(),

@@ -13,7 +13,7 @@
 //! ```no_run
 //! use std::{sync::Arc, time::Duration};
 //!
-//! use runtime_cache::{
+//! use cache::{
 //!     Config, Provider, Result, chain,
 //!     core::Options,
 //!     drivers::redis::{RedisClient, RedisConfig, RedisProvider},
@@ -158,6 +158,8 @@ pub mod drivers;
 pub mod error;
 pub mod logging;
 pub mod middleware;
+mod observed;
+pub use observed::{with_observability, with_observability_middleware};
 mod operation_timeout;
 pub mod retry;
 pub mod strategies;
