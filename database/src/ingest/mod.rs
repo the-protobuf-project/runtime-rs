@@ -1,4 +1,4 @@
-//! Bounded continuous ingestion over the portable TimeSeries capability.
+//! Bounded continuous ingestion over the Batcher capability.
 mod admission;
 mod batch;
 mod config;
@@ -8,25 +8,20 @@ mod writer;
 pub use config::IngestConfig;
 pub use writer::BatchWriter;
 
-impl crate::DB {
+impl crate::store::DB {
     /// Starts a background writer bound to this resource and database.
     /// Flush or close it to observe durability and terminal errors.
     pub fn batch_writer(
         &self,
-        resource: crate::Resource,
+        resource: crate::store::Resource,
         config: IngestConfig,
-    ) -> crate::Result<BatchWriter> {
-        self.series()?;
+    ) -> crate::store::Result<BatchWriter> {
         BatchWriter::observed(
-            self.capabilities
-                .series
-                .as_ref()
-                .expect("checked series")
-                .clone(),
+            self.batch.clone(),
             resource,
             config,
             self.telemetry.clone(),
-            self.backend(),
+            self.backend,
         )
     }
 }

@@ -1,10 +1,14 @@
 //! Bounded background ingestion, flush/drain, keyset pages and streamed scans.
-use super::{Result, model::Reading};
-use database::{Collection, DB, IngestConfig, Range, Resource, Scan};
+use super::{
+    Result,
+    model::{Reading, window},
+};
+use database::IngestConfig;
+use database::store::{DB, For, Scan};
 use futures::TryStreamExt;
 
-pub async fn run(db: &DB, resource: &Resource, start: i64) -> Result<()> {
-    let readings = Collection::<Reading>::new(db.clone(), resource.clone());
+pub async fn run(db: &DB, start: i64) -> Result<()> {
+    let readings = For::<Reading>::new(db);
     let writer = readings.batch_writer(IngestConfig {
         batch_size: 3,
         queue_capacity: 2,
@@ -21,16 +25,15 @@ pub async fn run(db: &DB, resource: &Resource, start: i64) -> Result<()> {
     }
     writer.flush().await?; // Confirms server acknowledgement, not just admission.
     writer.close().await?; // Stops admission and drains remaining points.
-    let mut window = Range::new(start + 100, start + 110);
-    window.limit = 3;
-    let mut token = None;
+    let mut range = window(start + 100, start + 110);
+    range.page_size = 3;
     let mut count = 0;
     loop {
-        let page = readings.page(&window, token.as_deref()).await?;
-        count += page.items.len();
-        println!("5. Ingested points, next keyset page: {:?}", page.items);
-        token = page.next_page_token;
-        if token.is_none() {
+        let (page, next) = readings.range(&range).await?;
+        count += page.len();
+        println!("5. Ingested points, next keyset page: {page:?}");
+        range.page_token = next;
+        if range.page_token.is_empty() {
             break;
         }
     }

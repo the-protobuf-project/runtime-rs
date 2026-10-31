@@ -1,7 +1,7 @@
 //! Create an actual database from Rust, including its retention policy.
 use super::Result;
-use database::drivers::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider};
-use database::{DB, Provider, Retention};
+use database::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider, Retention};
+use database::store::{DB, Provider};
 use std::time::Duration;
 
 pub async fn run(

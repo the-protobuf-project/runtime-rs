@@ -1,5 +1,6 @@
 //! Controllable storage to test queue bounds and shutdown under real failures.
-use database::{Aggregate, Buckets, Error, Range, Record, Resource, Result, TimeSeries};
+use database::store::{Batcher, Error, Record, Resource, Result, WriteResult};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::{Notify, Semaphore};
 
@@ -10,11 +11,14 @@ pub struct Sink {
     pub committed: Notify,
     pub gate: Option<Arc<Semaphore>>,
     pub fail: bool,
+    /// Batches that have started writing, finished or not.
+    pub entered: AtomicUsize,
 }
 
 #[async_trait::async_trait]
-impl TimeSeries for Sink {
-    async fn write(&self, _: &Resource, records: &[Record]) -> Result<()> {
+impl Batcher for Sink {
+    async fn create_many(&self, _: &Resource, records: &[Record]) -> Result<Vec<WriteResult>> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
         self.started.notify_one();
         if let Some(gate) = &self.gate {
             gate.acquire().await.unwrap().forget();
@@ -24,12 +28,9 @@ impl TimeSeries for Sink {
         }
         self.batches.lock().unwrap().push(records.to_vec());
         self.committed.notify_one();
-        Ok(())
+        Ok(Vec::new())
     }
-    async fn range(&self, _: &Resource, _: &Range) -> Result<Vec<Record>> {
-        unreachable!()
-    }
-    async fn aggregate(&self, _: &Resource, _: &Aggregate) -> Result<Buckets> {
+    async fn get_many(&self, _: &Resource, _: &[String]) -> Result<Vec<Record>> {
         unreachable!()
     }
 }

@@ -1,8 +1,7 @@
 //! Real-server lifecycle, paged/streamed reads, and typed background ingestion.
-use database::drivers::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider};
-use database::{
-    Collection, Column, Error, IngestConfig, Kind, Provider, Range, Resource, Retention, Role, Scan,
-};
+use database::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider, Retention};
+use database::store::{Column, Error, Kind, Provider, RangeOptions, Resource, Role, Scan};
+use database::{IngestConfig, collection};
 use futures::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -33,7 +32,10 @@ async fn retention_ingestion_streaming_pagination_and_table_deletion() {
         .set_database(&name)
         .await
         .unwrap();
-    assert!(matches!(db.row_deletion(), Err(Error::Unsupported { .. })));
+    assert!(matches!(
+        db.tx.run(Box::new(|_| Box::pin(async { Ok(()) }))).await,
+        Err(Error::Unimplemented { .. })
+    ));
     let resource = Resource::new(
         "readings",
         vec![
@@ -43,21 +45,27 @@ async fn retention_ingestion_streaming_pagination_and_table_deletion() {
         ],
     )
     .unwrap();
-    let readings = Collection::<Reading>::new(db.clone(), resource.clone());
+    let readings = collection::<Reading>(&db, resource.clone());
+    let window = |start, end| RangeOptions {
+        start,
+        end,
+        ..RangeOptions::default()
+    };
     let old = now - 7_200_000_000_000;
     readings
-        .write(&[Reading {
+        .create(&Reading {
             device: "expired".into(),
             value: -1.0,
             observed_at: old,
-        }])
+        })
         .await
         .unwrap();
     assert!(
         readings
-            .range(&Range::new(old, old + 1))
+            .range(&window(old, old + 1))
             .await
             .unwrap()
+            .0
             .is_empty()
     );
     let writer = readings
@@ -93,16 +101,15 @@ async fn retention_ingestion_streaming_pagination_and_table_deletion() {
         (0..10).map(f64::from).collect::<Vec<_>>()
     );
     for descending in [false, true] {
-        let mut range = Range::new(now, now + 2);
-        range.limit = 2;
+        let mut range = window(now, now + 2);
+        range.page_size = 2;
         range.descending = descending;
-        let mut token = None;
         let mut values = Vec::new();
         loop {
-            let page = readings.page(&range, token.as_deref()).await.unwrap();
-            values.extend(page.items.into_iter().map(|row| row.value));
-            token = page.next_page_token;
-            if token.is_none() {
+            let (page, next) = readings.range(&range).await.unwrap();
+            values.extend(page.into_iter().map(|row| row.value));
+            range.page_token = next;
+            if range.page_token.is_empty() {
                 break;
             }
             assert!(values.len() <= 10, "paging repeated a cursor");
@@ -114,11 +121,8 @@ async fn retention_ingestion_streaming_pagination_and_table_deletion() {
         };
         assert_eq!(values, expected);
     }
-    db.maintenance()
-        .unwrap()
-        .drop_table(&resource)
-        .await
-        .unwrap();
-    assert!(readings.range(&Range::new(now, now + 2)).await.is_err());
+    assert!(db.schema.has_schema(&resource).await.unwrap());
+    db.schema.drop_schema(&resource).await.unwrap();
+    assert!(readings.range(&window(now, now + 2)).await.is_err());
     admin.drop_database(&name).await.unwrap();
 }

@@ -1,161 +1,103 @@
 # Database
 
-Descriptor-driven storage with the InfluxDB 3 Rust SDK (`influxdb3-client` 0.3.0).
-Live-tested against InfluxDB 3 Core 3.12.2. Every Rust source file, example and
-test stays under 200 lines including documentation; a test enforces the rule.
+Descriptor-driven storage shaped after
+[runtime-go/database](https://github.com/the-protobuf-project/runtime-go/tree/main/database),
+so one store generator emits Go and Rust clients from the same template.
+Backends: InfluxDB 3 (`influxdb3-client` 0.3.0, live-tested against Core
+3.12.2) and Arrow IPC captures. Every Rust file stays under 200 lines; a test
+enforces it.
 
-## Create a database from Rust
+## The contract (`database::store`)
 
-An administrative token is required. No database-creation CLI is needed:
-
-```rust
-use std::time::Duration;
-use database::{Provider, Retention};
-use database::drivers::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider};
-
-async fn example() -> Result<(), Box<dyn std::error::Error>> {
-let config = ClientConfig::builder()
-    .host("http://localhost:8181")
-    .token(std::env::var("INFLUX_TOKEN")?)
-    .database("sensors")
-    .build()?;
-let admin = InfluxAdmin::new(&config, Duration::from_secs(30))?;
-admin.create_database("sensors", Retention::For(Duration::from_secs(86400))).await?;
-let db = InfluxProvider::new(config).set_database("sensors").await?;
-Ok(())
-}
-```
-
-Use `Retention::Infinite` to omit expiry. Core retention is fixed at creation.
-A finite period must be whole minutes and at least one hour. AlreadyExists is
-returned for an existing database; creation never silently changes its policy.
-The provisioning example is in `examples/influxdb/provision.rs`.
-
-## Capabilities and ownership
-
-| Entry point | Behavior |
+| runtime-go | Rust |
 | --- | --- |
-| `db.series()` | Point writes, bounded time ranges, bucketed aggregation |
-| `db.reader()` | Pull-based scans and keyset pages |
-| `db.maintenance().drop_table(...)` | Removes the table schema AND all its data |
-| `db.row_deletion()` | Unsupported on Core: no selective time-range deletion |
-| `db.records()` | Unsupported: Influx points are not insert-only record CRUD |
-| `InfluxAdmin` | Create databases with retention; explicitly drop databases |
-| `Collection<T>` | Serde model views over the same descriptors and operations |
-| `db.batch_writer(...)` | Bounded asynchronous ingestion; flush/close barriers |
+| `Provider.SetDatabase(ctx, name)`, `Backend()` | `Provider::set_database(name)`, `backend()` |
+| `DB{Driver, Tx, Schema, Series, Backend, Name}`, `Close()` | `DB { driver, tx, schema, batch, series, streams, backend, name }`, `close()` |
+| `store.Build(d, backend, name, release)` | `DB::build(backend, name, Capabilities { .. })` |
+| `Driver`: Create/Get/Update/Delete/List/Count/Exists | `Driver`; `DB` derefs to it, so `db.create(..)` |
+| `Batcher.CreateMany/GetMany` | `db.batch.create_many/get_many` |
+| `Migrator.EnsureSchema/DropSchema/HasSchema` | `db.schema.ensure_schema/drop_schema/has_schema` |
+| `TimeSeries.EnsureHypertable/Range/Aggregate` | `db.series.ensure_hypertable/range/aggregate`, same option and `Bucket` shapes |
+| `ListOptions/ListResult/WriteResult{Pending}` | same, `WriteResult { record, pending, metadata }` |
+| `For[T](d, res)` | `For::<T>::new(&db)` for a generated `Model` |
+| `database.Collection[T]` | `database::collection::<T>(&db, resource)` for serde structs |
+| `store.Instrument`, `NewRegistry` | `store::instrument`, `Registry::new` |
+| `ErrNotFound/ErrAlreadyExists/ErrUnimplemented` | `Error::NotFound/AlreadyExists/Unimplemented { backend, capability }` |
 
-Database selection is read-only. Config-based selection allocates a database-
-bound SDK pool; cloning a DB shares it. `from_client(Arc<Client>)` accepts only
-that client's existing database. Administration uses a separate HTTP pool for
-endpoints absent from the SDK, respecting its token, headers, proxy and CA.
-Dropping a DB does not explicitly shut down another owner's pools.
+Every capability is always present; one a backend lacks refuses by name.
+Filters are the AIP-160 subset runtime-go accepts — conjunctions of
+`column op value` with `= != > >= < <=`, OR refused — parsed once for every
+backend. Times are epoch nanoseconds (RFC 3339 also accepted in filters).
+Streams (`db.streams`) are a Rust extension for windows too large for pages.
 
-## Writes and background ingestion
+## Generated models
 
-Point identity is table + complete tag set + timestamp. Rewrites merge fields;
-they do not provide insert-only uniqueness or rollback. Tags are nonempty
-strings. All descriptor columns are required on writes. Observations use
-explicit signed epoch nanoseconds; fields retain scalar integer precision.
+The generator emits a static descriptor and conversions per message; see
+[examples/influxdb/model.rs](examples/influxdb/model.rs):
 
-Direct writes validate the complete batch, with at most 10,000 points per call.
-The adapter pins nanosecond precision, synchronized WAL, no injected default
-tags, and no partial-line acceptance. Multi-request batches are still not
-atomic; a timeout or cancelled write can have committed on the server.
-
-`Collection::batch_writer` returns a typed producer. `write` means queue
-admission only. `flush` is a barrier covering records admitted before it;
-`close` ends admission and drains remaining records. Flush/close return terminal
-backend failures. The worker stops on failure rather than silently dropping
-errors or retrying a whole partially committed batch beyond SDK policy.
-
-IngestConfig bounds the queue, points per batch and bytes per record, and sets
-flush interval and per-write timeout. Full queues apply backpressure. Cancelled
-sends aren't admitted. Cancelling a close waiter doesn't abort the worker.
-Dropping a writer starts draining while Tokio stays alive; explicit close is
-needed to wait and observe errors. The queue is not a crash-durable spool.
-
-## Ranges, pages and streams
-
-Ranges use `[start, end)`, typed ANDed comparisons, and descriptor-checked
-identifiers. Values are SQL parameters. Ordering is by time and the complete
-declared tag set. A range/page holds at most 10,000 records (default 100).
-
-`Collection::page(&range, token)` uses keyset continuation without OFFSET.
-Equal timestamps advance through tag identity. Tokens bind the host, database,
-descriptor and query; changed bounds, filters, order or page size are rejected.
-The descriptor must include every tag in the actual table. Tokens are opaque,
-not encrypted or authorization. Concurrent inserts/updates are not a snapshot;
-points inserted before a cursor position aren't replayed by later pages.
-
-`Collection::stream(&Scan::new(start, end))` scans the time window without a
-row cap by default. Scan.limit optionally bounds the total rows. Polling pulls
-SDK Arrow Flight batches; the adapter holds only one decoded server batch.
-Drop cancels transport. The complete stream deadline includes consumer time;
-slow consumers should configure the provider/driver timeout appropriately.
-Broken streams return an error without retrying/replaying delivered rows.
-Server query-window, retention and query-memory limits still apply.
-
-Aggregations run on the server in fixed whole-second buckets aligned to the
-Unix epoch. They return named reductions with group tags, with no gap filling.
-
-## Deletion limits
-
-Core supports whole-table/database deletion and automatic retention expiry.
-Table deletion removes schema and all tag sets; it is never substituted for a
-requested time range. Physical reclamation follows server soft-delete/grace
-rules; retention filters expired points at query time before reclamation.
-
-Selective row deletion and mutable retention require Enterprise features not
-implemented by this Core adapter. Core 3.12.2 silently ignores the documented
-Enterprise `data_only` flag: sending it drops the table. This crate NEVER sends
-that flag or claims to clear data while preserving schema.
-
-## InfluxDB examples
-
-All examples live together in [examples/influxdb](examples/influxdb/README.md).
-One runnable workflow creates its own database from Rust, exercises writes,
-rewrites, filtering, aggregation, background ingestion, pagination, streaming
-and retention, then deletes its table and database. Docker stays running.
-
-```sh
-docker compose -f database/docker/compose.yaml up -d --wait
-set -a
-source database/docker/.env
-set +a
-cargo run -p tpp-database --example influxdb
+```rust,ignore
+impl Model for Reading {
+    fn resource() -> &'static Resource { &READING }
+    fn to_record(&self) -> Result<Record> { /* column values */ }
+    fn from_record(record: Record) -> Result<Self> { /* back again */ }
+}
+let readings = For::<Reading>::new(&db);
+readings.create(&reading).await?;
+let (page, next_token) = readings.range(&RangeOptions { start, end, ..Default::default() }).await?;
 ```
 
-For a fresh server, obtain an administrative token through its onboarding flow
-and store it locally as INFLUX_TOKEN. Never commit it. See the examples folder's
-README for the ordered file guide and environment setup.
+## Sustained writes and recordings
 
-## Shared runtime telemetry
+Generated code calls `create` once per point. `database::buffered(db, config)`
+queues each create into a bounded background batch writer and returns
+`pending: true`, runtime-go's signal for an accepted but not yet durable write.
+`database::mirror(primary, copy)` writes to both stores concurrently and fails a
+write if either side fails; reads use the primary. `db.close()` drains every
+queue and closes both stores.
 
-Use `InfluxProvider::with_telemetry(signals)` and
-`InfluxAdmin::with_telemetry(signals)` with the same `telemetry::Telemetry`.
-`database::instrument(db, signals)` works over any selected backend while
-preserving all capabilities. No-op is the default; exporters are application-
-owned. See [runtime telemetry](../telemetry/README.md) for metrics and lifetimes.
-
-The complete example exports metrics, logs and traces through the linked SDK:
-
-```sh
-docker compose -f database/docker/compose.yaml --profile telemetry up -d
-cargo run -p tpp-database --example influxdb --features telemetry-sdk
+```rust,ignore
+let db = buffered(mirror(influx, arrow), IngestConfig { max_inflight: 8, ..Default::default() })?;
 ```
 
-Load the ignored environment as above. Collector output is available with
-`docker compose -f database/docker/compose.yaml logs otel-collector`.
+Each durable InfluxDB write waits for the server's WAL flush (~1 s), so
+throughput scales with batches in flight. Measured against Core 3.12.2 with
+5,000-point batches: 1 in flight ~7k/s, 4 ~20k/s, 8 ~40k/s. A 60 s run of
+the capture example at 22,000 points/s stored all 1,320,220 points in both
+InfluxDB and Arrow. Queued points are in memory: call `close` before exit.
 
-## Verification and sources
+## InfluxDB (`database::influxdb`)
 
-Unit and HTTP/Flight fixture tests cover input/cursor validation, equal-time
-ordering, SDK transport, batch backpressure, timer/manual/close flushing,
-terminal errors, cancelled sends/close, and read/write timeouts. Live tests
-verify retention, rewrites, reads, aggregates, ingestion, pages in both time
-directions, streamed decoding, and explicitly whole-table/database deletion.
+A point is a record without a key: table + complete tag set + timestamp.
+Rewriting an identity merges fields. `create`/`create_many` write points,
+`list`/`count`/`range`/`aggregate` read them, and get/update/delete/exists and
+transactions are refused. Writes pin nanosecond precision, synchronized WAL,
+no partial-line acceptance, and at most 10,000 points per request; requests
+are not atomic together. `range` pages use keyset tokens bound to the host,
+database, descriptor and query, with `total: -1` (a count is a second scan).
+
+`InfluxAdmin` creates databases with `Retention` (fixed at creation on Core)
+and drops them. `schema.drop_schema` removes a table and all its points. Core
+has no selective row deletion; this crate never sends Enterprise's
+`data_only` flag, which Core ignores and drops the table.
+
+## Arrow captures (`database::arrow`)
+
+Append-only IPC stream segments under `<root>/<database>/<table>/`, rotated by
+size or age (default 1 GiB / 15 min), each published only once its header is
+written and given a `.bounds` sidecar on close so range reads skip it. A crash
+loses at most the batch being written; `load` returns the rest. Pages use
+offset tokens with totals. Open the files with pyarrow, polars or DuckDB.
+
+## Examples and telemetry
+
+- [examples/influxdb](examples/influxdb/README.md): the full InfluxDB workflow
+  as generated client code, in a disposable database.
+- [examples/capture](examples/capture/README.md): 22k/s for 15 minutes into
+  InfluxDB with every point recorded to Arrow, verified by counting both.
+
+`with_telemetry(signals)` on providers and `store::instrument(db, signals)`
+report every capability without names, keys, filters or raw errors; no-op by
+default. See [runtime telemetry](../telemetry/README.md).
 
 - https://github.com/InfluxCommunity/influxdb3-rust
 - https://docs.influxdata.com/influxdb3/core/reference/internals/data-retention/
-- https://docs.influxdata.com/influxdb3/enterprise/admin/tables/delete/
-- https://docs.influxdata.com/influxdb3/enterprise/admin/delete-data/

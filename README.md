@@ -18,7 +18,7 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 | --- | --- | --- | --- |
 | [`agents`](agents) | `tpp-agents` | `runtime-go/agents` | One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain |
 | [`cache`](cache) | `tpp-cache` | `runtime-go/cache` | Cache drivers and read-through/write-through strategies over pluggable backends |
-| [`database`](database) | `tpp-database` | `runtime-go/database` | Descriptor-driven database capabilities with an InfluxDB 3 time-series backend |
+| [`database`](database) | `tpp-database` | `runtime-go/database` | runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends |
 | [`grpc`](grpc) | `tpp-grpc` | `runtime-go/grpc` | One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS |
 | [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions |
 | [`telemetry`](telemetry) | `tpp-telemetry` | `runtime-go/telemetry` | Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers |
@@ -28,7 +28,7 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 ```bash
 cargo add tpp-agents     # One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain
 cargo add tpp-cache      # Cache drivers and read-through/write-through strategies over pluggable backends
-cargo add tpp-database   # Descriptor-driven database capabilities with an InfluxDB 3 time-series backend
+cargo add tpp-database   # runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends
 cargo add tpp-grpc       # One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS
 cargo add tpp-network    # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
 cargo add tpp-telemetry  # Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers

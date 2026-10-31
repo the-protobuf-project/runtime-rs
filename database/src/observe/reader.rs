@@ -1,21 +1,10 @@
-//! Pages complete on return; stream observations continue until EOF/error/drop.
-use super::{Observed, outcome, run, stream::ObservedStream};
-use crate::{Page, Range, RecordStream, Resource, Result, Scan, SeriesReader};
+//! Stream observations continue until EOF, error or drop.
+use super::{Observed, outcome, stream::ObservedStream};
+use crate::store::{RecordStream, Resource, Result, Scan, SeriesReader};
 use telemetry::{FutureExt, SpanKind};
 
 #[async_trait::async_trait]
 impl SeriesReader for Observed<dyn SeriesReader> {
-    async fn page(&self, res: &Resource, range: &Range, token: Option<&str>) -> Result<Page> {
-        run(
-            &self.observer,
-            self.backend,
-            "page",
-            self.next.page(res, range, token),
-            0,
-            |page| page.items.len(),
-        )
-        .await
-    }
     async fn stream(&self, res: &Resource, scan: &Scan) -> Result<RecordStream> {
         let operation = self
             .observer

@@ -1,10 +1,10 @@
 //! Opt-in real InfluxDB test. Writes observations to the supplied database.
-use database::drivers::influxdb::{ClientConfig, InfluxProvider};
-use database::{
-    Aggregate, Column, Comparison, Kind, Predicate, Provider, Range, Reduce, Reduction, Resource,
-    Role,
+use database::influxdb::{ClientConfig, InfluxProvider};
+use database::store::{
+    AggregateOptions, Column, Kind, Provider, RangeOptions, Reducer, Reduction, Resource, Role,
 };
 use serde_json::json;
+use std::time::Duration;
 
 #[tokio::test]
 #[ignore = "requires INFLUX_HOST, INFLUX_DATABASE and a token; writes real points"]
@@ -33,43 +33,42 @@ async fn influxdb3_round_trip_and_duplicate_point_semantics() {
         }))
         .unwrap()
     };
-    let series = db.series().unwrap();
-    series
-        .write(&resource, &[row(start + 1, 10.0), row(start + 2, 20.0)])
+    db.batch
+        .create_many(&resource, &[row(start + 1, 10.0), row(start + 2, 20.0)])
         .await
         .unwrap();
-    series
-        .write(&resource, &[row(start + 1, 30.0)])
-        .await
-        .unwrap();
-    let mut range = Range::new(start, start + 3);
-    range.predicates.push(Predicate {
-        column: "device".into(),
-        comparison: Comparison::Eq,
-        value: json!(device),
-    });
-    let records = series.range(&resource, &range).await.unwrap();
+    db.create(&resource, &row(start + 1, 30.0)).await.unwrap();
+    let filter = format!("device = \"{device}\"");
+    let range = RangeOptions {
+        start,
+        end: start + 3,
+        filter: filter.clone(),
+        ..RangeOptions::default()
+    };
+    let records = db.series.range(&resource, &range).await.unwrap().items;
     assert_eq!(records.len(), 2);
     assert_eq!(records[0]["value"], 30.0);
     assert_eq!(records[1]["value"], 20.0);
-    let buckets = series
+    let buckets = db
+        .series
         .aggregate(
             &resource,
-            &Aggregate {
-                range,
-                every_seconds: 60,
-                reduce: vec![Reduce {
-                    column: "value".into(),
-                    function: Reduction::Mean,
-                    alias: "mean".into(),
-                }],
+            &AggregateOptions {
+                start,
+                end: start + 3,
+                every: Duration::from_secs(60),
+                reduce: vec![Reduction::new(Reducer::Avg, "value", "mean")],
                 group_by: vec!["device".into()],
+                filter,
+                ..AggregateOptions::default()
             },
         )
         .await
         .unwrap();
     assert_eq!(buckets.len(), 1);
-    assert_eq!(buckets[0]["mean"], 25.0);
-    assert_eq!(buckets[0]["observed_at"], start);
-    assert!(db.records().is_err());
+    assert_eq!(buckets[0].values["mean"], 25.0);
+    assert_eq!(buckets[0].start, start);
+    assert_eq!(buckets[0].group["device"], device);
+    assert!(db.get(&resource, "k").await.is_err());
+    assert!(db.schema.has_schema(&resource).await.unwrap());
 }

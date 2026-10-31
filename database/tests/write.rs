@@ -1,10 +1,8 @@
 //! Exercise the real SDK HTTP path against controlled server responses.
 mod common;
 use common::{Reading, record, resource};
-use database::drivers::influxdb::{
-    Client, ClientConfig, InfluxDriver, InfluxProvider, RetryConfig,
-};
-use database::{Capabilities, Collection, DB, Error, Provider, TimeSeries};
+use database::influxdb::{Client, ClientConfig, InfluxDriver, InfluxProvider, RetryConfig};
+use database::store::{Batcher, Capabilities, DB, Driver, Error, Provider};
 use std::{sync::Arc, time::Duration};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -42,23 +40,29 @@ async fn typed_write_uses_v3_auth_precision_and_durable_policy() {
         .expect(1)
         .mount(&server)
         .await;
-    let db = DB::new(
+    let driver = Arc::new(driver(&server).await);
+    let db = DB::build(
         "influxdb3",
-        "sensors".into(),
+        "sensors",
         Capabilities {
-            series: Some(Arc::new(driver(&server).await)),
+            driver: Some(driver.clone()),
+            batch: Some(driver),
             ..Capabilities::default()
         },
     );
-    assert!(db.records().is_err());
-    Collection::new(db, resource())
-        .write(&[Reading {
+    assert!(matches!(
+        db.get(&resource(), "k").await,
+        Err(Error::Unimplemented { .. })
+    ));
+    let written = database::collection(&db, resource())
+        .create(&Reading {
             device: "boiler".into(),
             temperature: 22.5,
             observed_at: 1234567890,
-        }])
+        })
         .await
         .unwrap();
+    assert!(!written.pending);
     let requests = server.received_requests().await.unwrap();
     assert!(!requests[0].url.query_pairs().any(|(k, _)| k == "no_sync"));
 }
@@ -70,10 +74,10 @@ async fn invalid_later_record_prevents_the_entire_network_write() {
     let mut invalid = record();
     invalid.remove("device");
     assert!(matches!(
-        driver.write(&resource(), &[record(), invalid]).await,
+        driver.create_many(&resource(), &[record(), invalid]).await,
         Err(Error::Invalid(_))
     ));
-    driver.write(&resource(), &[]).await.unwrap();
+    driver.create_many(&resource(), &[]).await.unwrap();
     assert!(server.received_requests().await.unwrap().is_empty());
 }
 
@@ -89,7 +93,7 @@ async fn server_errors_keep_the_sdk_source_and_are_not_reported_as_success() {
         .await;
     let error = driver(&server)
         .await
-        .write(&resource(), &[record()])
+        .create(&resource(), &record())
         .await
         .unwrap_err();
     assert!(matches!(
@@ -112,7 +116,7 @@ async fn timeout_bounds_the_complete_write() {
     let driver = driver(&server).await;
     let driver = InfluxDriver::new(driver.client().clone(), Duration::from_millis(25)).unwrap();
     assert!(matches!(
-        driver.write(&resource(), &[record()]).await,
+        driver.create(&resource(), &record()).await,
         Err(Error::Timeout)
     ));
 }

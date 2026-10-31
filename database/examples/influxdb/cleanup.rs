@@ -1,17 +1,14 @@
-//! Explicit table deletion; selective row deletion is unsupported on Core.
-use super::Result;
-use database::{DB, Error, Resource};
+//! Explicit table deletion; keyed deletes are refused by name.
+use super::{Result, model::Reading};
+use database::store::{DB, Error, Model};
 
-pub async fn run(db: &DB, resource: &Resource) -> Result<()> {
-    match db.row_deletion() {
-        Err(Error::Unsupported { .. }) => {
-            println!("   Core does not support selective row deletion")
-        }
-        Err(error) => return Err(error.into()),
-        Ok(_) => println!("   This backend also offers selective row deletion"),
+pub async fn run(db: &DB) -> Result<()> {
+    match db.delete(Reading::resource(), "boiler").await {
+        Err(Error::Unimplemented { capability, .. }) => println!("   InfluxDB cannot {capability}"),
+        other => return Err(format!("expected a refusal, got {other:?}").into()),
     }
     // This removes schema AND every point, only in this run's disposable DB.
-    db.maintenance()?.drop_table(resource).await?;
+    db.schema.drop_schema(Reading::resource()).await?;
     println!("   Deleted the example table and all its observations");
     Ok(())
 }

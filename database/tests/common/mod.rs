@@ -1,6 +1,6 @@
 //! Shared telemetry model and descriptors for adapter tests.
 
-use database::{Column, Kind, Record, Resource, Role};
+use database::store::{Column, Kind, Record, Resource, Role};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

@@ -1,6 +1,7 @@
 //! Background spans link to producers without leaking task-local context.
 use super::{Backend, Harness, db, record, resource, spans};
-use database::{IngestConfig, instrument};
+use database::IngestConfig;
+use database::store::instrument;
 use std::{sync::Arc, time::Duration};
 use telemetry::opentelemetry::{
     Context,
@@ -52,7 +53,7 @@ async fn ingestion_links_producers_to_batches_and_keeps_queue_depth_balanced() {
     assert_eq!(batch.links.links.len(), 2);
     let write = completed
         .iter()
-        .find(|s| s.name == "database.write")
+        .find(|s| s.name == "database.create_many")
         .unwrap();
     assert_eq!(write.parent_span_id, batch.span_context.span_id());
     let points = h.measurements();
@@ -72,7 +73,7 @@ async fn ingestion_links_producers_to_batches_and_keeps_queue_depth_balanced() {
 #[tokio::test]
 async fn worker_failure_releases_queue_leases_for_unprocessed_records() {
     use super::sink::Sink;
-    use database::{Capabilities, DB};
+    use database::store::{Capabilities, DB};
     use tokio::sync::Semaphore;
     let h = Harness::new();
     let gate = Arc::new(Semaphore::new(0));
@@ -82,11 +83,11 @@ async fn worker_failure_releases_queue_leases_for_unprocessed_records() {
         ..Sink::default()
     });
     let db = instrument(
-        DB::new(
+        DB::build(
             "fake",
-            "private".into(),
+            "private",
             Capabilities {
-                series: Some(backend.clone()),
+                batch: Some(backend.clone()),
                 ..Capabilities::default()
             },
         ),

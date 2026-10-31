@@ -1,32 +1,23 @@
-//! Typed point writes, identity-preserving rewrites, and time-range reads.
-use super::{Result, model::Reading};
-use database::{Collection, DB, Range, Resource};
+//! Generated-style point writes, identity-preserving rewrites, and windows.
+use super::{
+    Result,
+    model::{Reading, window},
+};
+use database::store::{DB, For};
 
-pub async fn run(db: &DB, resource: &Resource, start: i64) -> Result<()> {
-    let readings = Collection::<Reading>::new(db.clone(), resource.clone());
+pub async fn run(db: &DB, start: i64) -> Result<()> {
+    let readings = For::<Reading>::new(db);
+    let point = |device: &str, value, observed_at| Reading {
+        device: device.into(),
+        value,
+        observed_at,
+    };
     readings
-        .write(&[
-            Reading {
-                device: "boiler".into(),
-                value: 10.0,
-                observed_at: start,
-            },
-            Reading {
-                device: "pump".into(),
-                value: 20.0,
-                observed_at: start + 1,
-            },
-        ])
+        .create_many(&[point("boiler", 10.0, start), point("pump", 20.0, start + 1)])
         .await?;
     // Same table + tag set + timestamp rewrites this point's value.
-    readings
-        .write(&[Reading {
-            device: "boiler".into(),
-            value: 30.0,
-            observed_at: start,
-        }])
-        .await?;
-    let rows = readings.range(&Range::new(start, start + 2)).await?;
+    readings.create(&point("boiler", 30.0, start)).await?;
+    let (rows, _) = readings.range(&window(start, start + 2)).await?;
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].value, 30.0);
     println!("2. Wrote, rewrote and read typed points: {rows:?}");

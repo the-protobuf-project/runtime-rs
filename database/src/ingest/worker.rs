@@ -4,7 +4,9 @@ use super::{
     batch::flush,
     queue::{Entry, Wiring},
 };
-use crate::{Error, Record, Resource, TimeSeries};
+use crate::store::{Batcher, Error, Record, Resource};
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use std::sync::{Arc, Mutex};
 use telemetry::Context;
 use tokio::{
@@ -19,8 +21,19 @@ pub(super) enum Command {
     Flush(oneshot::Sender<Outcome>),
 }
 
+/// Every in-flight batch, awaited to the end; the first failure wins.
+async fn drain(inflight: &mut FuturesUnordered<impl Future<Output = Outcome>>) -> Outcome {
+    let mut first = Ok(());
+    while let Some(done) = inflight.next().await {
+        if first.is_ok() {
+            first = done;
+        }
+    }
+    first
+}
+
 async fn run(
-    series: Arc<dyn TimeSeries>,
+    batch: Arc<dyn Batcher>,
     resource: Resource,
     config: IngestConfig,
     receiver: &mut mpsc::Receiver<Command>,
@@ -32,36 +45,64 @@ async fn run(
         config.flush_interval,
     );
     timer.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    let launch = |pending: &mut Vec<(Record, Context)>| {
+        let entries = std::mem::take(pending);
+        flush(
+            batch.clone(),
+            resource.clone(),
+            entries,
+            config.clone(),
+            wiring.clone(),
+        )
+    };
+    // While every slot is busy the queue is not read, so producers wait.
+    let mut inflight = FuturesUnordered::new();
     loop {
+        let room = inflight.len() < config.max_inflight;
         tokio::select! {
-            command = receiver.recv() => match command {
+            Some(done) = inflight.next(), if !inflight.is_empty() => {
+                let done: Outcome = done;
+                if done.is_err() {
+                    let _ = drain(&mut inflight).await;
+                    return done;
+                }
+            }
+            command = receiver.recv(), if room => match command {
                 Some(Command::Append(record)) => {
                     pending.push(record.dequeue());
                     if pending.len() >= config.batch_size {
-                        flush(series.as_ref(), &resource, &mut pending, &config, wiring).await?;
+                        inflight.push(launch(&mut pending));
                     }
                 }
                 Some(Command::Flush(reply)) => {
-                    let outcome = flush(series.as_ref(), &resource, &mut pending, &config, wiring).await;
+                    inflight.push(launch(&mut pending));
+                    let outcome = drain(&mut inflight).await;
                     let _ = reply.send(outcome.clone());
                     outcome?;
                 }
-                None => return flush(series.as_ref(), &resource, &mut pending, &config, wiring).await,
+                None => {
+                    inflight.push(launch(&mut pending));
+                    return drain(&mut inflight).await;
+                }
             },
-            _ = timer.tick() => flush(series.as_ref(), &resource, &mut pending, &config, wiring).await?,
+            _ = timer.tick(), if room => {
+                if !pending.is_empty() {
+                    inflight.push(launch(&mut pending));
+                }
+            }
         }
     }
 }
 
 pub(super) async fn start(
-    series: Arc<dyn TimeSeries>,
+    batch: Arc<dyn Batcher>,
     resource: Resource,
     config: IngestConfig,
     mut receiver: mpsc::Receiver<Command>,
     failure: Failure,
     wiring: Wiring,
 ) -> Outcome {
-    let outcome = run(series, resource, config, &mut receiver, &wiring).await;
+    let outcome = run(batch, resource, config, &mut receiver, &wiring).await;
     if let Err(error) = &outcome {
         *failure.lock().expect("ingestion failure lock") = Some(error.clone());
     }
