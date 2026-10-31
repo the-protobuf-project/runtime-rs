@@ -3,6 +3,7 @@
 mod cleanup;
 mod ingest;
 mod model;
+mod observability;
 mod provision;
 mod queries;
 mod records;
@@ -14,6 +15,24 @@ pub(crate) type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    use telemetry::{FutureExt, Outcome, SpanKind};
+    let session = observability::Session::new()?;
+    let signals = session.signals();
+    let operation = signals
+        .observer("example")
+        .start("influxdb3", "workflow", SpanKind::Internal);
+    let result = run(signals).with_context(operation.context()).await;
+    operation.finish(if result.is_ok() {
+        Outcome::Ok
+    } else {
+        Outcome::Error
+    });
+    let shutdown = session.close().await;
+    result?;
+    shutdown
+}
+
+async fn run(signals: telemetry::Telemetry) -> Result<()> {
     let config = ClientConfig::from_env()?;
     let now = chrono::Utc::now()
         .timestamp_nanos_opt()
@@ -21,7 +40,7 @@ async fn main() -> Result<()> {
     let name = format!("runtime_example_{now}");
     let start = now - now.rem_euclid(60_000_000_000);
     let resource = model::resource()?;
-    let (admin, db) = provision::run(config, &name).await?;
+    let (admin, db) = provision::run(config, &name, signals).await?;
     let result: Result<()> = async {
         records::run(&db, &resource, start).await?;
         queries::run(&db, &resource, start).await?;

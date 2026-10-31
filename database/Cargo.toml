@@ -15,7 +15,12 @@ go-source = "runtime-go/database"
 [lib]
 name = "database"
 
+[features]
+default = []
+telemetry-sdk = ["telemetry/tpp-sdk"]
+
 [dependencies]
+telemetry.workspace = true
 async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -29,6 +34,7 @@ sha2 = "0.10"
 reqwest = { workspace = true, features = ["query"] }
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 wiremock.workspace = true
 arrow-array = "59"

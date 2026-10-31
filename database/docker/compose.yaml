@@ -25,5 +25,15 @@ services:
       - --data-dir=/var/lib/influxdb3/data
     volumes:
       - influxdb-data:/var/lib/influxdb3
+  otel-collector:
+    image: otel/opentelemetry-collector:0.164.0
+    profiles: [telemetry]
+    restart: unless-stopped
+    command: ["--config=/etc/otelcol/config.yaml"]
+    ports:
+      - "127.0.0.1:${OTEL_COLLECTOR_PORT:-16009}:4317"
+    volumes:
+      - ./otel-collector.yaml:/etc/otelcol/config.yaml:ro
+
 volumes:
   influxdb-data:

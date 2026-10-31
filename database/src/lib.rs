@@ -93,6 +93,8 @@
 
 #![warn(missing_docs)]
 
+mod observe;
+pub use observe::instrument;
 mod access;
 mod collection;
 pub mod drivers;

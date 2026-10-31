@@ -13,6 +13,7 @@ use std::time::Duration;
 #[derive(Clone)]
 pub struct InfluxAdmin {
     http: Http,
+    observer: telemetry::Observer,
 }
 
 impl InfluxAdmin {
@@ -20,12 +21,31 @@ impl InfluxAdmin {
     pub fn new(config: &ClientConfig, timeout: Duration) -> Result<Self> {
         Ok(Self {
             http: Http::new(config, timeout)?,
+            observer: telemetry::Telemetry::default().observer("database"),
         })
+    }
+
+    /// Uses shared signals for explicit database administration operations.
+    pub fn with_telemetry(mut self, signals: telemetry::Telemetry) -> Self {
+        self.observer = signals.observer("database");
+        self
     }
 
     /// Creates a database with explicit expiry. AlreadyExists is returned
     /// rather than accepting an existing database with different retention.
     pub async fn create_database(&self, name: &str, retention: Retention) -> Result<()> {
+        crate::observe::run(
+            &self.observer,
+            "influxdb3",
+            "create_database",
+            self.create(name, retention),
+            0,
+            |_| 0,
+        )
+        .await
+    }
+
+    async fn create(&self, name: &str, retention: Retention) -> Result<()> {
         check_name(name)?;
         let retention = match retention {
             Retention::Infinite => None,
@@ -50,6 +70,18 @@ impl InfluxAdmin {
     /// Soft-deletes this database and all its data. Only call for a database
     /// whose removal is intended; server policy governs physical reclamation.
     pub async fn drop_database(&self, name: &str) -> Result<()> {
+        crate::observe::run(
+            &self.observer,
+            "influxdb3",
+            "drop_database",
+            self.drop_selected(name),
+            0,
+            |_| 0,
+        )
+        .await
+    }
+
+    async fn drop_selected(&self, name: &str) -> Result<()> {
         check_name(name)?;
         self.http
             .request(

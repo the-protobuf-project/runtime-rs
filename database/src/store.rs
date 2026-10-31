@@ -49,6 +49,8 @@ pub struct Capabilities {
 /// pool. Explicitly created BatchWriters have their own draining close.
 #[derive(Clone)]
 pub struct DB {
+    pub(crate) telemetry: telemetry::Telemetry,
+    pub(crate) original: Option<Capabilities>,
     pub(crate) backend: &'static str,
     name: String,
     pub(crate) capabilities: Capabilities,
@@ -58,6 +60,8 @@ impl DB {
     /// Constructs a selection with all its declared capabilities.
     pub fn new(backend: &'static str, name: String, capabilities: Capabilities) -> Self {
         Self {
+            telemetry: telemetry::Telemetry::default(),
+            original: None,
             backend,
             name,
             capabilities,

@@ -1,5 +1,8 @@
 //! Bounded continuous ingestion over the portable TimeSeries capability.
+mod admission;
+mod batch;
 mod config;
+mod queue;
 mod worker;
 mod writer;
 pub use config::IngestConfig;
@@ -14,7 +17,7 @@ impl crate::DB {
         config: IngestConfig,
     ) -> crate::Result<BatchWriter> {
         self.series()?;
-        BatchWriter::new(
+        BatchWriter::observed(
             self.capabilities
                 .series
                 .as_ref()
@@ -22,6 +25,8 @@ impl crate::DB {
                 .clone(),
             resource,
             config,
+            self.telemetry.clone(),
+            self.backend(),
         )
     }
 }

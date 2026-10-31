@@ -1,33 +1,22 @@
 //! One worker owns all admitted records and drains them when senders disappear.
 use super::IngestConfig;
+use super::{
+    batch::flush,
+    queue::{Entry, Wiring},
+};
 use crate::{Error, Record, Resource, TimeSeries};
 use std::sync::{Arc, Mutex};
+use telemetry::Context;
 use tokio::{
     sync::{mpsc, oneshot},
-    time::{Instant, MissedTickBehavior, interval_at, timeout},
+    time::{Instant, MissedTickBehavior, interval_at},
 };
 
 pub(super) type Outcome = std::result::Result<(), Arc<Error>>;
 pub(super) type Failure = Arc<Mutex<Option<Arc<Error>>>>;
 pub(super) enum Command {
-    Append(Record),
+    Append(Entry),
     Flush(oneshot::Sender<Outcome>),
-}
-
-async fn flush(
-    series: &dyn TimeSeries,
-    resource: &Resource,
-    pending: &mut Vec<Record>,
-    config: &IngestConfig,
-) -> Outcome {
-    if pending.is_empty() {
-        return Ok(());
-    }
-    let points = std::mem::take(pending);
-    timeout(config.write_timeout, series.write(resource, &points))
-        .await
-        .map_err(|_| Arc::new(Error::Timeout))?
-        .map_err(Arc::new)
 }
 
 async fn run(
@@ -35,8 +24,9 @@ async fn run(
     resource: Resource,
     config: IngestConfig,
     receiver: &mut mpsc::Receiver<Command>,
+    wiring: &Wiring,
 ) -> Outcome {
-    let mut pending = Vec::with_capacity(config.batch_size);
+    let mut pending: Vec<(Record, Context)> = Vec::with_capacity(config.batch_size);
     let mut timer = interval_at(
         Instant::now() + config.flush_interval,
         config.flush_interval,
@@ -46,19 +36,19 @@ async fn run(
         tokio::select! {
             command = receiver.recv() => match command {
                 Some(Command::Append(record)) => {
-                    pending.push(record);
+                    pending.push(record.dequeue());
                     if pending.len() >= config.batch_size {
-                        flush(series.as_ref(), &resource, &mut pending, &config).await?;
+                        flush(series.as_ref(), &resource, &mut pending, &config, wiring).await?;
                     }
                 }
                 Some(Command::Flush(reply)) => {
-                    let outcome = flush(series.as_ref(), &resource, &mut pending, &config).await;
+                    let outcome = flush(series.as_ref(), &resource, &mut pending, &config, wiring).await;
                     let _ = reply.send(outcome.clone());
                     outcome?;
                 }
-                None => return flush(series.as_ref(), &resource, &mut pending, &config).await,
+                None => return flush(series.as_ref(), &resource, &mut pending, &config, wiring).await,
             },
-            _ = timer.tick() => flush(series.as_ref(), &resource, &mut pending, &config).await?,
+            _ = timer.tick() => flush(series.as_ref(), &resource, &mut pending, &config, wiring).await?,
         }
     }
 }
@@ -69,8 +59,9 @@ pub(super) async fn start(
     config: IngestConfig,
     mut receiver: mpsc::Receiver<Command>,
     failure: Failure,
+    wiring: Wiring,
 ) -> Outcome {
-    let outcome = run(series, resource, config, &mut receiver).await;
+    let outcome = run(series, resource, config, &mut receiver, &wiring).await;
     if let Err(error) = &outcome {
         *failure.lock().expect("ingestion failure lock") = Some(error.clone());
     }

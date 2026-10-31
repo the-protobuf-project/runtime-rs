@@ -158,6 +158,8 @@ pub mod drivers;
 pub mod error;
 pub mod logging;
 pub mod middleware;
+mod observed;
+pub use observed::{with_observability, with_observability_middleware};
 mod operation_timeout;
 pub mod retry;
 pub mod strategies;

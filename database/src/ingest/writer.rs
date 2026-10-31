@@ -1,14 +1,12 @@
 //! Bounded queue admission, explicit durability barriers and draining shutdown.
+use super::queue::Wiring;
 use super::{
     IngestConfig,
     worker::{self, Command, Failure, Outcome},
 };
-use crate::{Error, Record, Resource, Result, TimeSeries};
+use crate::{Error, Resource, Result, TimeSeries};
 use std::sync::{Arc, Mutex};
-use tokio::{
-    sync::{mpsc, oneshot},
-    task::JoinHandle,
-};
+use tokio::{sync::mpsc, task::JoinHandle};
 
 /// A single background batch worker. Share by reference/Arc for concurrent
 /// producers. Write success confirms admission only; flush/close confirm writes.
@@ -19,11 +17,12 @@ use tokio::{
 /// Call close explicitly to wait and observe errors. Cancelling close does not
 /// abort the worker: it still owns and drains the admitted queue.
 pub struct BatchWriter {
-    resource: Resource,
-    sender: mpsc::Sender<Command>,
-    task: JoinHandle<Outcome>,
-    failure: Failure,
-    max_record_bytes: usize,
+    pub(super) resource: Resource,
+    pub(super) sender: mpsc::Sender<Command>,
+    pub(super) task: JoinHandle<Outcome>,
+    pub(super) failure: Failure,
+    pub(super) max_record_bytes: usize,
+    pub(super) wiring: Wiring,
 }
 
 impl BatchWriter {
@@ -33,7 +32,27 @@ impl BatchWriter {
         resource: Resource,
         config: IngestConfig,
     ) -> Result<Self> {
+        Self::observed(
+            series,
+            resource,
+            config,
+            telemetry::Telemetry::default(),
+            "custom",
+        )
+    }
+
+    pub(crate) fn observed(
+        series: Arc<dyn TimeSeries>,
+        resource: Resource,
+        config: IngestConfig,
+        signals: telemetry::Telemetry,
+        backend: &'static str,
+    ) -> Result<Self> {
         config.validate()?;
+        let wiring = Wiring {
+            observer: signals.observer("database_ingestion"),
+            backend,
+        };
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| Error::Invalid("batch writer needs a Tokio runtime".into()))?;
         let (sender, receiver) = mpsc::channel(config.queue_capacity);
@@ -45,6 +64,7 @@ impl BatchWriter {
             config,
             receiver,
             failure.clone(),
+            wiring.clone(),
         ));
         Ok(Self {
             resource,
@@ -52,55 +72,16 @@ impl BatchWriter {
             task,
             failure,
             max_record_bytes,
+            wiring,
         })
     }
 
-    fn stopped(&self) -> Error {
+    pub(super) fn stopped(&self) -> Error {
         self.failure
             .lock()
             .expect("ingestion failure lock")
             .as_ref()
             .map(|error| Error::Ingestion(error.clone()))
             .unwrap_or(Error::Closed)
-    }
-
-    /// Validates and enqueues a point, waiting for capacity. Cancellation before
-    /// send completes does not admit the point. This is not a server receipt.
-    pub async fn write(&self, record: Record) -> Result<()> {
-        self.resource.validate(&record)?;
-        if serde_json::to_vec(&record)?.len() > self.max_record_bytes {
-            return Err(Error::Invalid("point exceeds ingestion byte limit".into()));
-        }
-        self.sender
-            .send(Command::Append(record))
-            .await
-            .map_err(|_| self.stopped())
-    }
-
-    /// Waits for every record admitted before this barrier to reach the server.
-    /// Concurrent producers admitted after it are covered by a later barrier.
-    pub async fn flush(&self) -> Result<()> {
-        let (sender, receiver) = oneshot::channel();
-        self.sender
-            .send(Command::Flush(sender))
-            .await
-            .map_err(|_| self.stopped())?;
-        receiver
-            .await
-            .map_err(|_| self.stopped())?
-            .map_err(Error::Ingestion)
-    }
-
-    /// Ends admission, drains every admitted point, and reports worker failure.
-    /// A cancelled waiter leaves the worker running until its queue is drained.
-    pub async fn close(self) -> Result<()> {
-        let Self { sender, task, .. } = self;
-        drop(sender);
-        task.await
-            .map_err(|source| Error::Backend {
-                backend: "ingestion",
-                source: Box::new(source),
-            })?
-            .map_err(Error::Ingestion)
     }
 }
