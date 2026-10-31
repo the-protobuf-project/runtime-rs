@@ -4414,7 +4414,7 @@ dependencies = [
 name = "tpp-database"
 version = "0.1.0"
 dependencies = [
- "arrow-array 59.3.2",
+ "arrow-array 60.1.0",
  "arrow-flight",
  "arrow-ipc 60.1.0",
  "arrow-schema 59.3.2",
