@@ -5,6 +5,7 @@ use crate::store::{Error, Record, Resource, Result, Role, Value};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::fmt::Write as _;
 
 #[derive(Serialize, Deserialize)]
 struct Cursor {
@@ -20,7 +21,11 @@ pub(super) fn scope(host: &str, database: &str, resource: &Resource, query: &Que
         query.sql,
         query.params
     );
-    format!("{:x}", Sha256::digest(input.as_bytes()))
+    let mut scope = String::with_capacity(64);
+    for byte in Sha256::digest(input.as_bytes()) {
+        write!(scope, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    scope
 }
 
 fn keys(resource: &Resource) -> Result<Vec<&str>> {

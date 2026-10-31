@@ -18,6 +18,18 @@ fn resource() -> Resource {
 }
 
 #[test]
+fn scope_preserves_sha256_hex_encoding() {
+    let query = sql::Query {
+        sql: "SELECT 1".into(),
+        params: Default::default(),
+    };
+    assert_eq!(
+        cursor::scope("host", "db", &resource(), &query),
+        "54127a56d90c24aff5153188a124ce32975e78fe7fd7a6f293e463c68c83f153"
+    );
+}
+
+#[test]
 fn continuation_uses_all_identity_columns_and_never_interpolates_values() {
     let resource = resource();
     let mut range = Range::new(0, 100);

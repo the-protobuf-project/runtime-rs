@@ -4,6 +4,7 @@ use arrow_flight::{
     flight_service_server::{FlightService, FlightServiceServer},
     *,
 };
+use arrow_ipc::writer::{DictionaryTracker, IpcDataGenerator, IpcWriteOptions};
 use futures::{Stream, StreamExt};
 use std::{
     pin::Pin,
@@ -77,9 +78,29 @@ impl FlightService for Service {
             ])
             .unwrap()
         };
-        let stream = arrow_flight::encode::FlightDataEncoderBuilder::new()
-            .build(futures::stream::iter(vec![Ok(batch)]))
-            .map(|result| result.map_err(|e| Status::internal(e.to_string())));
+        // Flight 59 is used by the SDK, while the capture backend uses Arrow 60.
+        // Cross that boundary with IPC bytes rather than version-specific Rust types.
+        let options = IpcWriteOptions::default();
+        let generator = IpcDataGenerator::default();
+        let mut dictionaries = DictionaryTracker::new(false);
+        let schema = generator.schema_to_bytes_with_dictionary_tracker(
+            &batch.schema(),
+            &mut dictionaries,
+            &options,
+        );
+        let (dictionaries, batch) = generator
+            .encode(&batch, &mut dictionaries, &options, &mut Default::default())
+            .unwrap();
+        let messages = std::iter::once(schema)
+            .chain(dictionaries)
+            .chain(std::iter::once(batch));
+        let stream = futures::stream::iter(messages.map(|data| {
+            Ok(FlightData {
+                data_header: data.ipc_message.into(),
+                data_body: data.arrow_data.into(),
+                ..Default::default()
+            })
+        }));
         let stream: Output<FlightData> = if self.mode == "stall" {
             Box::pin(stream.chain(futures::stream::pending()))
         } else if self.mode == "broken" {
