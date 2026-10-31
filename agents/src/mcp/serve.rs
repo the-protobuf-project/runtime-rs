@@ -35,7 +35,16 @@ pub(crate) struct Mount {
     pub(crate) transports: Vec<Transport>,
     pub(crate) headers: Vec<HeaderMapping>,
     pub(crate) stateless: bool,
+    pub(crate) guard: Guard,
     pub(crate) health: Option<(String, HealthCheck)>,
+}
+
+/// Which `Host` and `Origin` a server's HTTP transports answer: `None` hosts leaves rmcp's
+/// loopback-only default for Streamable HTTP and SSE unchecked; empty origins checks none.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Guard {
+    pub(crate) hosts: Option<Vec<String>>,
+    pub(crate) origins: Option<Vec<String>>,
 }
 
 /// The router serving one server's HTTP transports.
@@ -54,6 +63,10 @@ pub(crate) fn http_router<S: ServerHandler>(
                 let mut config = StreamableHttpServerConfig::default();
                 config.cancellation_token = cancel.clone();
                 config.legacy_session_mode = !mount.stateless;
+                if let Some(hosts) = &mount.guard.hosts {
+                    config.allowed_hosts.clone_from(hosts);
+                }
+                config.allowed_origins = mount.guard.origins.clone().unwrap_or_default();
                 let factory = Arc::clone(&factory);
                 let service = StreamableHttpService::new(
                     move || factory(),
@@ -64,11 +77,13 @@ pub(crate) fn http_router<S: ServerHandler>(
             }
             Transport::Sse => {
                 let path = format!("{}/", base.trim_end_matches('/'));
-                router = router.merge(super::sse::router(
-                    &path,
-                    Arc::clone(&factory),
-                    cancel.clone(),
-                ));
+                let sse = super::sse::router(&path, Arc::clone(&factory), cancel.clone());
+                let sse =
+                    super::guard::origins(sse, mount.guard.origins.clone().unwrap_or_default());
+                router = router.merge(match &mount.guard.hosts {
+                    Some(hosts) => super::guard::hosts(sse, hosts.clone()),
+                    None => sse,
+                });
             }
             Transport::Stdio => {}
         }
@@ -122,6 +137,7 @@ where
         transports,
         headers: config.header_mappings.clone(),
         stateless: config.stateless,
+        guard: Guard::default(),
         health: config.health_check.clone().map(|check| {
             let path = if config.health_check_path.is_empty() {
                 super::server::DEFAULT_HEALTH_CHECK_PATH.to_string()
@@ -207,8 +223,28 @@ impl ServiceGroup {
     }
 
     /// The mount for a server at `base_path`.
-    fn mount(&self, base_path: String, member: Option<&Service<BoxedHandler>>) -> Mount {
-        Mount {
+    fn mount(
+        &self,
+        base_path: String,
+        member: Option<&Service<BoxedHandler>>,
+    ) -> io::Result<Mount> {
+        let group = self.guard.as_ref();
+        let member_guard = member.map(|m| &m.guard);
+        let guard = Guard {
+            hosts: group
+                .and_then(|g| g.hosts.clone())
+                .or_else(|| member_guard.and_then(|g| g.hosts.clone())),
+            origins: group
+                .and_then(|g| g.origins.clone())
+                .or_else(|| member_guard.and_then(|g| g.origins.clone())),
+        };
+        if guard.hosts.as_ref().is_some_and(Vec::is_empty) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "mcp: allowed_hosts must not be empty",
+            ));
+        }
+        Ok(Mount {
             base_path,
             transports: self.resolved_transports(),
             headers: self
@@ -217,8 +253,9 @@ impl ServiceGroup {
                 .or_else(|| member.map(|m| m.headers.clone()))
                 .unwrap_or_default(),
             stateless: self.stateless || member.is_some_and(|m| m.stateless),
+            guard,
             health: None,
-        }
+        })
     }
 
     /// Builds the one server a combined group serves.
@@ -287,13 +324,13 @@ impl crate::Service for ServiceGroup {
                         .unwrap_or_else(|| DEFAULT_BASE_PATH.to_string());
                     let server = server.clone();
                     let factory = Arc::new(move || server.session());
-                    let mount = self.mount(base_path.clone(), None);
+                    let mount = self.mount(base_path.clone(), None)?;
                     routers.push(http_router(factory, &mount, cancel.clone()));
                     endpoints.push(endpoint(&placement, &base_path, &transports));
                 }
                 None => {
                     for member in &self.members {
-                        let mount = self.mount(member.base_path.clone(), Some(member));
+                        let mount = self.mount(member.base_path.clone(), Some(member))?;
                         let factory = self.member_factory(member);
                         routers.push(http_router(factory, &mount, cancel.clone()));
                         endpoints.push(endpoint(&placement, &member.base_path, &transports));

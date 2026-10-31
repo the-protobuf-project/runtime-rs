@@ -50,7 +50,12 @@ pub fn server_endpoints(cfg: &ServerConfig) -> Vec<Endpoint> {
 /// The base every advertised URL is built from: the public URL, or the listen address.
 fn public_base(cfg: &ServerConfig) -> String {
     if cfg.public_url.is_empty() {
-        format!("http://{}", host_port_or_default(&cfg.resolved_addr()))
+        let addr = cfg.resolved_addr();
+        if let Some(path) = crate::listen::unix_path(&addr) {
+            format!("http+unix://{}", crate::listen::unix_authority(path))
+        } else {
+            format!("http://{}", host_port_or_default(&addr))
+        }
     } else {
         cfg.public_url.clone()
     }

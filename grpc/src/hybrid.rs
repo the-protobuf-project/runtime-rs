@@ -39,6 +39,10 @@ pub(crate) struct Running {
     pub(crate) agent_cancel: Option<CancellationToken>,
     /// Where the agent protocols came up, for the banner.
     pub(crate) endpoints: Vec<agents::Endpoint>,
+    /// The address the gRPC listener bound: the port the OS chose when asked for port 0.
+    pub(crate) grpc_addr: Option<std::net::SocketAddr>,
+    /// The address the HTTP/1.1 listener bound.
+    pub(crate) http_addr: Option<std::net::SocketAddr>,
 }
 
 /// A gRPC server and its optional HTTP/1.1 REST gateway, experimental HTTP/3 gateway, and
@@ -141,6 +145,18 @@ impl HybridServer {
     /// The TLS certificate in use, once [`HybridServer::start`] has loaded it.
     pub fn certificate(&self) -> Option<&Certificate> {
         self.cert.as_ref()
+    }
+
+    /// The address the gRPC listener bound once [`HybridServer::start`] has returned: the port
+    /// the operating system chose when the options asked for port 0. `None` before start.
+    pub fn grpc_addr(&self) -> Option<std::net::SocketAddr> {
+        self.state.lock().ok().and_then(|s| s.grpc_addr)
+    }
+
+    /// The address the HTTP/1.1 gateway listens on once [`HybridServer::start`] has returned,
+    /// as [`HybridServer::grpc_addr`] is the gRPC one; `None` without HTTP or before start.
+    pub fn http_addr(&self) -> Option<std::net::SocketAddr> {
+        self.state.lock().ok().and_then(|s| s.http_addr)
     }
 
     /// Where every agent protocol answers. Empty until [`HybridServer::start`] returns.

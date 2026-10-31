@@ -98,6 +98,7 @@ impl HybridServer {
         let mut state = self.state.lock().expect("grpc: server state poisoned");
         state.grpc = Some(token);
         state.grpc_task = Some(handle);
+        state.grpc_addr = Some(bound);
         state.loopback = Some(loopback);
         Ok(())
     }

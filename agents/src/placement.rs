@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tower_http::timeout::TimeoutLayer;
 
 use crate::agents::{Mux, Service};
 use crate::error::{Error, Result};
+use crate::listen::Bound;
 use crate::runtime::Runtime;
 
 /// One listen address and the services that share it.
@@ -84,7 +84,7 @@ impl Runtime {
                 continue;
             }
 
-            let listener = match TcpListener::bind(&group.addr).await {
+            let listener = match Bound::bind(&group.addr).await {
                 Ok(listener) => listener,
                 Err(source) => {
                     // Close whatever already came up, so a failed start leaves no
@@ -117,8 +117,8 @@ impl Runtime {
             let addr = group.addr.clone();
             let serving = addr.clone();
             let handle = tokio::spawn(async move {
-                let served = axum::serve(listener, router)
-                    .with_graceful_shutdown(async move { shutdown.cancelled().await })
+                let served = listener
+                    .serve(router, async move { shutdown.cancelled().await })
                     .await;
                 if let Err(err) = served {
                     // The listener is gone and the caller is long past start. Shutdown

@@ -127,3 +127,28 @@ async fn cancelling_releases_the_port() {
         .await
         .expect("port released");
 }
+
+#[tokio::test]
+async fn a_server_asked_for_port_zero_reports_the_ports_it_bound() {
+    use grpc::HybridServer;
+    use grpc::options::{Endpoint, Options};
+    let mut server = HybridServer::new(Options {
+        service_name: "ports".into(),
+        version: "1.0.0".into(),
+        grpc: Endpoint::new("127.0.0.1", 0),
+        http: Endpoint::new("127.0.0.1", 0),
+        enable_http: true,
+        ..Default::default()
+    });
+    assert_eq!(server.grpc_addr(), None, "nothing is bound before start");
+    server.start().await.expect("start");
+    let grpc = server.grpc_addr().expect("gRPC bound");
+    let http = server.http_addr().expect("HTTP bound");
+    assert_ne!(grpc.port(), 0);
+    assert_ne!(http.port(), 0);
+    let health = reqwest::get(format!("http://{http}/health"))
+        .await
+        .expect("reach /health");
+    assert!(health.status().is_success(), "{}", health.status());
+    server.stop().await.expect("stop");
+}
