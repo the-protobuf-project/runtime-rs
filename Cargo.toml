@@ -79,7 +79,7 @@ tonic-types = "0.14"
 # checks a prost-reflect message against them, which is what protovalidate does in Go.
 prost-protovalidate = "0.6"
 # Idempotency key names are a SHA-256 of (method, request_id), as in Go.
-sha2 = "0.10"
+sha2 = "0.11"
 # Compiles the test protos; dev-only.
 tonic-prost-build = "0.14"
 

@@ -74,7 +74,7 @@ serde = { workspace = true, optional = true }
 uuid = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { version = "0.11", optional = true }
 tonic-types = { version = "0.14", optional = true }
 tonic-health = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
