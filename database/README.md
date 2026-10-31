@@ -129,6 +129,24 @@ For a fresh server, obtain an administrative token through its onboarding flow
 and store it locally as INFLUX_TOKEN. Never commit it. See the examples folder's
 README for the ordered file guide and environment setup.
 
+## Shared runtime telemetry
+
+Use `InfluxProvider::with_telemetry(signals)` and
+`InfluxAdmin::with_telemetry(signals)` with the same `telemetry::Telemetry`.
+`database::instrument(db, signals)` works over any selected backend while
+preserving all capabilities. No-op is the default; exporters are application-
+owned. See [runtime telemetry](../telemetry/README.md) for metrics and lifetimes.
+
+The complete example exports metrics, logs and traces through the linked SDK:
+
+```sh
+docker compose -f database/docker/compose.yaml --profile telemetry up -d
+cargo run -p tpp-database --example influxdb --features telemetry-sdk
+```
+
+Load the ignored environment as above. Collector output is available with
+`docker compose -f database/docker/compose.yaml logs otel-collector`.
+
 ## Verification and sources
 
 Unit and HTTP/Flight fixture tests cover input/cursor validation, equal-time

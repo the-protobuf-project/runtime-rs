@@ -97,3 +97,18 @@ Every Rust source file, including documentation and tests, stays below 200 lines
 - All InfluxDB examples are grouped in examples/influxdb. A single runnable
   workflow creates a disposable database, exercises the complete lifecycle,
   and cleans it up while leaving Docker running.
+
+## Shared runtime observations
+
+- The workspace telemetry crate provides injected, no-op-by-default OTel API
+  handles; the linked telemetry-rs SDK remains the optional exporter owner.
+- Provider/admin, all capability wrappers, stream lifetimes and ingestion
+  lifecycle are observed. Capability availability survives wrapping/cloning.
+- Queue leases balance even on failure; batches link bounded producer contexts.
+- In-memory exporters verify all three signals, privacy, parentage, cancellation
+  and exact-once completion. The actual SDK exported traces/metrics/logs to a
+  local collector during the full InfluxDB example; no database token/name
+  appeared in collector output.
+- InfluxDB remains running; the opt-in telemetry Compose profile adds a local
+  collector on configurable port 16009 without affecting the existing 6009
+  service. Examples remain together in examples/influxdb.

@@ -41,3 +41,26 @@ Retention::Infinite instead of Retention::For(...) for no expiry.
 Point rewrites use table + tag set + timestamp identity, not record CRUD.
 Table deletion removes schema and all points. Selective historical-row deletion
 is unavailable on Core and is never emulated by dropping a whole table.
+
+## Metrics, logs and traces
+
+All telemetry example code stays here in [observability.rs](observability.rs).
+It adapts the linked telemetry-rs SDK to runtime's shared Telemetry bindings.
+Without the feature, the workflow uses no-op bindings and starts no exporters.
+
+```sh
+docker compose -f database/docker/compose.yaml --profile telemetry up -d
+set -a
+source database/docker/.env
+set +a
+cargo run -p tpp-database --example influxdb --features telemetry-sdk
+docker compose -f database/docker/compose.yaml logs otel-collector
+```
+
+The collector receives metrics, structured logs and spans on loopback port
+16009 (configurable with OTEL_COLLECTOR_PORT). Signal setup is application-owned;
+exporter flush/shutdown runs after all workers drain and operations finish.
+Provider/admin operations, writes/reads/aggregation, pages, complete stream
+lifetimes and ingestion admission/batches/flush/close share correlated signals.
+Record bodies, queries, keys, page tokens and database names are not exported.
+The collector logs are a development inspection sink; InfluxDB stays running.
