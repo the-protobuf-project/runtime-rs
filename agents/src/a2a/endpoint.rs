@@ -83,6 +83,10 @@ fn with_path(base: &str, path: &str) -> String {
 pub(super) fn public_url_for(cfg: &ServerConfig, transport: Transport) -> String {
     let base = public_base(cfg);
     if transport == Transport::Grpc {
+        let addr = cfg.resolved_addr();
+        if cfg.public_url.is_empty() && crate::listen::unix_path(&addr).is_some() {
+            return addr;
+        }
         // A gRPC target is host:port, not a URL. A scheme here is what turns a client's dial
         // into a confusing name-resolution error.
         return match base.parse::<http::Uri>() {

@@ -23,6 +23,17 @@ use rmcp::transport::{StreamableHttpClientTransport, UnixSocketHttpClient};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
+#[test]
+fn socket_directories_are_isolated_and_removed_on_drop() {
+    let (first, a) = socket("same");
+    let (_second, b) = socket("same");
+    assert_ne!(a.parent(), b.parent());
+    let directory = a.parent().unwrap().to_owned();
+    drop(first);
+    assert!(!directory.exists());
+    assert!(b.parent().unwrap().exists());
+}
+
 async fn serve(path: &std::path::Path, transport: Transport) -> (Runtime, CancellationToken) {
     let service = mcp::Service::from_handler(Probe::new("probe"))
         .transports([transport])
@@ -134,6 +145,8 @@ async fn a_socket_that_cannot_be_connected_to_is_not_unlinked() {
     let (_directory, path) = socket("denied");
     let _live = std::os::unix::net::UnixListener::bind(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let error = std::os::unix::net::UnixStream::connect(&path).expect_err("permission denied");
+    assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     let service =
         mcp::Service::from_handler(Probe::new("probe")).addr(format!("unix:{}", path.display()));
     let runtime = Runtime::new(config(free_port().await)).register(service);
