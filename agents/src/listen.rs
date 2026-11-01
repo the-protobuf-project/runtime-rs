@@ -20,6 +20,7 @@ pub fn unix_path(addr: &str) -> Option<&str> {
 }
 
 /// Encodes a socket path as the authority of an `http+unix` URL.
+#[cfg(any(feature = "mcp", feature = "a2a"))]
 pub(crate) fn unix_authority(path: &str) -> String {
     use std::fmt::Write as _;
     let mut encoded = String::new();

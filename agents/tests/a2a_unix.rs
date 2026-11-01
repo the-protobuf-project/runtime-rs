@@ -74,3 +74,13 @@ fn a_unix_listener_keeps_an_explicit_public_url() {
         format!("https://agents.example.com{}", a2a::AGENT_CARD_PATH)
     );
 }
+
+#[test]
+fn a_grpc_unix_endpoint_is_a_dial_target() {
+    let config = ServerConfig {
+        addr: "unix:/tmp/a2a.sock".into(),
+        transports: vec![a2a::Transport::Grpc],
+        ..Default::default()
+    };
+    assert_eq!(a2a::server_endpoint(&config).unwrap().url, config.addr);
+}
