@@ -7,6 +7,10 @@ Backends: InfluxDB 3 (`influxdb3-client` 0.3.0, live-tested against Core
 3.12.2) and Arrow IPC captures. Every Rust file stays under 200 lines; a test
 enforces it.
 
+The `influxdb` feature, on by default, is the InfluxDB 3 backend. `influxdb3-client`
+0.3 requires Arrow 59 while the capture backend uses 60, so a capture-only build
+sets `default-features = false` to link one Arrow major and no HTTP client.
+
 ## Runnable create/read/close example
 
 This complete local example uses Arrow files and needs no database server.

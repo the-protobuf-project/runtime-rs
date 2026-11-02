@@ -17,13 +17,17 @@ go-source = "runtime-go/grpc"
 name = "grpc"
 
 [features]
-default = ["http3"]
+default = ["http3", "a2a"]
 # HTTP/3 pulls in QUIC. It is a feature rather than a hard dependency because the
 # gateway is complete without it and quinn is a large tree to build for nothing.
 http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn"]
+# Agent2Agent. A feature because its SDK brings reqwest and aws-lc, which a server speaking
+# gRPC, REST and MCP has no use for. MCP has no feature of its own: the server is written
+# against it throughout.
+a2a = ["agents/a2a"]
 
 [dependencies]
-agents = { workspace = true }
+agents = { workspace = true, features = ["mcp"] }
 
 tokio = { workspace = true, features = ["signal"] }
 tokio-util = { workspace = true }
@@ -70,8 +74,8 @@ quinn = { workspace = true, optional = true }
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 reqwest = { workspace = true }
-agents = { workspace = true }
 unicode-width = { workspace = true }
 opentelemetry_sdk = { version = "0.33", features = ["testing", "trace", "metrics"] }
 tonic-prost = { workspace = true }
+tokio-stream = { workspace = true }
 tonic-prost-build = { workspace = true }

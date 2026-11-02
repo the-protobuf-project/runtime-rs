@@ -27,8 +27,9 @@ impl HybridServer {
     /// protocol that refused to start.
     pub async fn start(&mut self) -> Result<()> {
         self.load_certificate()?;
-        crate::validate::validate_options(&mut self.opts, self.cert.is_some())?;
+        crate::validate::validate_options(&mut self.opts, self.cert.is_some(), self.grpc_listener)?;
         self.validate_cors()?;
+        self.validate_grpc_listener()?;
         tracing::debug!(
             grpc = %self.opts.grpc.addr(),
             http = self.opts.enable_http,
@@ -46,8 +47,59 @@ impl HybridServer {
             return Err(err);
         }
 
-        banner::print(&self.opts, &self.summary());
+        banner::print_to(self.banner, &self.bound_options(), &self.summary());
         Ok(())
+    }
+
+    /// Refuses what cannot work with no gRPC listener, rather than letting it dial a port
+    /// nothing answers on.
+    fn validate_grpc_listener(&self) -> Result<()> {
+        if self.grpc_listener {
+            return Ok(());
+        }
+        if self.http_handler.is_none() && !self.http_gateways.is_empty() {
+            return Err(Error::GrpcListenerRequired("with_http_gateways"));
+        }
+        if self.opts.enable_a2a
+            && self
+                .opts
+                .a2a
+                .transports
+                .contains(&crate::options::A2aTransport::Grpc)
+        {
+            return Err(Error::GrpcListenerRequired("A2A's gRPC transport"));
+        }
+        Ok(())
+    }
+
+    /// The options with every port 0 replaced by the port it became, for the banner.
+    fn bound_options(&self) -> crate::options::Options {
+        let mut opts = self.opts.clone();
+        let state = self.state.lock().expect("grpc: server state poisoned");
+        if let Some(bound) = state.grpc_addr {
+            opts.grpc.port = bound.port();
+        }
+        if let Some(bound) = state.http_addr {
+            opts.http.port = bound.port();
+        }
+        if let Some(runtime) = &state.agent_runtime {
+            let host = |host: &str| match host {
+                "" => agents::DEFAULT_HOST.to_string(),
+                named => named.to_string(),
+            };
+            let port = |host: String, port: u16| {
+                runtime
+                    .bound_addr(&format!("{host}:{port}"))
+                    .and_then(|bound| bound.rsplit_once(':')?.1.parse().ok())
+            };
+            if let Some(bound) = port(host(&opts.mcp.host), opts.mcp.port) {
+                opts.mcp.port = bound;
+            }
+            if let Some(bound) = port(host(&opts.a2a.host), opts.a2a.port) {
+                opts.a2a.port = bound;
+            }
+        }
+        opts
     }
 
     /// The components [`HybridServer::start`] brings up, in order.
@@ -96,6 +148,8 @@ impl HybridServer {
         let (grpc, grpc_task, http, http3, tasks) = {
             let mut state = self.state.lock().expect("grpc: server state poisoned");
             state.loopback = None;
+            state.grpc_addr = None;
+            state.http_addr = None;
             (
                 state.grpc.take(),
                 state.grpc_task.take(),
@@ -165,6 +219,10 @@ impl HybridServer {
     /// `/health` always; then either the caller's own handler, or every REST gateway over
     /// the loopback plus every dialling gateway registration.
     fn http_router(&self) -> Result<Router> {
+        // The bound port, so a gateway dials where gRPC is rather than port 0.
+        let grpc_port = self
+            .grpc_addr()
+            .map_or(self.opts.grpc.port, |bound| bound.port());
         if let Some(handler) = &self.http_handler {
             return Ok(Surface::from_router(handler.clone())
                 .mount(health_router())
@@ -173,7 +231,7 @@ impl HybridServer {
 
         let mut router = health_router();
         let target = GatewayTarget {
-            endpoint: self.opts.grpc.addr(),
+            endpoint: crate::options::Endpoint::new(self.opts.grpc.host.clone(), grpc_port).addr(),
             tls: self.cert.is_some(),
             rest_snake_case: self.rest_snake_case,
         };
@@ -267,6 +325,7 @@ impl HybridServer {
             otlp_endpoint: String::new(),
             rest_routes: self.gateways.len() + self.http_gateways.len(),
             agents: self.agent_endpoints(),
+            no_grpc_listener: !self.grpc_listener,
         }
     }
 }

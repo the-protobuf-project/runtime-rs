@@ -3,7 +3,9 @@
 [Hybrid server](../../README.md) · [Environment overrides](../environment.rs)
 
 Build `Options`, pass it to `HybridServer::new`, register services, then start.
-Zero ports are configuration defaults, not requests for an ephemeral port.
+Port 0 asks the operating system for a free port; `Options::default()` carries
+the default ports instead. `grpc_addr`, `http_addr` and `agent_endpoints` report
+what was bound.
 
 ```rust
 use grpc::{HybridServer, options::{Endpoint, Options, ServerEnvironment}};
@@ -36,13 +38,16 @@ host and port overrides; `SHOP_HYBRID_A2A_TRANSPORT` accepts a comma-separated
 binding list. Invalid override values are ignored with debug logging. No
 blanket environment override exists for every `Options` field.
 
-At startup, `validate.rs` requires a gRPC host, defaults gRPC to 65020 and HTTP
-to 6502, and requires an HTTP host when HTTP is enabled. Explicit listening
-MCP transport settings default to `0.0.0.0` and HTTP port + 1; stdio needs no
-listener. Enabled A2A defaults its host/base path and chooses the next port
-after MCP (or HTTP + 2 when MCP has no assigned port). Explicitly assign ports
-when deployment topology needs different addresses. HTTP/3 is a UDP socket at
-HTTP + 1, requires TLS, and rejects port overflow.
+At startup, `validate.rs` requires a gRPC host, unless `without_grpc_listener`
+leaves nothing to bind, and an HTTP host when HTTP is enabled. The defaults of
+65020 and 6502 come from `Options::default()`. Explicit listening MCP transport
+settings default to `0.0.0.0` and HTTP port + 1; stdio needs no listener. Enabled
+A2A defaults its host/base path and chooses the next port after MCP (or HTTP + 2
+when MCP has no assigned port). With HTTP on port 0 there is nothing to derive
+from, so MCP and A2A are ephemeral too. Note the consequence: an MCP or A2A port
+of 0 beside a fixed HTTP port still means "follow HTTP", not "any free port".
+Assign ports explicitly where several servers share a host. HTTP/3 uses HTTP + 1,
+requires TLS and a fixed HTTP port, and rejects port overflow.
 
 ```bash
 cargo test -p tpp-grpc --lib

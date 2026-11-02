@@ -52,6 +52,7 @@ fn main() {
                 detail: "/.well-known/agent-card.json".into(),
             },
         ],
+        no_grpc_listener: false,
     };
 
     banner::print(&opts, &state);

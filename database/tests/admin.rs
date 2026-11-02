@@ -1,4 +1,5 @@
 //! Management requests are explicit, authenticated, and never widen deletion.
+#![cfg(feature = "influxdb")]
 use database::Error;
 use database::influxdb::{ClientConfig, InfluxAdmin, Retention};
 use serde_json::json;

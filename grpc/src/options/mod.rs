@@ -35,8 +35,12 @@ use std::fmt;
 pub struct Endpoint {
     /// The network interface to listen on.
     pub host: String,
-    /// The port number. Zero means "unset": [`crate::HybridServer::start`] fills in the
-    /// component's default.
+    /// The port number. Zero asks the operating system for a free port, and the one it
+    /// chose is reported by [`crate::HybridServer::grpc_addr`],
+    /// [`crate::HybridServer::http_addr`] and [`crate::HybridServer::agent_endpoints`].
+    ///
+    /// The default ports are not expressed by zero: they are what [`Options::default`]
+    /// starts from.
     pub port: u16,
 }
 
@@ -74,7 +78,10 @@ pub type GrpcOptions = Endpoint;
 pub type HttpOptions = Endpoint;
 
 /// The complete set of configuration options for a [`crate::HybridServer`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// [`Options::default`] carries the default gRPC and HTTP ports, 65020 and 6502, so a
+/// caller who names neither gets those, while port 0 stays free to mean "any free port".
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Options {
     /// The service name, also used to build the environment-variable override prefix.
     pub service_name: String,
@@ -87,9 +94,11 @@ pub struct Options {
     pub grpc: GrpcOptions,
     /// The HTTP gateway endpoint.
     pub http: HttpOptions,
-    /// The MCP server.
+    /// The MCP server. Its port 0 means one past the HTTP port, or a free port when the
+    /// HTTP port is itself 0.
     pub mcp: McpOptions,
-    /// The Agent2Agent server.
+    /// The Agent2Agent server. Its port 0 means one past the MCP port, or a free port when
+    /// the HTTP and MCP ports are both 0.
     pub a2a: A2aOptions,
 
     /// Whether the HTTP gateway is started.
@@ -106,4 +115,24 @@ pub struct Options {
 
     /// Enables experimental HTTP/3 on `http.port + 1`. Requires a TLS certificate.
     pub experimental_http3: bool,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            service_name: String::new(),
+            description: String::new(),
+            version: String::new(),
+            grpc: Endpoint::new("", crate::validate::DEFAULT_GRPC_PORT),
+            http: Endpoint::new("", crate::validate::DEFAULT_HTTP_PORT),
+            mcp: McpOptions::default(),
+            a2a: A2aOptions::default(),
+            enable_http: false,
+            enable_health: false,
+            enable_mcp: false,
+            enable_a2a: false,
+            environment: ServerEnvironment::default(),
+            experimental_http3: false,
+        }
+    }
 }

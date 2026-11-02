@@ -21,19 +21,29 @@ impl HybridServer {
     /// place Go's `net.Listen` reports it.
     pub(crate) async fn start_grpc_server(&mut self) -> Result<()> {
         let addr = self.opts.grpc.addr();
-        tracing::debug!(%addr, "gRPC: binding TCP listener");
-
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
+        let listener = if self.grpc_listener {
+            tracing::debug!(%addr, "gRPC: binding TCP listener");
+            Some(
+                tokio::net::TcpListener::bind(&addr)
+                    .await
+                    .map_err(|source| Error::Listen {
+                        addr: addr.clone(),
+                        source,
+                    })?,
+            )
+        } else {
+            tracing::debug!("gRPC: no TCP listener; the routes serve the loopback only");
+            None
+        };
+        let bound: Option<SocketAddr> = listener
+            .as_ref()
+            .map(tokio::net::TcpListener::local_addr)
+            .transpose()
             .map_err(|source| Error::Listen {
                 addr: addr.clone(),
                 source,
             })?;
-        let bound: SocketAddr = listener.local_addr().map_err(|source| Error::Listen {
-            addr: addr.clone(),
-            source,
-        })?;
-        tracing::debug!(%bound, "gRPC: TCP listener ready");
+        tracing::debug!(?bound, "gRPC: TCP listener ready");
 
         let routes = GrpcRoutes::new();
         self.register_health(&routes);
@@ -46,15 +56,20 @@ impl HybridServer {
         self.start_agents(&routes).await?;
 
         let chain = self.interceptor_chain();
+        // The services this crate registers itself are described here, so their shape is
+        // known without the caller registering their descriptors too.
+        let mut descriptors = self.descriptor_sets.clone();
+        descriptors.push(tonic_health::pb::FILE_DESCRIPTOR_SET);
+        descriptors.push(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET);
         let messages = InterceptLayer::new(
             self.message_chain(),
-            crate::intercept::descriptor_pool(&self.descriptor_sets),
+            crate::intercept::descriptor_pool(&descriptors),
         );
         let streams = crate::stream_intercept::StreamInterceptLayer::new(
             self.stream_interceptors.clone(),
-            crate::intercept::descriptor_pool(&self.descriptor_sets),
+            crate::intercept::descriptor_pool(&descriptors),
         );
-        let telemetry = crate::otel::OtelLayer::new();
+        let telemetry = self.telemetry.clone();
         let loopback = Loopback::new(
             routes.routes(),
             chain.clone(),
@@ -65,40 +80,52 @@ impl HybridServer {
         // MCP services were handed a deferred loopback while the routes were still open.
         self.mcp.loopback.set(loopback.clone());
 
-        let mut builder = Server::builder();
-        if let Some(cert) = &self.cert {
-            tracing::debug!("gRPC: TLS enabled — configuring credentials");
-            builder = builder.tls_config(ServerTlsConfig::new().identity(cert.identity()))?;
-        } else {
-            tracing::debug!("gRPC: no certificate — running plaintext");
-        }
+        let serving = match listener {
+            Some(listener) => {
+                let mut builder = Server::builder();
+                if let Some(cert) = &self.cert {
+                    tracing::debug!("gRPC: TLS enabled — configuring credentials");
+                    builder =
+                        builder.tls_config(ServerTlsConfig::new().identity(cert.identity()))?;
+                } else {
+                    tracing::debug!("gRPC: no certificate — running plaintext");
+                }
 
-        let router = builder
-            .layer(telemetry)
-            .layer(ChainLayer(chain))
-            .layer(streams)
-            .layer(messages)
-            .add_routes(routes.routes());
-        let token = CancellationToken::new();
-        let shutdown = token.clone();
-        let serving = addr.clone();
+                let router = builder
+                    .layer(telemetry)
+                    .layer(ChainLayer(chain))
+                    .layer(streams)
+                    .layer(messages)
+                    .add_routes(routes.routes());
+                let token = CancellationToken::new();
+                let shutdown = token.clone();
+                let serving = addr.clone();
 
-        tracing::debug!(%addr, "gRPC: starting server task");
-        let handle = tokio::spawn(async move {
-            let served = router
-                .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
-                    shutdown.cancelled().await;
-                })
-                .await;
-            if let Err(err) = served {
-                tracing::error!(addr = %serving, error = %err, "gRPC server stopped");
+                tracing::debug!(%addr, "gRPC: starting server task");
+                let handle = tokio::spawn(async move {
+                    let served = router
+                        .serve_with_incoming_shutdown(
+                            TcpListenerStream::new(listener),
+                            async move {
+                                shutdown.cancelled().await;
+                            },
+                        )
+                        .await;
+                    if let Err(err) = served {
+                        tracing::error!(addr = %serving, error = %err, "gRPC server stopped");
+                    }
+                });
+                Some((token, handle))
             }
-        });
+            None => None,
+        };
 
         let mut state = self.state.lock().expect("grpc: server state poisoned");
-        state.grpc = Some(token);
-        state.grpc_task = Some(handle);
-        state.grpc_addr = Some(bound);
+        if let Some((token, handle)) = serving {
+            state.grpc = Some(token);
+            state.grpc_task = Some(handle);
+        }
+        state.grpc_addr = bound;
         state.loopback = Some(loopback);
         Ok(())
     }

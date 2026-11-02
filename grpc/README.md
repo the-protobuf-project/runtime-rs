@@ -111,6 +111,15 @@ Environment variables follow `SERVICENAME_HYBRID_COMPONENT_SETTING`, for example
 [environment.rs](src/environment.rs) for supported overrides and defaults.
 Reflection is gated by environment mode and supplied descriptors.
 
+`without_grpc_listener` opens no gRPC port: REST and MCP still reach the services
+through the in-process loopback, so nothing listens to serve them. Dialling
+gateways and A2A's gRPC transport need a socket and are refused at start. The
+`a2a` default feature can be turned off to drop the A2A SDK, reqwest and aws-lc.
+The always-on spans and metrics use the global OpenTelemetry providers unless
+`with_telemetry_providers` passes others or `without_telemetry` opts out.
+Message interceptors run only on methods with a registered descriptor set; a
+method with none might stream, so it is passed through rather than buffered.
+
 Startup brings up gRPC/agents, HTTP/3, then HTTP/1.1, and prints the banner only
 afterward. Partial failures trigger cleanup. Shutdown cancels TCP gRPC
 acceptance, drains HTTP/agent components while loopback calls can still reach

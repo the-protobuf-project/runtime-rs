@@ -23,6 +23,7 @@ fn server() -> (Options, Summary) {
         otlp_endpoint: "localhost:12005".into(),
         rest_routes: 2,
         agents: Vec::new(),
+        no_grpc_listener: false,
     };
     (opts, state)
 }

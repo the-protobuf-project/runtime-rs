@@ -99,6 +99,30 @@ impl HybridServer {
         self
     }
 
+    /// Chooses where the startup banner goes: nowhere, stderr (the default) or stdout.
+    ///
+    /// Leave it off stdout when serving MCP over stdio, where stdout is the protocol.
+    #[must_use]
+    pub fn with_banner(mut self, output: crate::banner::BannerOutput) -> Self {
+        self.banner = output;
+        self
+    }
+
+    /// Opens no gRPC TCP listener.
+    ///
+    /// The gRPC services stay registered and the interceptor chain stays in place, because
+    /// REST and MCP reach them in-process through the [`Loopback`]: that path is a function
+    /// call rather than a socket, so turning the listener off opens nothing in its place.
+    /// [`HybridServer::grpc_addr`] is then `None`, and the banner has no gRPC rows.
+    ///
+    /// [`HybridServer::start`] refuses what needs a socket to dial or advertise:
+    /// [`HybridServer::with_http_gateways`] registrations, and A2A's gRPC transport.
+    #[must_use]
+    pub fn without_grpc_listener(mut self) -> Self {
+        self.grpc_listener = false;
+        self
+    }
+
     /// Bounds how long [`HybridServer::stop`] may take before cutting off what is still
     /// running. Go's `WithShutdownTimeout`; the default is 20 seconds.
     #[must_use]
@@ -122,8 +146,13 @@ impl HybridServer {
     ///
     /// This is Go's `grpc.UnaryServerInterceptor`: it sees the request and the reply, not
     /// just the metadata. It runs for gRPC callers and for REST callers alike, because the
-    /// gateways call through the same chain. Decoding the message needs the method's
-    /// descriptor set, registered with [`HybridServer::with_reflection`].
+    /// gateways call through the same chain.
+    ///
+    /// It runs only on methods whose descriptor set was registered with
+    /// [`HybridServer::with_reflection`]: without one a unary method cannot be told from a
+    /// stream, and a stream must not be buffered, so the call passes through unseen. A guard
+    /// that must see every call belongs in [`HybridServer::with_unary_interceptor`], which
+    /// needs no descriptor.
     #[must_use]
     pub fn with_interceptor(mut self, interceptor: impl crate::intercept::Interceptor) -> Self {
         self.message_interceptors.push(Arc::new(interceptor));

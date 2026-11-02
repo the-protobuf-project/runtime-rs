@@ -10,31 +10,22 @@ pub const DEFAULT_GRPC_PORT: u16 = 65020;
 
 /// Fills in defaults and rejects a configuration that cannot be served.
 ///
-/// It mutates `opts`, because the defaults it picks — a gRPC port, and the consecutive
-/// MCP and A2A ports below — are what the startup banner and the agent cards then
-/// advertise. Resolving them anywhere else would let the printed address and the bound one
-/// disagree.
-pub fn validate_options(opts: &mut Options, has_certificate: bool) -> Result<()> {
-    if opts.grpc.host.is_empty() {
+/// It mutates `opts`, because the defaults it picks — the consecutive MCP and A2A ports
+/// below — are what the startup banner and the agent cards then advertise. Resolving them
+/// anywhere else would let the printed address and the bound one disagree.
+///
+/// Port 0 on gRPC or HTTP is left alone: it asks the operating system for a free port. The
+/// default ports live in [`Options::default`] instead. MCP and A2A still derive theirs from
+/// HTTP's when it is fixed; when it is 0 there is nothing to derive from, so they stay 0 and
+/// are ephemeral too. `grpc_listener` is false when no gRPC listener will be bound, which
+/// leaves no use for a gRPC host.
+pub fn validate_options(
+    opts: &mut Options,
+    has_certificate: bool,
+    grpc_listener: bool,
+) -> Result<()> {
+    if grpc_listener && opts.grpc.host.is_empty() {
         return Err(Error::EmptyGrpcHost);
-    }
-    if opts.grpc.port == 0 {
-        tracing::debug!(
-            port = DEFAULT_GRPC_PORT,
-            "validateOptions: applying default gRPC port"
-        );
-        opts.grpc.port = DEFAULT_GRPC_PORT;
-    }
-
-    // Defaulted whether or not HTTP is enabled, because the MCP, A2A and HTTP/3 ports below
-    // are derived from it. Go defaults it only with HTTP on, so with HTTP off it derives MCP
-    // on port 1; this does not.
-    if opts.http.port == 0 {
-        tracing::debug!(
-            port = DEFAULT_HTTP_PORT,
-            "validateOptions: applying default HTTP port"
-        );
-        opts.http.port = DEFAULT_HTTP_PORT;
     }
     if opts.enable_http && opts.http.host.is_empty() {
         return Err(Error::EmptyHttpHost);
@@ -47,7 +38,7 @@ pub fn validate_options(opts: &mut Options, has_certificate: bool) -> Result<()>
         if opts.mcp.host.is_empty() {
             opts.mcp.host = agents::DEFAULT_HOST.to_string();
         }
-        if opts.mcp.port == 0 {
+        if opts.mcp.port == 0 && opts.http.port != 0 {
             opts.mcp.port = next_port(opts.http.port, "mcp")?;
             tracing::debug!(
                 port = opts.mcp.port,
@@ -60,7 +51,7 @@ pub fn validate_options(opts: &mut Options, has_certificate: bool) -> Result<()>
         if opts.a2a.host.is_empty() {
             opts.a2a.host = agents::DEFAULT_HOST.to_string();
         }
-        if opts.a2a.port == 0 {
+        if opts.a2a.port == 0 && (opts.http.port != 0 || opts.mcp.port != 0) {
             // One past MCP, which is itself one past HTTP — so the four layers land on
             // consecutive ports without the caller assigning any.
             let base = if opts.mcp.port == 0 {
@@ -83,17 +74,12 @@ pub fn validate_options(opts: &mut Options, has_certificate: bool) -> Result<()>
         if !has_certificate {
             return Err(Error::Http3NeedsTls);
         }
-        // The gateway's QUIC twin sits one past it, so HTTP/3 needs that port to exist.
-        next_port(opts.http.port, "http3")?;
-    }
-
-    for (component, port, required) in [
-        ("grpc", opts.grpc.port, true),
-        ("http", opts.http.port, opts.enable_http),
-    ] {
-        if required && port == 0 {
-            return Err(Error::InvalidPort { component });
+        // HTTP/3 is advertised as one past the gateway, so that port has to be known and
+        // has to exist. Binding QUIC to whatever follows an ephemeral port would be a guess.
+        if opts.http.port == 0 {
+            return Err(Error::InvalidPort { component: "http3" });
         }
+        next_port(opts.http.port, "http3")?;
     }
 
     Ok(())
@@ -124,16 +110,54 @@ mod mcp_port_tests {
     #[test]
     fn the_mcp_port_is_defaulted_only_for_a_named_listening_transport() {
         let mut opts = options(None);
-        validate_options(&mut opts, false).expect("valid");
+        validate_options(&mut opts, false, true).expect("valid");
         assert_eq!(opts.mcp.port, 0, "no transport named, no port chosen");
 
         let mut opts = options(Some(McpTransport::Stdio));
-        validate_options(&mut opts, false).expect("valid");
+        validate_options(&mut opts, false, true).expect("valid");
         assert_eq!(opts.mcp.port, 0, "stdio binds nothing");
 
         let mut opts = options(Some(McpTransport::StreamableHttp));
-        validate_options(&mut opts, false).expect("valid");
+        validate_options(&mut opts, false, true).expect("valid");
         assert_eq!(opts.mcp.port, opts.http.port + 1);
         assert_eq!(opts.mcp.host, agents::DEFAULT_HOST);
+    }
+
+    #[test]
+    fn port_zero_stays_zero_so_the_operating_system_chooses() {
+        let mut opts = options(Some(McpTransport::StreamableHttp));
+        opts.enable_a2a = true;
+        opts.grpc.port = 0;
+        opts.http.port = 0;
+        validate_options(&mut opts, false, true).expect("valid");
+        assert_eq!(
+            (opts.grpc.port, opts.http.port, opts.mcp.port, opts.a2a.port),
+            (0, 0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn an_unnamed_port_is_the_default_one() {
+        let opts = Options::default();
+        assert_eq!((opts.grpc.port, opts.http.port), (65020, 6502));
+    }
+
+    #[test]
+    fn http3_cannot_follow_an_ephemeral_http_port() {
+        let mut opts = options(None);
+        opts.http.port = 0;
+        opts.experimental_http3 = true;
+        assert!(matches!(
+            validate_options(&mut opts, true, true),
+            Err(crate::error::Error::InvalidPort { component: "http3" })
+        ));
+    }
+
+    #[test]
+    fn a_grpc_host_is_needed_only_by_a_grpc_listener() {
+        let mut opts = options(None);
+        opts.grpc.host.clear();
+        assert!(validate_options(&mut opts, false, true).is_err());
+        assert!(validate_options(&mut opts, false, false).is_ok());
     }
 }

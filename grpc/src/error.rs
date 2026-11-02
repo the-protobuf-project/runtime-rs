@@ -11,13 +11,18 @@ pub enum Error {
     #[error("http.host must not be empty if the HTTP gateway is enabled")]
     EmptyHttpHost,
 
-    /// A port resolved to zero after defaults were applied, which binds an arbitrary port
-    /// rather than the one a client was told about.
+    /// A port that must be known in advance was zero or out of range: HTTP/3 sits one past
+    /// the HTTP port, which has no value when that port is ephemeral.
     #[error("{component}.port must be between 1 and 65535")]
     InvalidPort {
         /// Which component's port was out of range.
         component: &'static str,
     },
+
+    /// Something configured needs the gRPC TCP listener, which
+    /// [`crate::HybridServer::without_grpc_listener`] turned off.
+    #[error("{0} needs the gRPC listener, which without_grpc_listener turned off")]
+    GrpcListenerRequired(&'static str),
 
     /// HTTP/3 was enabled without TLS. QUIC has no plaintext mode, so this cannot be
     /// started rather than merely degraded.

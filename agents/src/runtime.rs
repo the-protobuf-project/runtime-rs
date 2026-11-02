@@ -96,11 +96,29 @@ impl Runtime {
 
     /// Where every registered protocol answers. Empty until [`Runtime::start`] returns,
     /// and stable afterwards.
+    ///
+    /// A service placed on port 0 reports the port the operating system chose, because
+    /// [`Runtime::start`] binds before it mounts anything.
     pub fn endpoints(&self) -> Vec<Endpoint> {
         self.state
             .lock()
             .expect("agents: state poisoned")
             .endpoints
             .clone()
+    }
+
+    /// The address the listener this runtime opened for `requested` — a service's
+    /// [`Requirements::addr`](crate::Requirements::addr), or the shared `host:port` — is
+    /// bound to: `requested` itself, except that port 0 is replaced by the port the
+    /// operating system chose. `None` before [`Runtime::start`], after
+    /// [`Runtime::shutdown`], and for an address with no listener of this runtime's own.
+    pub fn bound_addr(&self, requested: &str) -> Option<String> {
+        self.state
+            .lock()
+            .expect("agents: state poisoned")
+            .listeners
+            .iter()
+            .find(|listener| listener.requested == requested)
+            .map(|listener| listener.addr.clone())
     }
 }

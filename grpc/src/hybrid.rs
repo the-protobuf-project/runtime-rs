@@ -83,6 +83,7 @@ pub struct HybridServer {
     /// Whether the REST gateway should emit proto (snake_case) field names.
     pub(crate) rest_snake_case: bool,
     /// A2A service functions, turned into services at start once `opts.a2a` is resolved.
+    #[cfg(feature = "a2a")]
     pub(crate) a2a_service_funcs: Vec<crate::a2a::A2aServiceFunc>,
 
     /// The cross-origin policy for the HTTP listeners, which is Go's `WithCORS`.
@@ -91,6 +92,13 @@ pub struct HybridServer {
     pub(crate) stream_interceptors: Vec<Arc<dyn crate::stream_intercept::StreamInterceptor>>,
     /// Runs validation after the caller's unary interceptors rather than before them.
     pub(crate) validation_last: bool,
+
+    /// Where the startup banner goes.
+    pub(crate) banner: crate::banner::BannerOutput,
+    /// Whether gRPC gets a TCP listener. Off, its routes still serve the loopback.
+    pub(crate) grpc_listener: bool,
+    /// Where the always-on gRPC spans and metrics go.
+    pub(crate) telemetry: crate::otel::OtelLayer,
 
     pub(crate) state: Mutex<Running>,
 
@@ -130,7 +138,11 @@ impl HybridServer {
             cors: None,
             stream_interceptors: Vec::new(),
             validation_last: false,
+            #[cfg(feature = "a2a")]
             a2a_service_funcs: Vec::new(),
+            banner: crate::banner::BannerOutput::default(),
+            grpc_listener: true,
+            telemetry: crate::otel::OtelLayer::global(),
             state: Mutex::new(Running::default()),
             mcp: crate::mcp_options::McpSettings::default(),
         }
@@ -148,7 +160,8 @@ impl HybridServer {
     }
 
     /// The address the gRPC listener bound once [`HybridServer::start`] has returned: the port
-    /// the operating system chose when the options asked for port 0. `None` before start.
+    /// the operating system chose when the options asked for port 0. `None` before start,
+    /// after a stop, and always under [`HybridServer::without_grpc_listener`].
     pub fn grpc_addr(&self) -> Option<std::net::SocketAddr> {
         self.state.lock().ok().and_then(|s| s.grpc_addr)
     }
@@ -160,6 +173,7 @@ impl HybridServer {
     }
 
     /// Where every agent protocol answers. Empty until [`HybridServer::start`] returns.
+    /// A protocol on port 0 reports the port the operating system chose.
     pub fn agent_endpoints(&self) -> Vec<agents::Endpoint> {
         self.state
             .lock()

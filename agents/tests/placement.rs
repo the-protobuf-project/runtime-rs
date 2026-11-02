@@ -125,3 +125,61 @@ async fn a_host_router_is_mounted_onto_rather_than_bound() {
     cancel.cancel();
     runtime.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn a_service_on_port_zero_is_placed_on_and_reports_the_port_it_got() {
+    let runtime = Runtime::new(config(free_port().await))
+        .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools").at("127.0.0.1:0"));
+
+    let cancel = CancellationToken::new();
+    runtime.start(cancel.clone()).await.expect("start");
+
+    let bound = runtime
+        .bound_addr("127.0.0.1:0")
+        .expect("the listener for port 0 reports where it bound");
+    let port: u16 = bound
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse().ok())
+        .expect("a port");
+    assert_ne!(port, 0, "an ephemeral port, not port 0: {bound}");
+
+    let endpoints = runtime.endpoints();
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(
+        endpoints[0].url,
+        format!("http://127.0.0.1:{port}/mcp"),
+        "the service was placed on the bound address, not the one it asked for"
+    );
+
+    let body = reqwest::get(&endpoints[0].url)
+        .await
+        .expect("the advertised address answers")
+        .text()
+        .await
+        .expect("body");
+    assert_eq!(body, "tools");
+
+    cancel.cancel();
+    runtime.shutdown().await.expect("shutdown");
+    assert_eq!(
+        runtime.bound_addr("127.0.0.1:0"),
+        None,
+        "gone after shutdown"
+    );
+}
+
+#[tokio::test]
+async fn a_service_on_a_fixed_port_is_reported_exactly_as_configured() {
+    let port = free_port().await;
+    let addr = format!("127.0.0.1:{port}");
+    let runtime = Runtime::new(config(free_port().await))
+        .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools").at(&addr));
+
+    let cancel = CancellationToken::new();
+    runtime.start(cancel.clone()).await.expect("start");
+    assert_eq!(runtime.bound_addr(&addr), Some(addr.clone()));
+    assert_eq!(runtime.endpoints()[0].url, format!("http://{addr}/mcp"));
+
+    cancel.cancel();
+    runtime.shutdown().await.expect("shutdown");
+}

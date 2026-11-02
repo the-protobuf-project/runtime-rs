@@ -5,7 +5,7 @@
 
 use super::driver::page_size;
 use super::filter::predicates;
-#[cfg(test)]
+#[cfg(all(test, feature = "influxdb"))]
 pub(crate) use super::reduce::Reduce;
 pub(crate) use super::reduce::{Aggregate, Reduction};
 use super::{Error, Kind, RangeOptions, Resource, Result, Role, Value};

@@ -49,8 +49,9 @@ impl Driver for ArrowDriver {
         self.refuse("delete rows; captures are append-only")
     }
     async fn list(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
+        let range = all_time(res, opts)?;
         let mut page = self
-            .page(res, &all_time(res, opts)?, &opts.page_token)
+            .page(res, &range, &opts.page_token, !opts.omit_total)
             .await?;
         if opts.omit_total {
             page.total = -1;
@@ -60,7 +61,7 @@ impl Driver for ArrowDriver {
     async fn count(&self, res: &Resource, opts: &ListOptions) -> Result<i64> {
         let mut range = all_time(res, opts)?;
         range.limit = 1;
-        Ok(self.page(res, &range, "").await?.total)
+        Ok(self.page(res, &range, "", true).await?.total)
     }
     async fn exists(&self, _: &Resource, _: &str) -> Result<bool> {
         self.refuse("check rows by key; rows have no key")
@@ -89,6 +90,7 @@ impl Migrator for ArrowDriver {
     }
     async fn drop_schema(&self, res: &Resource) -> Result<()> {
         self.close_table(res.table()).await?;
+        self.forget_table(res.table());
         match tokio::fs::remove_dir_all(self.table_dir(res.table())).await {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(backend(e)),
             _ => Ok(()),

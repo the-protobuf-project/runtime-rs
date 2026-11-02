@@ -39,15 +39,42 @@ pub fn render(opts: &Options, state: &Summary) -> String {
     out
 }
 
+/// Where a server writes its startup banner, chosen with
+/// [`HybridServer::with_banner`](crate::HybridServer::with_banner).
+///
+/// The default is stderr, because stdout may not be the server's to write to: MCP over
+/// stdio carries JSON-RPC on it, and one line of art there corrupts the session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BannerOutput {
+    /// Prints nothing.
+    Off,
+    /// Prints to stderr.
+    #[default]
+    Stderr,
+    /// Prints to stdout. Not safe alongside MCP over stdio.
+    Stdout,
+}
+
 /// Prints the banner to stdout.
 ///
 /// A write failure is ignored: `print!` would panic on a closed or broken stdout, and a
 /// banner nobody can read is no reason to take the server down with it.
 pub fn print(opts: &Options, state: &Summary) {
+    print_to(BannerOutput::Stdout, opts, state);
+}
+
+/// Prints the banner to `output`, ignoring a write failure as [`print`](fn@print) does.
+pub fn print_to(output: BannerOutput, opts: &Options, state: &Summary) {
     use std::io::Write;
-    let _ = std::io::stdout()
-        .lock()
-        .write_all(render(opts, state).as_bytes());
+    let _ = match output {
+        BannerOutput::Off => Ok(()),
+        BannerOutput::Stderr => std::io::stderr()
+            .lock()
+            .write_all(render(opts, state).as_bytes()),
+        BannerOutput::Stdout => std::io::stdout()
+            .lock()
+            .write_all(render(opts, state).as_bytes()),
+    };
 }
 
 /// The version, environment and build line under the art.
@@ -82,7 +109,7 @@ fn coloured(rows: Vec<Row>) -> Vec<Row> {
 /// What a reader should know that the table does not say.
 fn warnings(opts: &Options, state: &Summary) -> Vec<String> {
     let mut out = Vec::new();
-    if !state.tls {
+    if !state.tls && !state.no_grpc_listener {
         out.push("gRPC: running without TLS (plaintext)".to_string());
     }
     if opts.enable_health {

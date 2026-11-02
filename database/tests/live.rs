@@ -1,4 +1,5 @@
 //! Opt-in real InfluxDB test. Writes observations to the supplied database.
+#![cfg(feature = "influxdb")]
 use database::influxdb::{ClientConfig, InfluxProvider};
 use database::store::{
     AggregateOptions, Column, Kind, Provider, RangeOptions, Reducer, Reduction, Resource, Role,

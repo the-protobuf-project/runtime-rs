@@ -7,6 +7,9 @@ resolved options, registered service names, and actual agent endpoints. This
 module renders the service name, build/version line, endpoint table, and
 warnings. It opens no listeners and configures no services.
 
+The server prints it to stderr by default, because MCP over stdio owns stdout.
+`HybridServer::with_banner` chooses `BannerOutput::Off`, `Stderr` or `Stdout`.
+
 ```rust
 use grpc::{banner::{self, Summary}, options::Options};
 

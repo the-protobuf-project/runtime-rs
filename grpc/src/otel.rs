@@ -7,6 +7,13 @@
 //! [`crate::Loopback`], so it sees a call an interceptor refuses, and a REST call as the gRPC
 //! call it becomes, just as Go's stats handler sees the gateway's dial.
 //!
+//! An embedder that keeps its own providers for its own signals passes separate ones to
+//! [`HybridServer::with_telemetry_providers`], or opts out with
+//! [`HybridServer::without_telemetry`], so the runtime's spans and metrics do not land in the
+//! embedder's export. Either way the global providers are not touched. The global text-map
+//! propagator is still read to continue a caller's trace: it decides a header format and
+//! exports nothing.
+//!
 //! With no provider installed the instruments are no-ops, which is the cost argument Go makes
 //! for leaving this on unconditionally. No exporter is added: that is the application's job,
 //! as Go's comment on the exporter it removed explains. This is also what remains of Go's
@@ -37,14 +44,15 @@ use std::time::Instant;
 use bytes::Bytes;
 use http_body::Frame;
 use opentelemetry::context::{Context, FutureExt as _};
-use opentelemetry::global::{self, BoxedTracer};
-use opentelemetry::metrics::{Counter, Histogram};
+use opentelemetry::global::{self, BoxedTracer, ObjectSafeTracerProvider};
+use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider};
 use opentelemetry::trace::{SpanKind, Status as SpanStatus, TraceContextExt as _, Tracer as _};
 use opentelemetry::{InstrumentationScope, KeyValue};
 use opentelemetry_http::HeaderExtractor;
 use tonic::body::Body;
 use tonic::{Code, Status};
 
+use crate::hybrid::HybridServer;
 use crate::options::opentelemetry::server;
 
 /// The instrumentation scope this crate reports under; Go's `runtime-go-grpc`.
@@ -84,14 +92,18 @@ struct Instruments {
 }
 
 impl Instruments {
-    fn new() -> Self {
+    fn global() -> Self {
         tracing::debug!(scope = SCOPE, "gRPC: resolving OpenTelemetry instruments");
-        let scope = InstrumentationScope::builder(SCOPE)
-            .with_version(env!("CARGO_PKG_VERSION"))
-            .build();
-        let meter = global::meter_with_scope(scope.clone());
+        let scope = scope();
+        Self::new(
+            global::tracer_with_scope(scope.clone()),
+            &global::meter_with_scope(scope),
+        )
+    }
+
+    fn new(tracer: BoxedTracer, meter: &Meter) -> Self {
         Self {
-            tracer: global::tracer_with_scope(scope),
+            tracer,
             started: meter
                 .u64_counter(server::CALL_STARTED)
                 .with_unit("{call}")
@@ -115,17 +127,82 @@ impl Instruments {
     }
 }
 
+fn scope() -> InstrumentationScope {
+    InstrumentationScope::builder(SCOPE)
+        .with_version(env!("CARGO_PKG_VERSION"))
+        .build()
+}
+
+/// Where a server's instruments come from.
+#[derive(Clone)]
+enum Source {
+    /// The global providers, resolved on the first call; see the module docs.
+    Global(Arc<OnceLock<Arc<Instruments>>>),
+    /// Providers the embedder passed.
+    Explicit(Arc<Instruments>),
+    /// Nothing is recorded.
+    Off,
+}
+
+impl Source {
+    fn instruments(&self) -> Option<Arc<Instruments>> {
+        match self {
+            Self::Global(once) => Some(Arc::clone(
+                once.get_or_init(|| Arc::new(Instruments::global())),
+            )),
+            Self::Explicit(instruments) => Some(Arc::clone(instruments)),
+            Self::Off => None,
+        }
+    }
+}
+
 /// Installs [`Otel`] in front of whatever tonic serves.
 #[derive(Clone)]
 pub(crate) struct OtelLayer {
-    instruments: Arc<OnceLock<Arc<Instruments>>>,
+    source: Source,
 }
 
 impl OtelLayer {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn global() -> Self {
         Self {
-            instruments: Arc::new(OnceLock::new()),
+            source: Source::Global(Arc::new(OnceLock::new())),
         }
+    }
+}
+
+impl HybridServer {
+    /// Records the always-on gRPC spans and metrics through these providers rather than the
+    /// global ones, so an embedder decides whether they join its own export.
+    ///
+    /// Go's server takes its global providers from the application; this is for the
+    /// application that keeps global providers for itself. It covers this layer only: an
+    /// [`Observer`](crate::Observer) takes its providers from
+    /// [`Observer::with_providers`](crate::Observer::with_providers).
+    #[must_use]
+    pub fn with_telemetry_providers<T, M>(mut self, tracers: &T, meters: &M) -> Self
+    where
+        T: ObjectSafeTracerProvider + ?Sized,
+        M: MeterProvider + ?Sized,
+    {
+        let tracer = BoxedTracer::new(tracers.boxed_tracer(scope()));
+        let meter = meters.meter_with_scope(scope());
+        self.telemetry = OtelLayer {
+            source: Source::Explicit(Arc::new(Instruments::new(tracer, &meter))),
+        };
+        self
+    }
+
+    /// Records no gRPC spans or metrics at all.
+    ///
+    /// The layer stays in the stack and calls pass straight through it. An
+    /// [`Observer`](crate::Observer), if one was added, is unaffected: it is a separate,
+    /// explicit choice.
+    #[must_use]
+    pub fn without_telemetry(mut self) -> Self {
+        self.telemetry = OtelLayer {
+            source: Source::Off,
+        };
+        self
     }
 }
 
@@ -135,7 +212,7 @@ impl<S> tower::Layer<S> for OtelLayer {
     fn layer(&self, inner: S) -> Self::Service {
         Otel {
             inner,
-            instruments: Arc::clone(&self.instruments),
+            source: self.source.clone(),
         }
     }
 }
@@ -144,7 +221,7 @@ impl<S> tower::Layer<S> for OtelLayer {
 #[derive(Clone)]
 pub(crate) struct Otel<S> {
     inner: S,
-    instruments: Arc<OnceLock<Arc<Instruments>>>,
+    source: Source,
 }
 
 impl<S> tower::Service<http::Request<Body>> for Otel<S>
@@ -161,10 +238,9 @@ where
     }
 
     fn call(&mut self, request: http::Request<Body>) -> Self::Future {
-        let instruments = Arc::clone(
-            self.instruments
-                .get_or_init(|| Arc::new(Instruments::new())),
-        );
+        let Some(instruments) = self.source.instruments() else {
+            return Box::pin(self.inner.call(request));
+        };
         let full_method = request.uri().path().trim_start_matches('/').to_string();
         let (service, method) = full_method
             .split_once('/')

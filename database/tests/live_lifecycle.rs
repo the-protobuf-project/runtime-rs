@@ -1,4 +1,5 @@
 //! Real-server lifecycle, paged/streamed reads, and typed background ingestion.
+#![cfg(feature = "influxdb")]
 use database::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider, Retention};
 use database::store::{Column, Error, Kind, Provider, RangeOptions, Resource, Role, Scan};
 use database::{IngestConfig, collection};

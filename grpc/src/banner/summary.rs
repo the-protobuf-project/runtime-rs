@@ -26,6 +26,9 @@ pub struct Summary {
     pub rest_routes: usize,
     /// Where the agent protocols came up.
     pub agents: Vec<agents::Endpoint>,
+    /// True when no gRPC listener was bound, so the gRPC rows would name an address nothing
+    /// answers on.
+    pub no_grpc_listener: bool,
 }
 
 /// Builds the summary rows, in the order the Go runtime prints them.
@@ -33,36 +36,38 @@ pub fn rows(opts: &Options, summary: &Summary) -> Vec<Row> {
     let mut rows = Vec::new();
     let grpc_addr = opts.grpc.addr();
 
-    for service in &summary.services {
+    if !summary.no_grpc_listener {
+        for service in &summary.services {
+            rows.push(Row::new(
+                "gRPC",
+                service,
+                &grpc_addr,
+                tls_label(summary.tls),
+            ));
+        }
+        if summary.health {
+            rows.push(Row::new(
+                "gRPC",
+                "Health Check",
+                &grpc_addr,
+                "grpc.health.v1",
+            ));
+        }
+        if summary.reflection {
+            rows.push(Row::new(
+                "gRPC",
+                "Reflection",
+                &grpc_addr,
+                "grpcurl-compatible",
+            ));
+        }
         rows.push(Row::new(
             "gRPC",
-            service,
+            "OpenTelemetry",
             &grpc_addr,
-            tls_label(summary.tls),
+            format!("OTLP → {}", summary.otlp_endpoint),
         ));
     }
-    if summary.health {
-        rows.push(Row::new(
-            "gRPC",
-            "Health Check",
-            &grpc_addr,
-            "grpc.health.v1",
-        ));
-    }
-    if summary.reflection {
-        rows.push(Row::new(
-            "gRPC",
-            "Reflection",
-            &grpc_addr,
-            "grpcurl-compatible",
-        ));
-    }
-    rows.push(Row::new(
-        "gRPC",
-        "OpenTelemetry",
-        &grpc_addr,
-        format!("OTLP → {}", summary.otlp_endpoint),
-    ));
 
     rows.extend(agent_rows(opts, &summary.agents));
 

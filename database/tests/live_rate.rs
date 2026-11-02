@@ -1,5 +1,6 @@
 //! Opt-in real-server write rates: how batch size and in-flight batches trade
 //! against InfluxDB's WAL flush, which every durable write waits for.
+#![cfg(feature = "influxdb")]
 use database::influxdb::{ClientConfig, InfluxAdmin, InfluxProvider, Retention};
 use database::store::{Column, DB, Kind, Provider, Record, Resource, Role};
 use std::time::{Duration, Instant};

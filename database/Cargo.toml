@@ -16,8 +16,11 @@ go-source = "runtime-go/database"
 name = "database"
 
 [features]
-default = []
+default = ["influxdb"]
 telemetry-sdk = ["telemetry/tpp-sdk"]
+# The InfluxDB 3 backend. A feature because influxdb3-client 0.3, its latest release, requires
+# Arrow 59: turning this off is what leaves a capture-only build on one Arrow major, 60.
+influxdb = ["dep:influxdb3-client", "dep:reqwest", "dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 telemetry.workspace = true
@@ -25,16 +28,33 @@ async-trait.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["fs"] }
 chrono.workspace = true
-influxdb3-client = "0.3"
+influxdb3-client = { version = "0.3", optional = true }
 futures.workspace = true
 base64 = "0.23"
 sha2 = "0.11"
-reqwest = { workspace = true, features = ["query"] }
+# Not the workspace's reqwest. Its `rustls` feature turns on aws-lc through rustls-webpki, and
+# crate_universe then sees a feature naming a crate it has not wired, which fails a downstream
+# Bazel build. `rustls-no-provider` selects none; the client is given a ring config instead,
+# the provider influxdb3-client's own reqwest and the rest of this workspace already use.
+reqwest = { version = "0.13", default-features = false, features = ["json", "query", "stream", "rustls-no-provider"], optional = true }
+rustls = { workspace = true, optional = true, features = ["tls12"] }
+# The roots influxdb3-client trusts, so its admin calls and its queries agree on who to trust.
+webpki-roots = { version = "1", optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
+
+[[example]]
+name = "capture"
+path = "examples/capture/main.rs"
+required-features = ["influxdb"]
+
+[[example]]
+name = "influxdb"
+path = "examples/influxdb/main.rs"
+required-features = ["influxdb"]
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }

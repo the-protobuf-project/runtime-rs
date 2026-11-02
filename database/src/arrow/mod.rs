@@ -23,21 +23,30 @@
 //! Segments rotate by size and age ([`Rotation`], default 1 GiB or 15 minutes).
 //! Each cleanly closed segment gets a `.bounds` sidecar with its time range,
 //! so range queries and aggregations skip files outside the window, then skip
-//! batches outside it, and only turn rows inside it into records. The rows
-//! that remain are filtered, sorted and reduced in memory, which suits a
-//! capture reviewed later rather than a large shared archive.
+//! batches outside it, and only turn rows inside it into records. Aggregations
+//! filter and reduce what remains in memory, which suits a capture reviewed
+//! later rather than a large shared archive. Pages do not hold what remains:
+//! they seek by key and keep one page, so reading a table page by
+//! page is linear in its rows, in memory bounded by the page size.
 
 mod aggregate;
+mod block;
 mod bounds;
 mod codec;
 mod crud;
 mod driver;
 mod errors;
 mod filter;
+mod index;
+mod key;
 mod load;
+mod pages;
 mod provider;
+mod resume;
 mod rotation;
 mod schema;
+mod search;
+mod seek;
 mod segment;
 mod series;
 

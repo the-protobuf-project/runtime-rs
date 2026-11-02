@@ -1,4 +1,4 @@
-//! [`Runtime::start`]: mounting every service, then opening what they need.
+//! [`Runtime::start`]: binding the listeners, mounting every service, then serving.
 //!
 //! The ordering here is the whole contract, which is why it is its own file rather than one
 //! long method among the accessors.
@@ -17,9 +17,11 @@ impl Runtime {
     /// Mounts every registered service, opens the listeners they need, and returns once
     /// they are all answering. It does not block.
     ///
-    /// The ordering is not an implementation detail. Every service mounts first and
-    /// listeners open second, because a port that is accepting before its handlers are
-    /// registered answers 404 to whoever got there first. A gRPC binding is stricter still:
+    /// The ordering is not an implementation detail. Listeners are bound first, so a
+    /// service asking for port 0 is placed on the port the operating system chose and
+    /// reports that one. Every service then mounts, and only then do the listeners start
+    /// accepting, because a port that is accepting before its handlers are registered
+    /// answers 404 to whoever got there first. A gRPC binding is stricter still:
     /// a tonic server takes its routes by value when it starts, so a runtime sharing
     /// [`Config::grpc_routes`](crate::Config::grpc_routes) has to complete `start` before the host reads them out.
     ///
@@ -45,7 +47,10 @@ impl Runtime {
 
         let service_cancel = cancel.child_token();
         let drain = CancellationToken::new();
-        let groups = self.group();
+        let mut groups = self.group();
+        // Bound before anything mounts, so a service placed on port 0 is told the port it
+        // got. Nothing accepts until `serve_groups` below; see `Runtime::bind`.
+        let opened = self.bind(&mut groups).await?;
         let ready_timeout = self.cfg.ready_timeout.unwrap_or(DEFAULT_READY_TIMEOUT);
 
         let mut endpoints: Vec<Endpoint> = Vec::new();
@@ -55,7 +60,7 @@ impl Runtime {
             for service in &group.services {
                 let placement = Placement {
                     identity: self.cfg.identity.clone(),
-                    addr: group.addr.clone(),
+                    addr: group.listen.clone(),
                     mux: group.mux.clone(),
                     grpc_routes: self.cfg.grpc_routes.clone(),
                     public_url: self.cfg.public_url.clone(),
@@ -102,14 +107,7 @@ impl Runtime {
             }
         }
 
-        let listeners = match self.listen(&groups, &drain).await {
-            Ok(listeners) => listeners,
-            Err(err) => {
-                service_cancel.cancel();
-                abort_all(tasks);
-                return Err(err);
-            }
-        };
+        let listeners = self.serve_groups(&groups, opened, &drain);
 
         let mut state = self.state.lock().expect("agents: state poisoned");
         state.endpoints = endpoints;

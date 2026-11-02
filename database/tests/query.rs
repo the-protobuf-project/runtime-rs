@@ -1,4 +1,5 @@
 //! End-to-end SDK Arrow Flight query and database-selection tests.
+#![cfg(feature = "influxdb")]
 mod common;
 #[path = "common/flight.rs"]
 mod flight;

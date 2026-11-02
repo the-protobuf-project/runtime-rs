@@ -24,8 +24,15 @@ stateless modes. `a2a` verifies the shared gRPC binding and HTTP discovery/task
 path. `observe` checks actual OTel spans/metrics with process-global providers
 inside its own integration-test binary.
 
+`ephemeral_ports` holds port 0 to meaning a free port on every listener, reported
+as bound. `grpc_listener` serves REST through the loopback with no gRPC port
+open. `telemetry_providers` proves the runtime's signals stay off the global
+providers when told to, in its own binary for the same reason as `observe`.
+`dependency_graph` reads Cargo's resolution to prove a build without `a2a` links
+no A2A SDK, reqwest or aws-lc.
+
 Banner targets compare figures/tables against Go-derived golden files and
-check full summaries. `fixtures_regen` is ignored by default. After changing
+check full summaries; `banner_output` reads a child process's two streams. `fixtures_regen` is ignored by default. After changing
 shop protos, regenerate and verify explicitly:
 
 ```bash

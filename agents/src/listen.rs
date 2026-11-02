@@ -62,6 +62,16 @@ impl Bound {
         Ok(Self::Tcp(TcpListener::bind(addr).await?))
     }
 
+    /// The TCP port this listener bound — the one the operating system chose when the
+    /// address named port 0. `None` for a Unix socket, which has no port.
+    pub(crate) fn port(&self) -> Option<u16> {
+        match self {
+            Self::Tcp(listener) => listener.local_addr().ok().map(|addr| addr.port()),
+            #[cfg(unix)]
+            Self::Unix(_) => None,
+        }
+    }
+
     /// Serves `router` until `shutdown` resolves, then lets in-flight requests finish. A Unix
     /// socket's file is removed once serving stops.
     ///

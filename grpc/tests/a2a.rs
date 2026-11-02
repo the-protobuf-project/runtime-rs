@@ -1,6 +1,8 @@
 //! Agent2Agent on a running HybridServer: the gRPC binding on the server's own gRPC port, and
 //! JSON-RPC plus the card on the A2A port, from `with_a2a_agent` and `with_a2a_services`.
 
+#![cfg(feature = "a2a")]
+
 use std::net::TcpListener;
 use std::sync::{Arc, Mutex};
 

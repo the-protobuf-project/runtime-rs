@@ -39,14 +39,31 @@ Clean close writes the IPC end marker and a `.bounds` sidecar (`min max rows`)
 through atomic rename. `load.rs` recovers complete batches from truncated files
 and reports incomplete captures. Missing/corrupt bounds only disable pruning;
 they must never hide rows. `bounds.rs` permits range scans to skip unrelated
-closed segments. `filter.rs`, `crud.rs`, `series.rs`, and `aggregate.rs` implement
+closed segments. `filter.rs`, `seek.rs`, `crud.rs`, `series.rs`, and `aggregate.rs` implement
 backend-neutral operations over captured rows. `errors.rs` translates failures.
 
 Crash recovery retains complete batches before an interrupted batch; OS flush
 alone is not a power-loss durability guarantee. Call DB close to finish open
 segments. Arrow retains append history, so repeated point identities are not
-merged as they are in InfluxDB. Range pagination uses offset tokens and totals;
-queries scan relevant captured data rather than using an external SQL engine.
+merged as they are in InfluxDB. Aggregations scan relevant captured data rather
+than using an external SQL engine.
+
+## Paging
+
+`seek.rs` pages by key, so a full read is linear in the table's rows and its
+memory is bounded by the page size. A token holds the last key returned: time,
+then segment and row, which is the write order ties keep. `index.rs` keeps each
+segment's blocks of about 8,192 rows with their byte and time ranges, built by
+one read of the time column, and a page reads only the blocks that can hold its
+rows. Rows far out of time order overlap more blocks and cost more reads, not a
+different answer. One write is one batch, the smallest thing a read can skip, so
+a table written in one enormous batch is read whole for every page.
+
+The first page counts `total`, in one pass; later pages carry that count in
+their token, so a page of a capture still being written can report fewer rows
+than exist, while `next_page_token` still reaches the appended ones. Tokens are
+scoped to their query. Bare-digit offset tokens from earlier versions still work,
+at their old cost of decoding the table per page.
 
 ```python
 import pyarrow as pa
@@ -60,5 +77,5 @@ Replace the path with a created segment. This needs Python pyarrow (and pandas
 for the final conversion), which are separate from the Rust dependencies.
 
 ```bash
-cargo test -p tpp-database --test arrow --test arrow_query --test arrow_aggregate --test arrow_segments
+cargo test -p tpp-database --test arrow --test arrow_query --test arrow_paging --test arrow_aggregate --test arrow_segments
 ```

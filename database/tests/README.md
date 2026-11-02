@@ -15,7 +15,8 @@ cargo test -p tpp-database
 | `core` | Descriptors, typed models, registries, named refusals |
 | `write`, `query`, `admin` | Actual SDK encoding/HTTP/Flight requests and controlled failures |
 | `ingest`, `compose` | Queue backpressure, flush/close, errors, buffered/mirrored writes |
-| `arrow`, `arrow_query`, `arrow_aggregate`, `arrow_segments` | Capture recovery, pagination, reductions, rotation and bounds pruning |
+| `arrow`, `arrow_query`, `arrow_paging`, `arrow_aggregate`, `arrow_segments` | Capture recovery, pagination, keyset order against a reference sort, reductions, rotation and bounds pruning |
+| `dependency_graph` | No aws-lc, parquet or zstd is linked, and a capture-only build has one Arrow major |
 | `observations` | Every capability, complete stream lifetime, cancellation, safe exported signals |
 | `file_size` | Rust sources/tests stay below 200 lines |
 

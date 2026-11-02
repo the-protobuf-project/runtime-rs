@@ -32,6 +32,7 @@ mod validate;
 pub mod validation;
 pub mod validation_hints;
 
+pub use banner::BannerOutput;
 pub use codes::{StatusCode, StatusCodeType};
 pub use cors::{CorsLayer, CorsPolicy, cors};
 pub use error::{Error, Result};
@@ -46,5 +47,7 @@ pub use types::{GatewayTarget, GrpcServiceFn, HttpGatewayFn, UnaryInterceptorFn}
 pub use validation::Validator;
 pub use validation::{ProtoValidator, ValidationInterceptor};
 
+#[cfg(feature = "a2a")]
 mod a2a;
+#[cfg(feature = "a2a")]
 pub use a2a::{A2aAgent, A2aServerConfig, A2aServiceFunc, A2aSkill};

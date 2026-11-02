@@ -43,6 +43,7 @@
 pub mod arrow;
 mod buffered;
 mod collection;
+#[cfg(feature = "influxdb")]
 pub mod influxdb;
 pub mod ingest;
 mod mirror;

@@ -21,7 +21,7 @@ mod summary;
 mod table;
 
 pub use figure::render as render_figure;
-pub use print::{print, render};
+pub use print::{BannerOutput, print, print_to, render};
 pub use style::{BUILD_REVISION, environment_label, pluralise, tls_label, user_service_names};
 pub use summary::{Summary, rows};
 pub use table::{HEADERS, Row, render as render_table};

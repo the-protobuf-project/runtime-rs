@@ -1,4 +1,5 @@
 //! Exercise the real SDK HTTP path against controlled server responses.
+#![cfg(feature = "influxdb")]
 mod common;
 use common::{Reading, record, resource};
 use database::influxdb::{Client, ClientConfig, InfluxDriver, InfluxProvider, RetryConfig};

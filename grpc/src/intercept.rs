@@ -14,11 +14,14 @@
 //! # Descriptors
 //!
 //! Go finds a method's descriptor in the global registry. Rust has none, so the descriptor
-//! sets come from [`HybridServer::with_reflection`] — the same sets reflection serves. A
-//! method whose descriptor was not registered is still intercepted; only
-//! [`UnaryCall::message`] fails for it, because there is nothing to decode against. What a
-//! missing descriptor does cost is knowing whether the method streams, so such a call is
-//! treated as unary only when its request arrives as exactly one message.
+//! sets come from [`HybridServer::with_reflection`] — the same sets reflection serves, plus
+//! the health and reflection services' own, which the server adds itself.
+//!
+//! A call whose method has no descriptor passes through this chain unseen. Nothing on the
+//! wire says whether a method streams, and the only way to find out from the request is to
+//! wait for it to end, which a bidirectional stream does not do until it has been answered:
+//! buffering such a call hangs it. It does still run the metadata interceptors, and the
+//! stream interceptors, which treat a method of unknown shape as a stream.
 //!
 //! [`HybridServer::with_reflection`]: crate::HybridServer::with_reflection
 
@@ -26,6 +29,7 @@ use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
@@ -244,6 +248,7 @@ impl Next<'_> {
 pub(crate) struct InterceptLayer {
     chain: Arc<[Arc<dyn Interceptor>]>,
     pool: DescriptorPool,
+    warned: Arc<AtomicBool>,
 }
 
 impl InterceptLayer {
@@ -251,6 +256,7 @@ impl InterceptLayer {
         Self {
             chain: chain.into(),
             pool,
+            warned: Arc::default(),
         }
     }
 }
@@ -263,6 +269,7 @@ impl<S> tower::Layer<S> for InterceptLayer {
             inner,
             chain: Arc::clone(&self.chain),
             pool: self.pool.clone(),
+            warned: Arc::clone(&self.warned),
         }
     }
 }
@@ -273,6 +280,8 @@ pub(crate) struct Intercepted<S> {
     inner: S,
     chain: Arc<[Arc<dyn Interceptor>]>,
     pool: DescriptorPool,
+    /// Set once the missing-descriptor warning has been given, so it is not per call.
+    warned: Arc<AtomicBool>,
 }
 
 impl<S> tower::Service<http::Request<Body>> for Intercepted<S>
@@ -301,11 +310,19 @@ where
         let descriptor = lookup(&self.pool, &path);
         // A streaming method passes through untouched: there is no single message to hand
         // an interceptor, and buffering a stream would break it. Stream interceptors are a
-        // separate seam: see `crate::stream_intercept`.
+        // separate seam: see `crate::stream_intercept`. A method with no descriptor might be
+        // one, so it is treated as one.
         if descriptor
             .as_ref()
-            .is_some_and(|m| m.is_client_streaming() || m.is_server_streaming())
+            .is_none_or(|m| m.is_client_streaming() || m.is_server_streaming())
         {
+            if descriptor.is_none() && !self.warned.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    %path,
+                    "gRPC: message interceptors do not run on a method with no descriptor; \
+                     register its descriptor set with HybridServer::with_reflection"
+                );
+            }
             return Box::pin(self.inner.call(request));
         }
 
@@ -337,8 +354,8 @@ where
         Err(status) => return status.into_http(),
     };
 
-    // Not exactly one message: a client stream whose descriptor was not registered, or
-    // something malformed. Either way it is not ours to interpret, so it goes on as sent.
+    // Not exactly one message, on a method declared unary: something malformed. It is not
+    // ours to interpret, so it goes on as sent.
     let Some((compressed, payload)) = unframe(&bytes) else {
         let mut inner = inner;
         let request = http::Request::from_parts(parts, Body::new(http_body_util::Full::new(bytes)));

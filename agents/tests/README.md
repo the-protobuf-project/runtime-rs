@@ -13,7 +13,7 @@ cargo test -p tpp-agents --no-default-features --features a2a
 ```
 
 `runtime.rs` checks defaults, empty/repeated startup, missing gRPC routes,
-readiness timeouts, and early service failure. `placement.rs` checks shared,
+readiness timeouts, and early service failure. `placement.rs` checks port 0 reporting, shared,
 separate, and host-owned listeners. `lifecycle.rs` checks draining/released ports.
 `protocols.rs` serves MCP and A2A together under one runtime identity.
 

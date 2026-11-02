@@ -576,3 +576,33 @@ async fn start_server_serves_one_server_until_cancelled() {
     cancel.cancel();
     serving.await.expect("join").expect("a clean drain");
 }
+
+#[tokio::test]
+async fn a_streamable_http_server_on_port_zero_advertises_the_port_it_bound() {
+    let service = mcp::Service::from_handler(Probe::new("probe"))
+        .transports([Transport::StreamableHttp])
+        .addr("127.0.0.1:0");
+    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let cancel = start(&runtime).await;
+
+    let endpoint = runtime
+        .endpoints()
+        .into_iter()
+        .find(|e| e.transport == "streamable-http")
+        .expect("a streamable-http endpoint");
+    assert!(
+        !endpoint.url.contains(":0/"),
+        "port 0 is not where a client can connect: {}",
+        endpoint.url
+    );
+    let bound = runtime.bound_addr("127.0.0.1:0").expect("bound");
+    assert_eq!(endpoint.url, format!("http://{bound}{}", endpoint.detail));
+
+    // The advertised URL is the one that answers.
+    let mut client = McpClient::new(endpoint.url.clone());
+    let initialized = client.initialize().await;
+    assert!(initialized.get("result").is_some(), "{initialized}");
+
+    cancel.cancel();
+    let _ = runtime.shutdown().await;
+}

@@ -2,13 +2,13 @@
 
 use super::codec::encode;
 use super::errors::{invalid, joined};
-use super::filter;
+use super::index::Indexes;
 use super::load::{scan, segments};
 use super::rotation::Rotation;
 use super::schema::matches;
 use super::segment::Segment;
 use crate::store::window::Range;
-use crate::store::{Error, ListResult, Record, Resource, Result};
+use crate::store::{Error, Record, Resource, Result};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -21,14 +21,15 @@ use std::sync::{Arc, Mutex};
 /// segment and the next write starts a new file.
 #[derive(Clone)]
 pub struct ArrowDriver {
-    inner: Arc<Inner>,
+    pub(super) inner: Arc<Inner>,
 }
 
-struct Inner {
-    dir: PathBuf,
+pub(super) struct Inner {
+    pub(super) dir: PathBuf,
     sync: bool,
     rotation: Rotation,
     open: Mutex<HashMap<String, Segment>>,
+    pub(super) indexes: Arc<Indexes>,
 }
 
 impl ArrowDriver {
@@ -39,6 +40,7 @@ impl ArrowDriver {
                 sync,
                 rotation,
                 open: Mutex::default(),
+                indexes: Arc::default(),
             }),
         }
     }
@@ -95,37 +97,6 @@ impl ArrowDriver {
         .map_err(joined)?
     }
 
-    /// One page of the window after the offset in `token`, with every match
-    /// counted, as runtime-go's offset tokens.
-    pub(super) async fn page(
-        &self,
-        res: &Resource,
-        range: &Range,
-        token: &str,
-    ) -> Result<ListResult> {
-        let offset: usize = match token {
-            "" => 0,
-            t => t
-                .parse()
-                .map_err(|_| invalid("page_token is not from this backend"))?,
-        };
-        let top = filter::Top::new(res, range, offset)?;
-        let (items, total) = self
-            .window(res, range, top, |top, rows| top.push(rows))
-            .await?
-            .finish();
-        let next = offset + items.len();
-        Ok(ListResult {
-            next_page_token: if (next as i64) < total {
-                next.to_string()
-            } else {
-                String::new()
-            },
-            items,
-            total,
-        })
-    }
-
     /// Closes the table's open segment, if any, before its files change.
     pub(super) async fn close_table(&self, table: &str) -> Result<()> {
         let (inner, table) = (self.inner.clone(), table.to_owned());
@@ -134,6 +105,11 @@ impl ArrowDriver {
         })
         .await
         .map_err(joined)
+    }
+
+    /// Drops what is known of a table whose files are going away.
+    pub(super) fn forget_table(&self, table: &str) {
+        self.inner.indexes.forget(&self.table_dir(table));
     }
 
     pub(super) fn table_dir(&self, table: &str) -> PathBuf {
@@ -157,9 +133,15 @@ impl ArrowDriver {
     ) -> Result<S> {
         let dir = self.inner.dir.join(resource.table());
         let (resource, bounds) = (resource.clone(), (range.start, range.end));
+        let indexes = self.inner.indexes.clone();
         tokio::task::spawn_blocking(move || {
             for path in segments(&dir)? {
-                scan(&path, &resource, bounds, &mut |rows| step(&mut state, rows))?;
+                scan(&path, &resource, bounds, &mut |rows| {
+                    indexes
+                        .reads
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    step(&mut state, rows)
+                })?;
             }
             Ok(state)
         })

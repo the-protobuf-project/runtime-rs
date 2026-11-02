@@ -30,7 +30,7 @@ impl TimeSeries for ArrowDriver {
     async fn range(&self, res: &Resource, opts: &RangeOptions) -> Result<ListResult> {
         let range = Range::of(res, opts)?;
         filter::validate(res, &range)?;
-        self.page(res, &range, &opts.page_token).await
+        self.page(res, &range, &opts.page_token, true).await
     }
 
     async fn aggregate(&self, res: &Resource, opts: &AggregateOptions) -> Result<Vec<Bucket>> {

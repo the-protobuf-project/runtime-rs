@@ -72,6 +72,16 @@ impl HybridServer {
         Ok(())
     }
 
+    /// Without the `a2a` feature there are no A2A services to build; saying so beats
+    /// ignoring the option.
+    #[cfg(not(feature = "a2a"))]
+    fn a2a_services(&self) -> Vec<Arc<dyn agents::Service>> {
+        if self.opts.enable_a2a {
+            tracing::warn!("enable_a2a is set but this build has no `a2a` feature");
+        }
+        Vec::new()
+    }
+
     /// Drains the agent runtime, if one came up.
     pub(crate) async fn stop_agents(&self) -> Result<()> {
         let (runtime, cancel) = {
