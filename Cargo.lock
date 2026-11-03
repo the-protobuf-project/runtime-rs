@@ -4389,6 +4389,7 @@ dependencies = [
  "tower-http 0.7.1",
  "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4464,6 +4465,7 @@ dependencies = [
  "prost-reflect",
  "quinn",
  "reqwest 0.13.5",
+ "rmcp",
  "rustls",
  "rustls-pemfile",
  "serde",

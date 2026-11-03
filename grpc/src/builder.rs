@@ -123,6 +123,55 @@ impl HybridServer {
         self
     }
 
+    /// Sets the gRPC listener's connection limits and HTTP/2 settings: how many clients at
+    /// once and what the next one gets, the idle timeout, how long a stop lets calls drain,
+    /// concurrent streams per connection, and the flow-control windows. See
+    /// [`GrpcLimits`](crate::options::GrpcLimits); every setting left alone keeps the
+    /// behaviour this server had without it.
+    #[must_use]
+    pub fn with_grpc_limits(mut self, limits: crate::options::GrpcLimits) -> Self {
+        self.grpc_limits = limits;
+        self
+    }
+
+    /// Wraps every gRPC service in `layer`, for middleware that needs the request body —
+    /// metering decoded bytes against a budget, say — which neither interceptor sees.
+    ///
+    /// The layer sits innermost: after the telemetry and both interceptor chains, directly
+    /// around the routes, so it sees each call's framed request body as the client sent it.
+    /// It runs for listener and [`Loopback`] callers alike, as the interceptors do. Layers
+    /// apply in the order they are added, the first outermost.
+    ///
+    /// [`HybridServer::with_service`] cannot do this itself: it takes the service's name
+    /// from the generated type, which a layered service no longer is.
+    ///
+    /// ```
+    /// use grpc::{GrpcService, HybridServer};
+    /// use grpc::options::Options;
+    ///
+    /// // Any tower layer over `GrpcService` — here one that only passes calls through.
+    /// let server = HybridServer::new(Options::default())
+    ///     .with_grpc_layer(tower::layer::layer_fn(|inner: GrpcService| inner));
+    /// # let _ = server;
+    /// ```
+    #[must_use]
+    pub fn with_grpc_layer<L>(mut self, layer: L) -> Self
+    where
+        L: tower::Layer<crate::GrpcService> + Send + Sync + 'static,
+        L::Service: tower::Service<
+                http::Request<tonic::body::Body>,
+                Response = http::Response<tonic::body::Body>,
+                Error = std::convert::Infallible,
+            > + Clone
+            + Send
+            + Sync
+            + 'static,
+        <L::Service as tower::Service<http::Request<tonic::body::Body>>>::Future: Send + 'static,
+    {
+        self.grpc_layers.push(crate::layer::erase(layer));
+        self
+    }
+
     /// Bounds how long [`HybridServer::stop`] may take before cutting off what is still
     /// running. Go's `WithShutdownTimeout`; the default is 20 seconds.
     #[must_use]
@@ -204,6 +253,10 @@ impl HybridServer {
     ///
     /// The files are read at [`HybridServer::start`], so a bad path is a start error rather
     /// than a panic here.
+    ///
+    /// Only with the `tls` feature, which is on by default. Without it this method does not
+    /// exist, so a build that cannot serve TLS cannot be asked to.
+    #[cfg(feature = "tls")]
     #[must_use]
     pub fn with_certificates(
         mut self,

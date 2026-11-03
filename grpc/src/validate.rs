@@ -30,11 +30,23 @@ pub fn validate_options(
     if opts.enable_http && opts.http.host.is_empty() {
         return Err(Error::EmptyHttpHost);
     }
+    // The REST gateway serves TCP; a local endpoint there is refused by name rather than
+    // handed to a TCP bind that would report it as an unparseable address.
+    if opts.enable_http && opts.http.local().is_some() {
+        return Err(Error::Listen {
+            addr: opts.http.addr(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "the HTTP gateway listens on TCP only; turn it off or give it a host",
+            ),
+        });
+    }
 
     // MCP over stdio talks on the process's own pipes, so it needs no address at all.
     // As in Go, only a transport that was named and listens gets the defaults: with none
-    // named the MCP address is left as given.
-    if opts.enable_mcp && opts.mcp.transport.is_some_and(|t| t.listens()) {
+    // named the MCP address is left as given. A local MCP endpoint has no port to derive.
+    let mcp_local = agents::listen::LocalAddr::is_local(&opts.mcp.host);
+    if opts.enable_mcp && !mcp_local && opts.mcp.transport.is_some_and(|t| t.listens()) {
         if opts.mcp.host.is_empty() {
             opts.mcp.host = agents::DEFAULT_HOST.to_string();
         }
@@ -47,7 +59,7 @@ pub fn validate_options(
         }
     }
 
-    if opts.enable_a2a {
+    if opts.enable_a2a && !agents::listen::LocalAddr::is_local(&opts.a2a.host) {
         if opts.a2a.host.is_empty() {
             opts.a2a.host = agents::DEFAULT_HOST.to_string();
         }
@@ -65,9 +77,9 @@ pub fn validate_options(
                 "validateOptions: applying default A2A port"
             );
         }
-        if opts.a2a.base_path.is_empty() {
-            opts.a2a.base_path = crate::options::DEFAULT_A2A_BASE_PATH.to_string();
-        }
+    }
+    if opts.enable_a2a && opts.a2a.base_path.is_empty() {
+        opts.a2a.base_path = crate::options::DEFAULT_A2A_BASE_PATH.to_string();
     }
 
     if opts.experimental_http3 {

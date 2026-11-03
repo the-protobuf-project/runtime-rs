@@ -31,6 +31,8 @@
 mod health;
 
 pub mod h1;
+#[cfg(feature = "tls")]
+mod h1_tls;
 #[cfg(feature = "http3")]
 pub mod h3;
 

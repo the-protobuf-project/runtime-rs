@@ -55,6 +55,21 @@ impl HybridServer {
     /// nothing answers on.
     fn validate_grpc_listener(&self) -> Result<()> {
         if self.grpc_listener {
+            // A dialling gateway is handed `host:port` to dial; a socket path is not one a
+            // generated client can take, so the registration is refused rather than broken.
+            if self.http_handler.is_none()
+                && !self.http_gateways.is_empty()
+                && self.opts.grpc.local().is_some()
+            {
+                return Err(Error::Gateway(
+                    format!(
+                        "with_http_gateways dials gRPC over TCP, and gRPC listens on {}; \
+                         use with_gateway, which calls the services in-process",
+                        self.opts.grpc.addr()
+                    )
+                    .into(),
+                ));
+            }
             return Ok(());
         }
         if self.http_handler.is_none() && !self.http_gateways.is_empty() {
@@ -76,7 +91,7 @@ impl HybridServer {
     fn bound_options(&self) -> crate::options::Options {
         let mut opts = self.opts.clone();
         let state = self.state.lock().expect("grpc: server state poisoned");
-        if let Some(bound) = state.grpc_addr {
+        if let Some(bound) = state.grpc_listen.as_ref().and_then(|addr| addr.tcp()) {
             opts.grpc.port = bound.port();
         }
         if let Some(bound) = state.http_addr {
@@ -145,12 +160,13 @@ impl HybridServer {
     /// The timeout expiring, or an agent protocol failing to drain.
     pub async fn stop(&self) -> Result<()> {
         tracing::info!("Shutting down servers...");
-        let (grpc, grpc_task, http, http3, tasks) = {
+        let (grpc_abort, grpc, grpc_task, http, http3, tasks) = {
             let mut state = self.state.lock().expect("grpc: server state poisoned");
             state.loopback = None;
-            state.grpc_addr = None;
+            state.grpc_listen = None;
             state.http_addr = None;
             (
+                state.grpc_abort.take(),
                 state.grpc.take(),
                 state.grpc_task.take(),
                 state.http.take(),
@@ -186,6 +202,11 @@ impl HybridServer {
             Err(_) => {
                 for task in aborts {
                     task.abort();
+                }
+                // tonic runs each connection as a task of its own, which aborting the server
+                // task does not reach; this cuts them.
+                if let Some(abort) = grpc_abort {
+                    abort.cancel();
                 }
                 Err(Error::ShutdownTimeout(self.shutdown_timeout))
             }

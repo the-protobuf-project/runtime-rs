@@ -81,7 +81,7 @@ impl HybridServer {
             return Vec::new();
         }
 
-        let addr = format!("{}:{}", self.opts.a2a.host, self.opts.a2a.port);
+        let addr = crate::options::agent_addr(&self.opts.a2a.host, self.opts.a2a.port);
         let transports = self.a2a_transports();
         tracing::debug!(
             count = self.a2a_service_funcs.len(),

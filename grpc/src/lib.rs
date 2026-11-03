@@ -15,7 +15,9 @@ pub mod http;
 mod hybrid;
 pub mod idempotency;
 pub mod intercept;
+mod layer;
 mod lifecycle;
+mod listener;
 pub mod loopback;
 mod mcp_options;
 pub mod observe;
@@ -26,6 +28,9 @@ pub mod rest;
 mod server;
 pub mod status;
 pub mod stream_intercept;
+// Without the `tls` feature the same module path holds an uninhabited `Certificate`, so the
+// transports keep one signature and the compiler proves no TLS path is reachable.
+#[cfg_attr(not(feature = "tls"), path = "tls_off.rs")]
 pub mod tls;
 mod types;
 mod validate;
@@ -38,6 +43,8 @@ pub use cors::{CorsLayer, CorsPolicy, cors};
 pub use error::{Error, Result};
 pub use hybrid::{DEFAULT_SHUTDOWN_TIMEOUT, HybridServer};
 pub use intercept::{Interceptor, Next, UnaryCall, UnaryReply};
+pub use layer::GrpcService;
+pub use listener::ListenAddr;
 pub use loopback::Loopback;
 pub use observe::{Observer, is_server_error};
 pub use rest::{GatewayFn, RestGateway};

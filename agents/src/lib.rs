@@ -99,8 +99,6 @@ mod placement;
 mod runtime;
 pub mod shared;
 mod start;
-#[cfg(unix)]
-mod unix;
 
 #[cfg(feature = "a2a")]
 pub mod a2a;

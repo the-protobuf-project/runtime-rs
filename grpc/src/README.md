@@ -10,9 +10,10 @@ for each start, and owns the resulting listener tasks and drain tokens.
 `hybrid.rs` defines configuration/state. `builder.rs`, `mcp_options.rs`, and
 `a2a.rs` collect registrations. `environment.rs` applies supported environment
 overrides at construction; `validate.rs` resolves defaults and checks options
-at start. `tls.rs` loads certificates before listeners are created.
+at start. `tls.rs` loads certificates before listeners are created; without the
+`tls` feature `tls_off.rs` takes its place with an uninhabited `Certificate`.
 
-`server.rs` binds gRPC, registers health/reflection/user services, and starts the
+`server.rs` binds gRPC (TCP, or a local endpoint through `listener/`), registers health/reflection/user services, and starts the
 agent runtime before consuming tonic routes. It builds equivalent transport
 layers for TCP and `Loopback`; deferred MCP loopback access is resolved once
 those routes exist. `lifecycle.rs` then builds the HTTP router, starts optional
@@ -27,8 +28,9 @@ HTTP drain, then waits for gRPC completion under the shutdown deadline.
 | [hybrid.rs](hybrid.rs), [builder.rs](builder.rs), [types.rs](types.rs) | Server state, fluent registration, and callback contracts |
 | [server.rs](server.rs), [lifecycle.rs](lifecycle.rs), [agent_runtime.rs](agent_runtime.rs) | Component startup, route ordering, ownership, and drain |
 | [options](options/README.md), [environment.rs](environment.rs), [validate.rs](validate.rs) | Settings, overrides, defaults, and configuration checks |
-| [http](http/README.md), [tls.rs](tls.rs), [cors.rs](cors.rs) | HTTP listeners, certificate adapters, and cross-origin policy |
+| [http](http/README.md), [tls.rs](tls.rs), [tls_off.rs](tls_off.rs), [cors.rs](cors.rs) | HTTP listeners, certificate adapters, and cross-origin policy |
 | [rest.rs](rest.rs), [loopback.rs](loopback.rs) | Gateway dispatch and in-process tonic transport |
+| [listener](listener/mod.rs), [layer.rs](layer.rs) | gRPC listener (TCP, Unix socket, named pipe) with connection limits, idle timeout and bounded drain; caller layers around every service |
 | [intercept.rs](intercept.rs), [stream_intercept.rs](stream_intercept.rs) | Reflected unary messages and stream middleware |
 | [validation.rs](validation.rs), [validation_hints.rs](validation_hints.rs) | Protovalidate adapter and field-specific rich failures |
 | [problem](problem/README.md), [hints](hints/README.md), [annotations.rs](annotations.rs) | Typed errors and descriptor-derived advice |

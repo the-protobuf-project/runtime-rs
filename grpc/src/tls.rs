@@ -1,4 +1,5 @@
-//! The TLS material every transport on this server shares.
+//! The TLS material every transport on this server shares. Compiled with the `tls` feature;
+//! `tls_off.rs` stands in for it without.
 
 use std::io::BufReader;
 
@@ -110,6 +111,15 @@ impl Certificate {
         config.alpn_protocols = alpn.iter().map(|p| p.as_bytes().to_vec()).collect();
         Ok(config)
     }
+}
+
+/// Turns on TLS for the gRPC listener with `cert`'s identity.
+pub(crate) fn configure_grpc(
+    builder: tonic::transport::Server,
+    cert: &Certificate,
+) -> Result<tonic::transport::Server> {
+    let config = tonic::transport::ServerTlsConfig::new().identity(cert.identity());
+    Ok(builder.tls_config(config)?)
 }
 
 /// Installs the ring provider once, so a caller that never touches rustls directly still

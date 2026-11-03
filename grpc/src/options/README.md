@@ -27,6 +27,13 @@ fn main() {
 ```
 
 `mod.rs` defines identity, `Endpoint`, component toggles, and `Options`.
+`Endpoint::unix(path)` and `Endpoint::pipe(name)` name local endpoints. They are
+stored in `host` as `unix:PATH` or `pipe:NAME`, so the host override works for
+them and existing struct literals still compile. The port is ignored for them.
+MCP and A2A accept the same `unix:` host, and then get no derived port.
+`limits.rs` defines `GrpcLimits` and `Overflow`, which `with_grpc_limits`
+applies to the gRPC listener. Every setting defaults to unset, which leaves
+behaviour as it was.
 `agents.rs` defines MCP/A2A binding and placement settings. `environment.rs`
 defines the four modes; reflection is exposed only in Development/Debug and
 only when descriptors were supplied. `opentelemetry.rs` names metric types;
@@ -39,7 +46,8 @@ binding list. Invalid override values are ignored with debug logging. No
 blanket environment override exists for every `Options` field.
 
 At startup, `validate.rs` requires a gRPC host, unless `without_grpc_listener`
-leaves nothing to bind, and an HTTP host when HTTP is enabled. The defaults of
+leaves nothing to bind, and an HTTP host when HTTP is enabled. It refuses a
+local HTTP endpoint, because the gateway serves TCP only. The defaults of
 65020 and 6502 come from `Options::default()`. Explicit listening MCP transport
 settings default to `0.0.0.0` and HTTP port + 1; stdio needs no listener. Enabled
 A2A defaults its host/base path and chooses the next port after MCP (or HTTP + 2

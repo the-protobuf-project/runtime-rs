@@ -108,14 +108,14 @@ fn agent_rows(opts: &Options, endpoints: &[agents::Endpoint]) -> Vec<Row> {
                 (
                     "MCP",
                     "Server",
-                    format!("{}:{}", opts.mcp.host, opts.mcp.port),
+                    crate::options::agent_addr(&opts.mcp.host, opts.mcp.port),
                 )
             } else {
                 a2a_seen += 1;
                 (
                     "A2A",
                     "Agent",
-                    format!("{}:{}", opts.a2a.host, opts.a2a.port),
+                    crate::options::agent_addr(&opts.a2a.host, opts.a2a.port),
                 )
             };
             let n = if is_mcp { mcp_seen } else { a2a_seen };

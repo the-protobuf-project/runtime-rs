@@ -39,8 +39,11 @@ pub(crate) struct Running {
     pub(crate) agent_cancel: Option<CancellationToken>,
     /// Where the agent protocols came up, for the banner.
     pub(crate) endpoints: Vec<agents::Endpoint>,
-    /// The address the gRPC listener bound: the port the OS chose when asked for port 0.
-    pub(crate) grpc_addr: Option<std::net::SocketAddr>,
+    /// Where the gRPC listener bound: the port the OS chose when asked for port 0, or the
+    /// local endpoint.
+    pub(crate) grpc_listen: Option<crate::listener::ListenAddr>,
+    /// Cuts every gRPC connection still open, when a drain runs out of time.
+    pub(crate) grpc_abort: Option<CancellationToken>,
     /// The address the HTTP/1.1 listener bound.
     pub(crate) http_addr: Option<std::net::SocketAddr>,
 }
@@ -59,6 +62,7 @@ pub(crate) struct Running {
 pub struct HybridServer {
     pub(crate) opts: Options,
     pub(crate) cert: Option<Certificate>,
+    #[cfg(feature = "tls")]
     pub(crate) cert_paths: Option<(String, String)>,
 
     pub(crate) grpc_services: Vec<(Option<String>, GrpcServiceFn)>,
@@ -99,6 +103,10 @@ pub struct HybridServer {
     pub(crate) grpc_listener: bool,
     /// Where the always-on gRPC spans and metrics go.
     pub(crate) telemetry: crate::otel::OtelLayer,
+    /// Connection limits and HTTP/2 settings for the gRPC listener.
+    pub(crate) grpc_limits: crate::options::GrpcLimits,
+    /// Caller layers around every gRPC service, outermost first.
+    pub(crate) grpc_layers: Vec<crate::layer::GrpcLayerFn>,
 
     pub(crate) state: Mutex<Running>,
 
@@ -122,6 +130,7 @@ impl HybridServer {
         Self {
             opts,
             cert: None,
+            #[cfg(feature = "tls")]
             cert_paths: None,
             grpc_services: Vec::new(),
             http_gateways: Vec::new(),
@@ -143,6 +152,8 @@ impl HybridServer {
             banner: crate::banner::BannerOutput::default(),
             grpc_listener: true,
             telemetry: crate::otel::OtelLayer::global(),
+            grpc_limits: crate::options::GrpcLimits::default(),
+            grpc_layers: Vec::new(),
             state: Mutex::new(Running::default()),
             mcp: crate::mcp_options::McpSettings::default(),
         }
@@ -161,9 +172,18 @@ impl HybridServer {
 
     /// The address the gRPC listener bound once [`HybridServer::start`] has returned: the port
     /// the operating system chose when the options asked for port 0. `None` before start,
-    /// after a stop, and always under [`HybridServer::without_grpc_listener`].
+    /// after a stop, always under [`HybridServer::without_grpc_listener`], and for a local
+    /// endpoint, which has no socket address; [`HybridServer::grpc_listen_addr`] reports
+    /// every kind.
     pub fn grpc_addr(&self) -> Option<std::net::SocketAddr> {
-        self.state.lock().ok().and_then(|s| s.grpc_addr)
+        self.grpc_listen_addr().and_then(|addr| addr.tcp())
+    }
+
+    /// Where the gRPC listener is bound once [`HybridServer::start`] has returned: a TCP
+    /// address with the port the operating system chose, or the Unix socket or named pipe.
+    /// `None` before start, after a stop, and under [`HybridServer::without_grpc_listener`].
+    pub fn grpc_listen_addr(&self) -> Option<crate::listener::ListenAddr> {
+        self.state.lock().ok().and_then(|s| s.grpc_listen.clone())
     }
 
     /// The address the HTTP/1.1 gateway listens on once [`HybridServer::start`] has returned,
@@ -183,6 +203,7 @@ impl HybridServer {
     }
 
     /// Loads the deferred certificate, if one was named.
+    #[cfg(feature = "tls")]
     pub(crate) fn load_certificate(&mut self) -> Result<()> {
         if self.cert.is_some() {
             return Ok(());
@@ -190,6 +211,12 @@ impl HybridServer {
         if let Some((cert_file, key_file)) = self.cert_paths.clone() {
             self.cert = Some(Certificate::from_pem_files(cert_file, key_file)?);
         }
+        Ok(())
+    }
+
+    /// Without the `tls` feature there is no certificate to name, so nothing to load.
+    #[cfg(not(feature = "tls"))]
+    pub(crate) fn load_certificate(&mut self) -> Result<()> {
         Ok(())
     }
 }

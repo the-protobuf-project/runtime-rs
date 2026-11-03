@@ -17,10 +17,15 @@ go-source = "runtime-go/grpc"
 name = "grpc"
 
 [features]
-default = ["http3", "a2a"]
+default = ["tls", "http3", "a2a"]
+# TLS for gRPC, the REST gateway and HTTP/3, on rustls with ring. A feature because ring
+# is C: with it off nothing in this crate's graph needs a C compiler, which is what lets a
+# local daemon serving only a Unix socket or named pipe cross-compile with Cargo alone.
+tls = ["tonic/tls-ring", "dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
 # HTTP/3 pulls in QUIC. It is a feature rather than a hard dependency because the
-# gateway is complete without it and quinn is a large tree to build for nothing.
-http3 = ["dep:h3", "dep:h3-quinn", "dep:quinn"]
+# gateway is complete without it and quinn is a large tree to build for nothing. QUIC has
+# no plaintext mode, so it brings TLS with it.
+http3 = ["tls", "dep:h3", "dep:h3-quinn", "dep:quinn"]
 # Agent2Agent. A feature because its SDK brings reqwest and aws-lc, which a server speaking
 # gRPC, REST and MCP has no use for. MCP has no feature of its own: the server is written
 # against it throughout.
@@ -32,7 +37,7 @@ agents = { workspace = true, features = ["mcp"] }
 tokio = { workspace = true, features = ["signal"] }
 tokio-util = { workspace = true }
 tokio-stream = { workspace = true }
-tonic = { workspace = true, features = ["tls-ring"] }
+tonic = { workspace = true }
 tonic-health = { workspace = true }
 tonic-reflection = { workspace = true }
 tonic-web = { workspace = true }
@@ -50,9 +55,9 @@ bytes = { workspace = true }
 http-body = { workspace = true }
 http-body-util = { workspace = true }
 
-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
-tokio-rustls = { workspace = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
+tokio-rustls = { workspace = true, optional = true }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -79,3 +84,5 @@ opentelemetry_sdk = { version = "0.33", features = ["testing", "trace", "metrics
 tonic-prost = { workspace = true }
 tokio-stream = { workspace = true }
 tonic-prost-build = { workspace = true }
+# A real MCP client over a Unix socket, for tests/no_tcp.rs.
+rmcp = { version = "3.8", features = ["client", "transport-streamable-http-client-unix-socket"] }

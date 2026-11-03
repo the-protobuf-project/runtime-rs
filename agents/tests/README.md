@@ -23,6 +23,11 @@ legacy SSE/elicitation/combined endpoints (`mcp_hosting`), and actual generated
 handlers (`generated_mcp`). `mcp_client.rs` is a small wire client used by
 other tests; `mcp_probe.rs` supplies inspectable test handlers.
 
+`mcp_unix.rs` and `a2a_unix.rs` serve over Unix sockets. `local_endpoints.rs`
+checks the `http+npipe` URLs and gRPC dial target MCP and A2A advertise for a
+named pipe, on every platform. `local_pipe.rs`
+(Windows only) accepts several named-pipe clients in turn and refuses a held name.
+
 A2A targets check cards/endpoints (`a2a_card`), executor events/errors
 (`a2a_executor`), and standalone/shared/gRPC serving (`a2a_serve`). Tests are
 feature-gated for their protocols. The no-default-feature suite verifies that

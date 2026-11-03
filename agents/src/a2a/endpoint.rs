@@ -51,8 +51,8 @@ pub fn server_endpoints(cfg: &ServerConfig) -> Vec<Endpoint> {
 fn public_base(cfg: &ServerConfig) -> String {
     if cfg.public_url.is_empty() {
         let addr = cfg.resolved_addr();
-        if let Some(path) = crate::listen::unix_path(&addr) {
-            format!("http+unix://{}", crate::listen::unix_authority(path))
+        if let Some((_, base)) = crate::listen::local_url_base(&addr) {
+            base
         } else {
             format!("http://{}", host_port_or_default(&addr))
         }
@@ -84,7 +84,8 @@ pub(super) fn public_url_for(cfg: &ServerConfig, transport: Transport) -> String
     let base = public_base(cfg);
     if transport == Transport::Grpc {
         let addr = cfg.resolved_addr();
-        if cfg.public_url.is_empty() && crate::listen::unix_path(&addr).is_some() {
+        // A local endpoint is its own dial target: `unix:PATH` and `pipe:NAME` as written.
+        if cfg.public_url.is_empty() && crate::listen::LocalAddr::is_local(&addr) {
             return addr;
         }
         // A gRPC target is host:port, not a URL. A scheme here is what turns a client's dial

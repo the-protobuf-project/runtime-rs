@@ -28,7 +28,8 @@ With this program running, `curl http://127.0.0.1:8080/hello` returns `hello`,
 and `GET /health` is mounted alongside it. `health.rs` provides that HTTP
 liveness route independently of the standard gRPC health-service toggle.
 
-`h1.rs` binds TCP, optionally accepts TLS, and serves requests through hyper.
+`h1.rs` binds TCP and serves requests through hyper; with a certificate it hands
+the listener to `h1_tls.rs`, the TLS acceptor, which only the `tls` feature compiles.
 Ordinary gRPC remains on its HTTP/2 tonic listener; the HTTP/1.1 leg serves
 REST/JSON. `h3.rs` adapts QUIC HTTP/3 requests to the same router. It is compiled
 with the `http3` feature and requires TLS. Hybrid startup binds it at

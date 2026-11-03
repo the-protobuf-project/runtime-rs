@@ -1,30 +1,39 @@
 //! The gRPC leg: the listener, the built-in services, and the agent protocols that must
 //! register before it serves.
 
-use std::net::SocketAddr;
+use std::time::Duration;
 
 use agents::GrpcRoutes;
-use tokio_stream::wrappers::TcpListenerStream;
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tonic::transport::{Server, ServerTlsConfig};
+use tonic::transport::Server;
 
 use crate::error::{Error, Result};
 use crate::hybrid::HybridServer;
 use crate::intercept::InterceptLayer;
+use crate::listener::Listener;
 use crate::loopback::{ChainLayer, Loopback};
+
+/// A running gRPC listener: what stops it, what cuts its connections, and its task.
+struct Serving {
+    shutdown: CancellationToken,
+    abort: CancellationToken,
+    task: JoinHandle<()>,
+}
 
 impl HybridServer {
     /// Initialises and runs the gRPC server.
     ///
     /// The listener is bound here rather than inside tonic's own `serve`, so an address
     /// already in use is a [`HybridServer::start`] error the caller can act on — the same
-    /// place Go's `net.Listen` reports it.
+    /// place Go's `net.Listen` reports it. It is a TCP socket or, when the options name one,
+    /// a Unix socket or named pipe; everything past the bind is the same for both.
     pub(crate) async fn start_grpc_server(&mut self) -> Result<()> {
         let addr = self.opts.grpc.addr();
         let listener = if self.grpc_listener {
-            tracing::debug!(%addr, "gRPC: binding TCP listener");
+            tracing::debug!(%addr, "gRPC: binding listener");
             Some(
-                tokio::net::TcpListener::bind(&addr)
+                Listener::bind(&self.opts.grpc)
                     .await
                     .map_err(|source| Error::Listen {
                         addr: addr.clone(),
@@ -32,18 +41,18 @@ impl HybridServer {
                     })?,
             )
         } else {
-            tracing::debug!("gRPC: no TCP listener; the routes serve the loopback only");
+            tracing::debug!("gRPC: no listener; the routes serve the loopback only");
             None
         };
-        let bound: Option<SocketAddr> = listener
+        let bound = listener
             .as_ref()
-            .map(tokio::net::TcpListener::local_addr)
+            .map(Listener::addr)
             .transpose()
             .map_err(|source| Error::Listen {
                 addr: addr.clone(),
                 source,
             })?;
-        tracing::debug!(?bound, "gRPC: TCP listener ready");
+        tracing::debug!(?bound, "gRPC: listener ready");
 
         let routes = GrpcRoutes::new();
         self.register_health(&routes);
@@ -69,6 +78,7 @@ impl HybridServer {
             self.stream_interceptors.clone(),
             crate::intercept::descriptor_pool(&descriptors),
         );
+        let layers = crate::layer::GrpcLayers(self.grpc_layers.clone().into());
         let telemetry = self.telemetry.clone();
         let loopback = Loopback::new(
             routes.routes(),
@@ -76,6 +86,7 @@ impl HybridServer {
             messages.clone(),
             streams.clone(),
             telemetry.clone(),
+            layers.clone(),
         );
         // MCP services were handed a deferred loopback while the routes were still open.
         self.mcp.loopback.set(loopback.clone());
@@ -85,47 +96,54 @@ impl HybridServer {
                 let mut builder = Server::builder();
                 if let Some(cert) = &self.cert {
                     tracing::debug!("gRPC: TLS enabled — configuring credentials");
-                    builder =
-                        builder.tls_config(ServerTlsConfig::new().identity(cert.identity()))?;
+                    builder = crate::tls::configure_grpc(builder, cert)?;
                 } else {
                     tracing::debug!("gRPC: no certificate — running plaintext");
                 }
-
+                // `None` is tonic's own default for each, so an unset limit changes nothing.
+                let limits = self.grpc_limits;
                 let router = builder
+                    .max_concurrent_streams(limits.max_concurrent_streams)
+                    .initial_stream_window_size(limits.initial_stream_window_size)
+                    .initial_connection_window_size(limits.initial_connection_window_size)
                     .layer(telemetry)
                     .layer(ChainLayer(chain))
                     .layer(streams)
                     .layer(messages)
+                    .layer(layers)
                     .add_routes(routes.routes());
-                let token = CancellationToken::new();
-                let shutdown = token.clone();
-                let serving = addr.clone();
 
-                tracing::debug!(%addr, "gRPC: starting server task");
-                let handle = tokio::spawn(async move {
-                    let served = router
-                        .serve_with_incoming_shutdown(
-                            TcpListenerStream::new(listener),
-                            async move {
-                                shutdown.cancelled().await;
-                            },
-                        )
-                        .await;
-                    if let Err(err) = served {
-                        tracing::error!(addr = %serving, error = %err, "gRPC server stopped");
-                    }
+                let shutdown = CancellationToken::new();
+                let abort = CancellationToken::new();
+                let incoming = listener.incoming(limits, abort.clone());
+                let stop = shutdown.clone();
+                let serve = router.serve_with_incoming_shutdown(incoming, async move {
+                    stop.cancelled().await;
                 });
-                Some((token, handle))
+                tracing::debug!(%addr, "gRPC: starting server task");
+                let task = tokio::spawn(drain_bounded(
+                    serve,
+                    shutdown.clone(),
+                    abort.clone(),
+                    limits.drain_timeout,
+                    addr,
+                ));
+                Some(Serving {
+                    shutdown,
+                    abort,
+                    task,
+                })
             }
             None => None,
         };
 
         let mut state = self.state.lock().expect("grpc: server state poisoned");
-        if let Some((token, handle)) = serving {
-            state.grpc = Some(token);
-            state.grpc_task = Some(handle);
+        if let Some(serving) = serving {
+            state.grpc = Some(serving.shutdown);
+            state.grpc_abort = Some(serving.abort);
+            state.grpc_task = Some(serving.task);
         }
-        state.grpc_addr = bound;
+        state.grpc_listen = bound;
         state.loopback = Some(loopback);
         Ok(())
     }
@@ -234,5 +252,39 @@ impl HybridServer {
             .collect();
         names.sort();
         names
+    }
+}
+
+/// Serves until `shutdown`, then drains: every connection is sent GOAWAY and its calls run
+/// to completion. With a `drain` bound, connections still open when it expires are cut —
+/// their next read or write fails — so the drain ends rather than waiting on a call that
+/// never will.
+async fn drain_bounded(
+    serve: impl std::future::Future<Output = std::result::Result<(), tonic::transport::Error>>,
+    shutdown: CancellationToken,
+    abort: CancellationToken,
+    drain: Option<Duration>,
+    addr: String,
+) {
+    let deadline = async {
+        match drain {
+            Some(bound) => {
+                shutdown.cancelled().await;
+                tokio::time::sleep(bound).await;
+            }
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(serve);
+    let served = tokio::select! {
+        served = &mut serve => served,
+        () = deadline => {
+            tracing::warn!(%addr, "gRPC: drain timed out; cutting the connections still open");
+            abort.cancel();
+            serve.await
+        }
+    };
+    if let Err(err) = served {
+        tracing::error!(%addr, error = %err, "gRPC server stopped");
     }
 }

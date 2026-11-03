@@ -156,7 +156,7 @@ impl HybridServer {
         } else {
             &self.opts.mcp.host
         };
-        let addr = format!("{host}:{}", self.opts.mcp.port);
+        let addr = crate::options::agent_addr(host, self.opts.mcp.port);
         let loopback = Loopback::deferred(self.mcp.loopback.clone());
         let hook = self.mcp.elicit_hook.clone();
         let build = || {

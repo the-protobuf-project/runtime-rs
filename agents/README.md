@@ -83,7 +83,16 @@ ordinary gRPC and REST endpoints.
 
 ## Ownership and failures
 
-The default bind host is `0.0.0.0`; set a port explicitly. A public URL is an
+The default bind host is `0.0.0.0`; set a port explicitly. A service address
+may also be a local endpoint: `unix:/run/app/mcp.sock` on Unix or
+`pipe:\\.\pipe\app-mcp` on Windows. Both are created owner-only (a `0600`
+socket, its missing directory created `0700`; a pipe whose DACL admits only the
+current user). A stale socket is replaced, a live socket or pipe and a
+non-socket file are refused, and the socket is removed when its listener stops.
+`listen::LocalListener` is that listener; the gRPC crate serves gRPC on the same
+type, so both crates keep the same rules.
+
+A public URL is an
 advertisement for clients behind a proxy, not a different bind address. A
 service's explicit address creates a separate group; services naming the same
 address still share a listener.

@@ -38,12 +38,15 @@ impl Loopback {
         messages: InterceptLayer,
         streams: crate::stream_intercept::StreamInterceptLayer,
         telemetry: crate::otel::OtelLayer,
+        layers: crate::layer::GrpcLayers,
     ) -> Self {
         use tower::Layer;
         let intercepted = chain.is_some();
+        // The same stack, in the same order, as the listener's in `server.rs`.
+        let routed = layers.layer(routes);
         Self {
             inner: tower::util::BoxCloneSyncService::new(
-                telemetry.layer(Chained::new(streams.layer(messages.layer(routes)), chain)),
+                telemetry.layer(Chained::new(streams.layer(messages.layer(routed)), chain)),
             ),
             intercepted,
         }

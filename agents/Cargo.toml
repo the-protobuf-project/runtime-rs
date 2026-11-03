@@ -80,6 +80,16 @@ tonic-health = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 http-body = { workspace = true, optional = true }
 
+# Windows only: the owner-only security descriptor a named pipe is created with. std and
+# tokio have no safe API for one; see src/listen/sys/windows_security.rs.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # A real MCP client over a Unix socket, for tests/mcp_unix.rs.

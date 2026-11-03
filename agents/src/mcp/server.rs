@@ -199,17 +199,13 @@ pub fn server_endpoint_with(
     } else {
         &config.addr
     };
-    // HTTP over a Unix socket, written as the `http+unix` URL clients that speak it accept:
-    // the socket's path percent-encoded where a host would be.
-    if let Some(path) = crate::listen::unix_path(addr) {
+    // HTTP over a Unix socket or a named pipe, written as the `http+unix` or `http+npipe`
+    // URL clients that speak it accept.
+    if let Some((scheme, base)) = crate::listen::local_url_base(addr) {
         return Endpoint {
-            protocol: "http+unix".into(),
+            protocol: scheme.into(),
             transport: transport.as_str().into(),
-            url: format!(
-                "http+unix://{}{}",
-                crate::listen::unix_authority(path),
-                config.resolved_base_path()
-            ),
+            url: format!("{base}{}", config.resolved_base_path()),
         };
     }
     let mut host = env("MCP_SERVER_HOST").unwrap_or_default();

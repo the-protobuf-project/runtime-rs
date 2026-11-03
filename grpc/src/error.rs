@@ -49,6 +49,7 @@ pub enum Error {
     },
 
     /// rustls rejected the certificate and key pair.
+    #[cfg(feature = "tls")]
     #[error("invalid TLS certificate or key: {0}")]
     Tls(#[from] rustls::Error),
 

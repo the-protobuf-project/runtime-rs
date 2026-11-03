@@ -33,6 +33,7 @@ partially bound listeners.
 | [placement.rs](placement.rs) | Address grouping, listener ownership, binding, and HTTP timeouts |
 | [lifecycle.rs](lifecycle.rs) | Blocking serve and idempotent drain |
 | [mux.rs](mux.rs) | Mutable shared seams around consuming axum/tonic route builders |
+| [listen](listen/mod.rs) | TCP, Unix-socket and named-pipe listeners; `LocalListener` is shared with the gRPC crate |
 | [error.rs](error.rs) | Typed configuration, readiness, listener, and drain failures |
 | [mcp](mcp/README.md) | MCP transport hosting and generated-handler support |
 | [a2a](a2a/README.md) | A2A cards, execution, and bindings |

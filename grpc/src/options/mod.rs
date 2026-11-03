@@ -17,23 +17,53 @@
 //! };
 //! # let _ = opts;
 //! ```
+//!
+//! A local daemon with no network server names a Unix domain socket or a Windows named pipe
+//! instead, and opens no TCP port for gRPC at all:
+//!
+//! ```
+//! use grpc::options::{Endpoint, Options};
+//!
+//! let opts = Options {
+//!     service_name: "norn".into(),
+//!     grpc: Endpoint::unix("/run/norn/grpc.sock"),
+//!     ..Default::default()
+//! };
+//! assert_eq!(opts.grpc.addr(), "unix:/run/norn/grpc.sock");
+//! ```
 
 mod agents;
 mod environment;
+mod limits;
 pub mod opentelemetry;
 
 pub use agents::{A2aOptions, A2aTransport, DEFAULT_A2A_BASE_PATH, McpOptions, McpTransport};
 pub use environment::ServerEnvironment;
+pub use limits::{GrpcLimits, Overflow};
+
+/// A local endpoint's address — a Unix socket or a named pipe — shared with the agent
+/// protocols, which listen on the same kind of endpoint the same way.
+pub use ::agents::listen::LocalAddr;
 
 use std::fmt;
 
-/// A network host and port a component listens on.
+/// Where a component listens: a network host and port, or a local endpoint.
 ///
 /// Go declares `GRPCOptions` and `HTTPOptions` separately with identical shapes; the two
 /// names below are aliases of this one type, so either reads naturally at a call site.
+///
+/// # Local endpoints
+///
+/// A `host` of `unix:/abs/path` names a Unix domain socket and `pipe:\\.\pipe\name` a
+/// Windows named pipe; [`Endpoint::unix`] and [`Endpoint::pipe`] build them, and the port is
+/// then ignored. The address rides in `host` rather than a field of its own so that a struct
+/// literal written before local endpoints existed still compiles, and so the existing
+/// `{SERVICE}_HYBRID_GRPC_HOST` override can move a deployment onto a socket without a
+/// rebuild. Both are created owner-only; see [`::agents::listen`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Endpoint {
-    /// The network interface to listen on.
+    /// The network interface to listen on, or a local endpoint's `unix:PATH` or
+    /// `pipe:NAME`.
     pub host: String,
     /// The port number. Zero asks the operating system for a free port, and the one it
     /// chose is reported by [`crate::HybridServer::grpc_addr`],
@@ -53,7 +83,25 @@ impl Endpoint {
         }
     }
 
-    /// The `host:port` form a listener or dial target wants.
+    /// A Unix domain socket at `path`, which should be absolute: a relative one is resolved
+    /// against whatever directory the process happens to start in.
+    pub fn unix(path: impl AsRef<std::path::Path>) -> Self {
+        Self::new(format!("unix:{}", path.as_ref().display()), 0)
+    }
+
+    /// A Windows named pipe. `name` may be the full `\\.\pipe\name` or just `name`.
+    pub fn pipe(name: impl AsRef<str>) -> Self {
+        let local = LocalAddr::parse(&format!("pipe:{}", name.as_ref()));
+        Self::new(local.map_or_else(String::new, |l| l.to_string()), 0)
+    }
+
+    /// The local endpoint this names, or `None` for a network host and port.
+    pub fn local(&self) -> Option<LocalAddr> {
+        LocalAddr::parse(&self.host)
+    }
+
+    /// The `host:port` form a listener or dial target wants, or a local endpoint's
+    /// `unix:PATH` or `pipe:NAME`.
     ///
     /// An IPv6 host is bracketed — `[::1]:50051` — because its own colons would otherwise
     /// make the port ambiguous and the address unparseable.
@@ -64,11 +112,23 @@ impl Endpoint {
 
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(local) = self.local() {
+            return local.fmt(f);
+        }
         if self.host.contains(':') && !self.host.starts_with('[') {
             write!(f, "[{}]:{}", self.host, self.port)
         } else {
             write!(f, "{}:{}", self.host, self.port)
         }
+    }
+}
+
+/// The address an agent protocol's `host` and `port` name: the local endpoint when `host` is
+/// one, else `host:port` as the agent runtime groups listeners by it.
+pub(crate) fn agent_addr(host: &str, port: u16) -> String {
+    match LocalAddr::parse(host) {
+        Some(local) => local.to_string(),
+        None => format!("{host}:{port}"),
     }
 }
 
