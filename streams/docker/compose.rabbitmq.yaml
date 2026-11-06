@@ -1,0 +1,26 @@
+# RabbitMQ for tests/rabbitmq_live.rs and examples/rabbitmq.rs.
+#
+#   docker compose -f docker/compose.rabbitmq.yaml up -d --wait
+#   cargo test -p tpp-streams --features rabbitmq,live-tests --test rabbitmq_live
+#
+# Host ports are in the 15xxx range so this can run beside a RabbitMQ already
+# listening on 5672/15672, and beside the other backends' compose files.
+services:
+  rabbitmq:
+    image: rabbitmq:management-alpine
+    container_name: tpp-streams-rabbitmq
+    # With an empty data directory the entrypoint runs as root and leaves a
+    # root-owned .erlang.cookie the server cannot read once it drops privileges.
+    # Running as the rabbitmq user throughout makes the writer and the reader
+    # the same, as in runtime-go's compose file.
+    user: rabbitmq
+    ports:
+      - "127.0.0.1:15682:5672"  # AMQP
+      - "127.0.0.1:15683:15672" # management UI, guest/guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 5s
+      timeout: 10s
+      retries: 20
+      start_period: 10s
+    restart: "no"
