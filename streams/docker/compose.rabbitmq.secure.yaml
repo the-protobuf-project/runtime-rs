@@ -1,0 +1,38 @@
+# RabbitMQ over mutual TLS with persistent storage, for tests/rabbitmq_e2e.rs.
+#
+#   streams/docker/tls/generate.sh   # once, if streams/docker/tls/out is empty
+#   docker compose -p tpp-streams-e2e-rabbitmq -f streams/docker/compose.rabbitmq.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features rabbitmq,tls,live-tests --test rabbitmq_e2e
+#   docker compose -p tpp-streams-e2e-rabbitmq -f streams/docker/compose.rabbitmq.secure.yaml down -v
+#
+# AMQPS on 127.0.0.1:15671 only; the plaintext listener is disabled and a
+# client certificate is required (compose.rabbitmq.secure.conf). The node's
+# data directory is a named volume and the hostname and node name are fixed,
+# so durable exchanges, durable queues, and persistent messages are found
+# again after `docker restart tpp-streams-rabbitmq-secure`.
+services:
+  rabbitmq:
+    image: rabbitmq:management-alpine
+    container_name: tpp-streams-rabbitmq-secure
+    hostname: rabbitmq
+    # Same reason as compose.rabbitmq.yaml: the cookie writer and reader must
+    # be one user.
+    user: rabbitmq
+    environment:
+      RABBITMQ_NODENAME: rabbit@rabbitmq
+    ports:
+      - "127.0.0.1:15671:5671" # AMQPS, client certificate required
+    volumes:
+      - ./tls/out:/certs:ro
+      - ./compose.rabbitmq.secure.conf:/etc/rabbitmq/conf.d/20-secure.conf:ro
+      - rabbitmq-data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_listener 5671"]
+      interval: 5s
+      timeout: 15s
+      retries: 30
+      start_period: 15s
+    restart: "no"
+
+volumes:
+  rabbitmq-data:

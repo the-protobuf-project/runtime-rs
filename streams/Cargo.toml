@@ -28,6 +28,10 @@ mqtt = ["dep:rumqttc"]
 zeromq = ["dep:zeromq"]
 # The protobuf codec, for payloads that are prost messages rather than serde values.
 protobuf = ["dep:prost"]
+# TLS for the backends whose client keeps it behind a feature. NATS, RabbitMQ, and MQTT carry
+# rustls already. Kafka's TLS is librdkafka's own OpenSSL, built from source so the result does
+# not depend on what the host has installed.
+tls = ["redis?/tls-rustls", "redis?/tokio-rustls-comp", "rdkafka?/ssl-vendored"]
 # Tests that need a real broker from docker/; see tests/README.md.
 live-tests = []
 
@@ -50,9 +54,10 @@ prost = { workspace = true, optional = true }
 # src/drivers/README.md for how each was chosen.
 rdkafka = { version = "0.39", optional = true }
 async-nats = { version = "0.52", optional = true }
-lapin = { version = "4.12", optional = true }
+# The workspace runs rustls on ring; lapin and rumqttc default to aws-lc, so both are pinned to ring.
+lapin = { version = "4.12", optional = true, default-features = false, features = ["default-runtime", "rustls--ring", "rustls-native-certs"] }
 redis = { version = "1.8", optional = true, features = ["tokio-comp", "connection-manager", "streams"] }
-rumqttc = { version = "0.25", optional = true }
+rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider"] }
 zeromq = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime", "all-transport"] }
 
 [dev-dependencies]
@@ -60,6 +65,8 @@ tokio = { workspace = true, features = ["test-util"] }
 tokio-test = { workspace = true }
 # An in-process MQTT broker, so tests/mqtt.rs runs in plain `cargo test`.
 rumqttd = { version = "0.20", default-features = false }
+# rumqttc is built without a crypto provider; tests/mqtt_e2e.rs builds its TLS config on ring.
+rustls = { workspace = true }
 
 [[test]]
 name = "zeromq"
@@ -108,3 +115,23 @@ required-features = ["mqtt"]
 [[example]]
 name = "mqtt"
 required-features = ["mqtt"]
+
+[[test]]
+name = "redis_e2e"
+required-features = ["live-tests", "tls", "redis"]
+
+[[test]]
+name = "mqtt_e2e"
+required-features = ["live-tests", "tls", "mqtt"]
+
+[[test]]
+name = "kafka_e2e"
+required-features = ["live-tests", "tls", "kafka"]
+
+[[test]]
+name = "nats_e2e"
+required-features = ["live-tests", "tls", "nats"]
+
+[[test]]
+name = "rabbitmq_e2e"
+required-features = ["live-tests", "tls", "rabbitmq"]

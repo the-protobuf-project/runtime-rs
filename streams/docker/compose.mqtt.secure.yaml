@@ -1,0 +1,50 @@
+# Mosquitto 2 over mutual TLS with persistent sessions, for tests/mqtt_e2e.rs.
+#
+#   streams/docker/tls/generate.sh            # once, if tls/out/ is empty
+#   docker compose -p tpp-streams-e2e-mqtt -f streams/docker/compose.mqtt.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features mqtt,tls,live-tests --test mqtt_e2e
+#   docker compose -p tpp-streams-e2e-mqtt -f streams/docker/compose.mqtt.secure.yaml down -v
+#
+# MQTTS only, on 127.0.0.1:18883: no plaintext listener, a client certificate
+# signed by the test CA required, its CN used as the username. Sessions and
+# their queued QoS 1 messages persist to the `mqtt-data` volume, so the restart
+# test can prove a durable consumer's backlog survives the broker going away.
+name: tpp-streams-e2e-mqtt
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: tpp-streams-mqtt-secure
+    ports:
+      - "127.0.0.1:18883:8883"
+    volumes:
+      - ./compose.mqtt.secure.mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./tls/out:/certs:ro
+      - mqtt-data:/mosquitto/data
+    healthcheck:
+      test:
+        - CMD
+        - mosquitto_sub
+        - -h
+        - localhost
+        - -p
+        - "8883"
+        - --cafile
+        - /certs/ca.crt
+        - --cert
+        - /certs/client.crt
+        - --key
+        - /certs/client.key
+        - -i
+        - healthcheck
+        - -t
+        - $$SYS/broker/uptime
+        - -C
+        - "1"
+        - -W
+        - "3"
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    restart: "no"
+volumes:
+  mqtt-data:

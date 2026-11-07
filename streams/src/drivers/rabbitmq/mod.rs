@@ -2,7 +2,8 @@
 //!
 //! The provider implements [`Publisher`](crate::Publisher),
 //! [`Subscriber`](crate::Subscriber), [`Durable`](crate::Durable), and
-//! [`Batch`](crate::Batch) by publishing each payload in turn, but not
+//! [`Batch`](crate::Batch), which sends every payload before awaiting any
+//! confirmation, but not
 //! [`Positioned`](crate::Positioned). A durable queue really does hold a
 //! consumer's messages while it is away, and RabbitMQ has a true negative
 //! acknowledgement, so [`Delivery::nak`](crate::Delivery::nak) hands a message
@@ -52,18 +53,31 @@
 //! channel is AMQP's unit of prefetch and of consumer cancellation.
 //! [`Streams::close`] closes only the publishing channel; the connection is
 //! never closed here.
+//!
+//! # Publishes are confirmed
+//!
+//! The publishing channel is in confirm mode, as runtime-go's is, so
+//! [`Publisher::publish`](crate::Publisher::publish) returns only once the
+//! broker has taken responsibility for the message: for a persistent message
+//! routed to a durable queue, that means written to disk. A negative confirm
+//! is an error rather than a silent loss. When the broker closes the
+//! publishing channel, for instance because a stream's exchange was deleted
+//! elsewhere, the next publish opens a fresh one instead of failing forever.
 
 mod manager;
 mod topic;
 
 use std::{
     collections::BTreeMap,
-    sync::{Arc, RwLock},
+    sync::{
+        Arc, Mutex, RwLock,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use lapin::{
     Channel, Connection, ExchangeKind,
-    options::{ExchangeDeclareOptions, ExchangeDeleteOptions},
+    options::{ConfirmSelectOptions, ExchangeDeclareOptions, ExchangeDeleteOptions},
     types::{FieldTable, ShortString},
 };
 
@@ -162,9 +176,12 @@ pub struct RabbitProvider {
 pub(crate) struct Shared {
     /// The caller's connection, which consumers open their channels on.
     conn: Arc<Connection>,
-    /// One channel for publishing and declaring. A lapin channel is safe for
-    /// concurrent use, so unlike runtime-go there is no lock around it.
-    channel: Channel,
+    /// One channel, in confirm mode, for publishing and declaring. A lapin
+    /// channel is safe for concurrent use; the lock only guards replacing it
+    /// after the broker closed it.
+    channel: Mutex<Channel>,
+    /// Set by [`Streams::close`], after which the channel is not reopened.
+    closed: AtomicBool,
     config: RabbitConfig,
     /// Streams this process has declared, ordered by id so `list` is too.
     declared: RwLock<BTreeMap<String, Stream>>,
@@ -172,20 +189,18 @@ pub(crate) struct Shared {
 
 impl RabbitProvider {
     /// Builds a provider on `conn`, opening the channel it publishes and
-    /// declares on.
+    /// declares on and putting it in confirm mode.
     ///
     /// It fails rather than returning a provider when the channel cannot be
     /// opened, which is worth hearing at startup rather than at the first
     /// publish.
     pub async fn new(conn: Arc<Connection>, config: RabbitConfig) -> Result<Self> {
-        let channel = conn
-            .create_channel()
-            .await
-            .map_err(|e| StreamError::internal("rabbitmq: cannot open a channel", e))?;
+        let channel = open_publisher(&conn).await?;
         Ok(Self {
             shared: Arc::new(Shared {
                 conn,
-                channel,
+                channel: Mutex::new(channel),
+                closed: AtomicBool::new(false),
                 config,
                 declared: RwLock::new(BTreeMap::new()),
             }),
@@ -193,7 +208,51 @@ impl RabbitProvider {
     }
 }
 
+/// Opens a channel in publisher-confirm mode.
+async fn open_publisher(conn: &Connection) -> Result<Channel> {
+    let channel = conn
+        .create_channel()
+        .await
+        .map_err(|e| StreamError::internal("rabbitmq: cannot open a channel", e))?;
+    channel
+        .confirm_select(ConfirmSelectOptions::default())
+        .await
+        .map_err(|e| StreamError::internal("rabbitmq: cannot enable publisher confirms", e))?;
+    Ok(channel)
+}
+
 impl Shared {
+    /// The publishing channel, reopened when the broker closed it while the
+    /// connection stayed up.
+    ///
+    /// AMQP answers a channel-level error, such as publishing to an exchange
+    /// that no longer exists, by closing the channel. Without reopening, one
+    /// publish to a deleted stream would fail every later publish on every
+    /// stream. A dead connection is left to fail: reconnecting is the
+    /// caller's.
+    pub(crate) async fn channel(&self) -> Result<Channel> {
+        let current = self.current_channel();
+        if current.status().connected()
+            || !self.conn.status().connected()
+            || self.closed.load(Ordering::Acquire)
+        {
+            return Ok(current);
+        }
+        let fresh = open_publisher(&self.conn).await?;
+        let mut slot = self.channel.lock().expect("channel lock poisoned");
+        if slot.status().connected() {
+            // Another caller reopened it first; theirs wins.
+            return Ok(slot.clone());
+        }
+        tracing::info!("rabbitmq: reopened the publishing channel");
+        *slot = fresh.clone();
+        Ok(fresh)
+    }
+
+    fn current_channel(&self) -> Channel {
+        self.channel.lock().expect("channel lock poisoned").clone()
+    }
+
     /// The topic exchange carrying one stream's subjects.
     pub(crate) fn exchange(&self, stream_id: &str) -> String {
         exchange_name(&self.config.prefix, stream_id)
@@ -264,7 +323,8 @@ impl Streams for RabbitProvider {
         };
         let exchange = short("exchange name", self.shared.exchange(&id))?;
         self.shared
-            .channel
+            .channel()
+            .await?
             .exchange_declare(
                 exchange,
                 ExchangeKind::Topic,
@@ -333,7 +393,8 @@ impl Streams for RabbitProvider {
         }
         let exchange = short("exchange name", self.shared.exchange(id))?;
         self.shared
-            .channel
+            .channel()
+            .await?
             .exchange_delete(exchange, ExchangeDeleteOptions::default())
             .await
             .map_err(|e| {
@@ -358,11 +419,13 @@ impl Streams for RabbitProvider {
     /// Closes the publishing channel. The connection is the caller's and stays
     /// open; subscriptions hold channels of their own and end when dropped.
     async fn close(&self) -> Result<()> {
-        match self.shared.channel.close(200, "OK".into()).await {
+        self.shared.closed.store(true, Ordering::Release);
+        let channel = self.shared.current_channel();
+        match channel.close(200, "OK".into()).await {
             Ok(()) => Ok(()),
             // Already shut, by an earlier close or by the connection going
             // away, is what closing wanted.
-            Err(_) if !self.shared.channel.status().connected() => Ok(()),
+            Err(_) if !channel.status().connected() => Ok(()),
             Err(e) => Err(StreamError::internal(
                 "rabbitmq: cannot close the channel",
                 e,

@@ -39,6 +39,11 @@ pub(super) const BLOCK_FOR: Duration = Duration::from_secs(2);
 /// How long a stopping consumer may spend removing itself from its group.
 const CLEANUP_FOR: Duration = Duration::from_secs(5);
 
+/// The first and the longest wait between attempts to reopen a consumer's
+/// connection after the server went away.
+const RECONNECT_FROM: Duration = Duration::from_millis(100);
+const RECONNECT_UP_TO: Duration = Duration::from_secs(2);
+
 /// Publishes to and consumes from Redis streams, one per subject.
 ///
 /// Where [`PubSubManager`](super::PubSubManager) hands a message to whoever is
@@ -325,6 +330,20 @@ enum Stop {
     Closed,
     /// Redis refused a read; it is logged and the stream ends.
     Failed,
+    /// The connection went away: a restart, a failover, a network blip. The
+    /// group, its position, and its pending list live on the server, so the
+    /// loop reopens its connection and carries on rather than ending.
+    Disconnected,
+}
+
+/// Whether `error` means the connection is gone rather than that Redis
+/// refused the command.
+fn disconnected(error: &redis::RedisError) -> bool {
+    error.is_io_error()
+        || error.is_connection_dropped()
+        || error.is_connection_refusal()
+        || error.is_unrecoverable_error()
+        || error.code() == Some("LOADING")
 }
 
 impl ConsumeLoop {
@@ -345,11 +364,44 @@ impl ConsumeLoop {
             self.measure_lag(&mut reader).await;
             match self.read(&mut reader).await {
                 Ok(sent) => delivered += sent,
+                Err(Stop::Disconnected) => match self.reconnect().await {
+                    Some(fresh) => reader = fresh,
+                    None => break,
+                },
                 Err(_) => break,
             }
         }
         tracing::info!(subject = %self.subject, consumer = %self.group, delivered, "consumer stopped");
         self.leave().await;
+    }
+
+    /// Reopens the reader's connection, backing off between attempts, until it
+    /// succeeds or the reader drops its end.
+    ///
+    /// Ending the stream instead would turn a broker restart into a consumer
+    /// that silently stops, when nothing it depends on was lost: the group's
+    /// position and pending list are on the server, and whatever this consumer
+    /// held unacknowledged is reclaimed once the loop is back.
+    async fn reconnect(&self) -> Option<MultiplexedConnection> {
+        let mut wait = RECONNECT_FROM;
+        loop {
+            tokio::select! {
+                _ = self.tx.closed() => return None,
+                _ = tokio::time::sleep(wait) => {}
+            }
+            match self.inner.blocking_conn().await {
+                Ok(conn) => {
+                    tracing::info!(subject = %self.subject, consumer = %self.group,
+                        "consumer reconnected");
+                    return Some(conn);
+                }
+                Err(error) => {
+                    tracing::debug!(subject = %self.subject, consumer = %self.group, %error,
+                        "consumer still cannot reconnect");
+                    wait = (wait * 2).min(RECONNECT_UP_TO);
+                }
+            }
+        }
     }
 
     /// Runs `command` on the reader's connection unless the reader goes away
@@ -475,6 +527,11 @@ impl ConsumeLoop {
             Ok(Some(reply)) => reply,
             // None is the block expiring with nothing to report.
             Ok(None) => return Ok(0),
+            Err(error) if disconnected(&error) => {
+                tracing::warn!(subject = %self.subject, consumer = %self.group, %error,
+                    "lost the connection; reconnecting");
+                return Err(Stop::Disconnected);
+            }
             Err(error) => {
                 tracing::error!(subject = %self.subject, consumer = %self.group, %error,
                     "could not read as the consumer group");

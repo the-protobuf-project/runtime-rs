@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use lapin::{
-    BasicProperties, Consumer,
+    BasicProperties, Confirmation, Consumer, PublisherConfirm,
     message::Delivery as AmqpDelivery,
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
@@ -182,6 +182,16 @@ impl Publisher for RabbitManager {
     /// lose its contents to a broker restart, which is most of what "durable"
     /// is for.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
+        let id = provider::publish_id(opts);
+        let pending = self.send(subject, &id, &payload, opts).await?;
+        confirmed(subject, &id, pending).await?;
+        Ok(id)
+    }
+}
+
+impl RabbitManager {
+    /// Refuses what a publish cannot honour, before anything is sent.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<()> {
         self.check_subject(subject)?;
         if has_wildcard(subject) {
             // A binding key routes nothing when published on; it is declared
@@ -199,41 +209,66 @@ impl Publisher for RabbitManager {
                     .into(),
             ));
         }
+        Ok(())
+    }
 
-        let id = provider::publish_id(opts);
-        let body = provider::pack(&id, &payload);
+    /// Hands one persistent message to the broker and returns its pending
+    /// confirmation without waiting for it, so a batch can send everything
+    /// before awaiting anything.
+    async fn send(
+        &self,
+        subject: &str,
+        id: &str,
+        payload: &Payload,
+        opts: &Options,
+    ) -> Result<PublisherConfirm> {
+        self.check_publish(subject, opts)?;
+        let body = provider::pack(id, payload);
         let properties = BasicProperties::default()
-            .with_message_id(short("message id", id.as_str())?)
+            .with_message_id(short("message id", id)?)
             .with_delivery_mode(PERSISTENT)
             .with_content_type(CONTENT_TYPE.into());
-
-        let sent = self
-            .shared
-            .channel
+        let exchange = short("exchange name", self.exchange.as_str())?;
+        let routing_key = short("routing key", subject)?;
+        self.shared
+            .channel()
+            .await?
             .basic_publish(
-                short("exchange name", self.exchange.as_str())?,
-                short("routing key", subject)?,
+                exchange,
+                routing_key,
                 BasicPublishOptions::default(),
                 &body,
                 properties,
             )
-            .await;
-        // Without publisher confirms the confirm resolves at once; awaiting it
-        // still surfaces a channel that closed under the publish.
-        let sent = match sent {
-            Ok(confirm) => confirm.await.map(|_| ()),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = sent {
-            tracing::error!(subject, id = %id, error = %e, "rabbitmq: could not publish");
-            return Err(StreamError::internal(
-                &format!("rabbitmq: cannot publish on {subject:?}"),
-                e,
-            ));
-        }
-        tracing::debug!(subject, id = %id, bytes = body.len(), "rabbitmq: published");
-        Ok(id)
+            .await
+            .map_err(|e| {
+                tracing::error!(subject, id, error = %e, "rabbitmq: could not publish");
+                StreamError::internal(&format!("rabbitmq: cannot publish on {subject:?}"), e)
+            })
     }
+}
+
+/// Waits for the broker's publisher confirm.
+///
+/// An ack means the broker has the message, on disk for a persistent message
+/// routed to a durable queue; a nack means it refused it, and an error that
+/// the channel closed before saying either way. Only the first is a publish.
+async fn confirmed(subject: &str, id: &str, pending: PublisherConfirm) -> Result<()> {
+    let refused = match pending.await {
+        Ok(Confirmation::Ack(_) | Confirmation::NotRequested) => {
+            tracing::debug!(subject, id, "rabbitmq: published");
+            return Ok(());
+        }
+        Ok(Confirmation::Nack(_)) => StreamError::Internal(format!(
+            "rabbitmq: the broker refused the message on {subject:?} (negative confirm)"
+        )),
+        Err(e) => StreamError::internal(
+            &format!("rabbitmq: the publish on {subject:?} was not confirmed"),
+            e,
+        ),
+    };
+    tracing::error!(subject, id, error = %refused, "rabbitmq: could not publish");
+    Err(refused)
 }
 
 #[async_trait::async_trait]
@@ -364,15 +399,32 @@ impl Durable for RabbitManager {
 
 #[async_trait::async_trait]
 impl Batch for RabbitManager {
-    /// Publishes each payload in turn. AMQP publishes are already asynchronous
-    /// on the channel, so this does not wait per message for the broker.
+    /// Sends every payload, then waits for every confirmation, as runtime-go
+    /// does: a batch costs one round trip rather than one per message.
     async fn publish_batch(
         &self,
         subject: &str,
         payloads: Vec<Payload>,
         opts: &Options,
     ) -> Result<Vec<String>> {
-        provider::publish_each(self, subject, payloads, opts).await
+        provider::check_batch(opts)?;
+        self.check_publish(subject, opts)?;
+        let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
+        let mut pending = Vec::with_capacity(ids.len());
+        for (payload, id) in payloads.iter().zip(&ids) {
+            pending.push(self.send(subject, id, payload, opts).await);
+        }
+        let mut failures = Vec::new();
+        for (index, (sent, id)) in pending.into_iter().zip(&ids).enumerate() {
+            let outcome = match sent {
+                Ok(confirm) => confirmed(subject, id, confirm).await,
+                Err(e) => Err(e),
+            };
+            if let Err(e) = outcome {
+                failures.push((index, e));
+            }
+        }
+        provider::batch_result(subject, ids, failures)
     }
 }
 

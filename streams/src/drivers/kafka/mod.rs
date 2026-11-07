@@ -17,7 +17,9 @@
 //! module one consumer would mean it could never honor a second
 //! [`Durable::consume`](crate::Durable::consume). The config is still yours,
 //! TLS, SASL, and timeouts included; it is cloned into every client made here
-//! and never changed.
+//! and never changed, except that the producer's copy gets `acks=all` and
+//! `enable.idempotence=true` when the config does not say otherwise, as
+//! runtime-go's producer has.
 //!
 //! # A stream is a group of topics
 //!
@@ -166,7 +168,7 @@ impl KafkaProvider {
                 "kafka: no seed brokers given; set bootstrap.servers on the client config".into(),
             ));
         }
-        let producer = client
+        let producer = producer_config(&client)
             .create::<FutureProducer>()
             .map_err(|error| StreamError::internal("kafka: cannot build the producer", error))?;
         let admin = client
@@ -203,6 +205,27 @@ impl Inner {
     fn topic(&self, stream: &str, subject: &str) -> String {
         topic(&self.config.prefix, stream, subject)
     }
+}
+
+/// The producer's config: the caller's, with durable delivery filled in where
+/// the caller left it unsaid.
+///
+/// A publish that returned an id has to mean the record is in the log, once.
+/// `acks=all` waits for every in-sync replica rather than the leader alone, and
+/// idempotence stops a retry after a lost acknowledgement from appending the
+/// record twice. runtime-go's client (franz-go) does both by default and
+/// librdkafka does not enable idempotence, so without this a Rust publisher
+/// would be weaker than a Go one on the same cluster. A caller who sets either
+/// key keeps their value; only the producer's copy is changed, since a consumer
+/// warns about producer-only keys.
+fn producer_config(client: &ClientConfig) -> ClientConfig {
+    let mut producer = client.clone();
+    for (key, value) in [("acks", "all"), ("enable.idempotence", "true")] {
+        if producer.get(key).is_none() {
+            producer.set(key, value);
+        }
+    }
+    producer
 }
 
 /// The metadata topic under `prefix`, as runtime-go names it.
@@ -287,6 +310,20 @@ mod tests {
             .err()
             .unwrap();
         assert!(error.to_string().contains("bootstrap.servers"), "{error}");
+    }
+
+    #[test]
+    fn the_producer_is_durable_unless_told_otherwise() {
+        let mut client = ClientConfig::new();
+        client.set("bootstrap.servers", "127.0.0.1:1");
+        let producer = producer_config(&client);
+        assert_eq!(producer.get("acks"), Some("all"));
+        assert_eq!(producer.get("enable.idempotence"), Some("true"));
+        // The caller's own config is left alone, for the consumers built from it.
+        assert_eq!(client.get("acks"), None);
+
+        client.set("acks", "1");
+        assert_eq!(producer_config(&client).get("acks"), Some("1"));
     }
 
     #[test]

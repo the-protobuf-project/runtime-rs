@@ -89,19 +89,20 @@ impl MqttManager {
             durable: matches!(session, Session::Durable { .. }),
         };
 
-        // A resumed session comes back with its subscriptions already restored,
-        // so subscribing again is not just redundant: it races the messages the
-        // broker is redelivering. It is safe to skip because a durable client id
-        // names a consumer *and* a subject (see consumer_id), so a session that
-        // exists is one already subscribed to exactly this filter.
+        // A resumed session comes back with its subscriptions restored, but
+        // subscribe anyway. The client id names a consumer and a subject, not
+        // a stream, so a session kept from an earlier stream under the same
+        // consumer and subject is subscribed to that stream's topic, not this
+        // one, and skipping the SUBSCRIBE would leave this consumer deaf.
+        // Subscribing again to a filter the session already holds replaces it
+        // in place and keeps the queued messages; whatever the broker
+        // redelivers before the SUBACK is held in `early`, not raced.
         if resumed {
             tracing::debug!(
                 subject,
                 client_id,
-                "mqtt: resumed a session; its subscription was restored"
+                "mqtt: resumed a session; subscribing again"
             );
-            attached.events = Some(events);
-            return Ok(attached);
         }
 
         let failed = |error: &dyn std::fmt::Display| {
@@ -418,6 +419,9 @@ impl Batch for MqttManager {
         payloads: Vec<Payload>,
         opts: &Options,
     ) -> Result<Vec<String>> {
+        // An undeclared subject fails every entry the same way; say so once,
+        // as publish does, rather than as a batch of identical failures.
+        self.check_subject(subject)?;
         provider::publish_each(self, subject, payloads, opts).await
     }
 }
@@ -468,8 +472,8 @@ impl Acker for MqttAcker {
 /// Derived from both, deterministically. Stable, because the client id *is*
 /// the session: a fresh one on every restart is a stranger the broker kept
 /// nothing for. Per subject, because MQTT restores a session's subscriptions
-/// wholesale, and one session per subject is what makes "this session exists"
-/// mean "already subscribed to exactly this".
+/// wholesale, and one session per subject keeps each consumer's backlog to the
+/// one subject it reads.
 ///
 /// The subject is hashed (32-bit FNV-1a, as runtime-go does, so both runtimes
 /// resume the same session) rather than appended: brokers cap client id

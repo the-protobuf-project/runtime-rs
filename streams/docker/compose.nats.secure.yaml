@@ -1,0 +1,35 @@
+# NATS with JetStream behind mutual TLS, persisted on a named volume, for
+# tests/nats_e2e.rs.
+#
+#   docker compose -p tpp-streams-e2e-nats -f streams/docker/compose.nats.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features nats,tls,live-tests --test nats_e2e
+#   docker compose -p tpp-streams-e2e-nats -f streams/docker/compose.nats.secure.yaml down -v
+#
+# Certificates come from tls/generate.sh (tls/out). The client port accepts
+# TLS only and requires a client certificate signed by tls/out/ca.crt.
+# JetStream stores on the `nats-data` volume with sync_interval: always, so
+# acked messages and consumer positions survive `docker restart`.
+services:
+  nats:
+    # The alpine image, because the default one has no shell or wget for the
+    # healthcheck.
+    image: nats:2.11-alpine
+    container_name: tpp-streams-nats-secure
+    ports:
+      - "127.0.0.1:14223:4222" # clients, mTLS only
+      - "127.0.0.1:14823:8222" # monitoring, loopback only
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./compose.nats.secure.conf:/etc/nats/nats.conf:ro
+      - ./tls/out:/certs:ro
+      - nats-data:/data
+    healthcheck:
+      # healthz answers ok only once the server, JetStream included, is serving.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+volumes:
+  nats-data:

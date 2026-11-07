@@ -1,0 +1,84 @@
+# A single-node KRaft Kafka over mutual TLS, with its log on a named volume,
+# for tests/kafka_e2e.rs. Generate the certificates first with
+# docker/tls/generate.sh, then from the workspace root:
+#
+#   docker compose -p tpp-streams-e2e-kafka -f streams/docker/compose.kafka.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features kafka,tls,live-tests --test kafka_e2e
+#   docker compose -p tpp-streams-e2e-kafka -f streams/docker/compose.kafka.secure.yaml down -v
+#
+# Clients reach one listener only, TLS on 127.0.0.1:19093, and must present a
+# certificate signed by docker/tls/out/ca.crt (ssl.client.auth=required). The
+# two plaintext listeners are bound to the container's own loopback and not
+# published: INTERNAL for the healthcheck, CONTROLLER for KRaft.
+#
+# The listener is named TLS rather than SSL on purpose: the image's configure
+# script takes any advertised "SSL://" listener as a request for its JKS
+# secrets layout, and this one is PEM straight from the mounted directory.
+# Kafka reads a PEM keystore as one file holding key then chain, so the
+# entrypoint concatenates the two before handing over to the image's own run.
+#
+# Durability: the log and KRaft metadata live in the kafka-data volume, so
+# topics, records, and committed consumer-group offsets survive
+# `docker restart`. One broker means one copy of everything, so replication
+# factor and min.insync.replicas are 1; every record is fsynced as it is
+# appended, which is the most a single node can promise.
+name: tpp-streams-e2e-kafka
+
+services:
+  kafka:
+    image: apache/kafka:3.9.1
+    container_name: tpp-streams-kafka-secure
+    ports:
+      - "127.0.0.1:19093:9094"
+    volumes:
+      - ./tls/out:/certs:ro
+      - kafka-data:/var/lib/kafka/data
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        set -e
+        cat /certs/server.key /certs/server-chain.crt > /tmp/keystore.pem
+        chmod 600 /tmp/keystore.pem
+        exec /etc/kafka/docker/run
+    environment:
+      # Fixed, so a restart finds the storage it formatted the first time.
+      CLUSTER_ID: dHBwLXN0cmVhbXMtZTJlLQ
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: TLS://0.0.0.0:9094,INTERNAL://127.0.0.1:29092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: TLS://127.0.0.1:19093,INTERNAL://127.0.0.1:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: TLS:SSL,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
+      # Mutual TLS on the client listener, PEM end to end.
+      KAFKA_LISTENER_NAME_TLS_SSL_KEYSTORE_TYPE: PEM
+      KAFKA_LISTENER_NAME_TLS_SSL_KEYSTORE_LOCATION: /tmp/keystore.pem
+      KAFKA_LISTENER_NAME_TLS_SSL_TRUSTSTORE_TYPE: PEM
+      KAFKA_LISTENER_NAME_TLS_SSL_TRUSTSTORE_LOCATION: /certs/ca.crt
+      KAFKA_LISTENER_NAME_TLS_SSL_CLIENT_AUTH: required
+      KAFKA_SSL_ENABLED_PROTOCOLS: TLSv1.3,TLSv1.2
+      # Persistence.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 1
+      KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      # One broker, so every topic, internal or not, can have only one copy.
+      KAFKA_DEFAULT_REPLICATION_FACTOR: 1
+      KAFKA_MIN_INSYNC_REPLICAS: 1
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      # Tests join fresh groups constantly; the default 3s wait is per join.
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:29092 --list >/dev/null"]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 15s
+    restart: "no"
+
+volumes:
+  kafka-data:

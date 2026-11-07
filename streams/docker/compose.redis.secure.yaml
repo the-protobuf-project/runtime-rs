@@ -1,0 +1,70 @@
+# A Redis with mutual TLS and an append-only file, for tests/redis_e2e.rs.
+#
+#   docker compose -p tpp-streams-e2e-redis -f streams/docker/compose.redis.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features redis,tls,live-tests --test redis_e2e
+#   docker compose -p tpp-streams-e2e-redis -f streams/docker/compose.redis.secure.yaml down -v
+#
+# Certificates come from tls/generate.sh (tls/out). The plaintext port is off
+# (`--port 0`), so the only way in is TLS on 6380, published on 127.0.0.1:16381,
+# and `--tls-auth-clients yes` refuses a client that presents no certificate
+# signed by the CA.
+#
+# Durability: AOF with `appendfsync always`, so a write is on disk before Redis
+# answers it, on the named volume `redis-secure-data`. Stream entries, consumer
+# groups, their pending lists, and scheduled keys with their absolute expiry all
+# survive `docker restart`. Keyspace expiry events are on because scheduled
+# delivery is built on them.
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: tpp-streams-redis-secure
+    ports:
+      - "127.0.0.1:16381:6380"
+    volumes:
+      - ./tls/out:/certs:ro
+      - redis-secure-data:/data
+    command:
+      - redis-server
+      - --port
+      - "0"
+      - --tls-port
+      - "6380"
+      - --tls-cert-file
+      - /certs/server.crt
+      - --tls-key-file
+      - /certs/server.key
+      - --tls-ca-cert-file
+      - /certs/ca.crt
+      - --tls-auth-clients
+      - "yes"
+      - --dir
+      - /data
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - always
+      - --save
+      - ""
+      - --notify-keyspace-events
+      - Ex
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - --tls
+        - -p
+        - "6380"
+        - --cacert
+        - /certs/ca.crt
+        - --cert
+        - /certs/client.crt
+        - --key
+        - /certs/client.key
+        - ping
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    restart: "no"
+
+volumes:
+  redis-secure-data:
