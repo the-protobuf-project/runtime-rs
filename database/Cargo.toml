@@ -60,7 +60,7 @@ required-features = ["influxdb"]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }
 wiremock.workspace = true
-arrow-flight = "59"
+arrow-flight = "60"
 tonic.workspace = true
 tokio-stream.workspace = true
 
