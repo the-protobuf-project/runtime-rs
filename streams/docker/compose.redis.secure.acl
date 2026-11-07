@@ -1,0 +1,3 @@
+user default off resetpass ~* &* +@all
+user streams on #3cead9e51ba099cfbcd48eec75cdcc030132007eb29d233d9afb104bb777c753 resetkeys resetchannels ~e2e*:stream:* ~e2e*:notify:* ~e2e*:durable:* &e2e*:stream:ch:* &__keyevent@3__:expired -@all +ping +hello +auth +select +client|setinfo +publish +subscribe +unsubscribe +set +getdel +del +scan +type +multi +exec +discard +xadd +xtrim +xrange +xrevrange +xread +xreadgroup +xgroup|create +xgroup|delconsumer +xautoclaim +xpending +xack
+user admin on #d2c4a068100a665a624ef3f9a41b81011fd63a5a960bb05fab7688e2d3eced4f ~* &* +@all

@@ -14,6 +14,39 @@
 # groups, their pending lists, and scheduled keys with their absolute expiry all
 # survive `docker restart`. Keyspace expiry events are on because scheduled
 # delivery is built on them.
+#
+# Authentication: ACL users from compose.redis.secure.acl, on top of mTLS. The
+# certificate gets a client onto the socket; the user decides what it may do.
+# Passwords are test-only and stored as SHA-256 in the file; the plaintext is
+# in tests/redis_e2e.rs and the healthcheck below.
+#
+#   default   off, with no password: no connection can log in as it, and an
+#             unauthenticated one can run nothing but AUTH/HELLO. It keeps +@all
+#             on purpose: Redis 7.4 replays the AOF's MULTI/EXEC blocks (the
+#             driver's own transactions, and the XCLAIM + XGROUP SETID that
+#             XREADGROUP propagates) as the default user and re-checks them at
+#             EXEC, so a default user with `nocommands` makes a restart silently
+#             drop every transaction ("ACLs rules changed ... no longer allowed"
+#             in the log): groups forget what they read, schedules vanish.
+#             tests/redis_e2e.rs survives_a_broker_restart catches exactly that.
+#   streams   what the driver needs and nothing else; tests run the provider as it.
+#   admin     everything; only the test's inspection helpers and the healthcheck.
+#
+# The streams user, rule by rule:
+#   keys      ~e2e*:stream:* ~e2e*:notify:* ~e2e*:durable:* - the driver's three
+#             namespaces (<prefix>:<kind>:...) under the tests' e2e<id> prefixes.
+#   channels  &e2e*:stream:ch:* for pub/sub subjects, and only database 3's
+#             &__keyevent@3__:expired for scheduled delivery (the tests' DB).
+#   connect   ping hello auth select, and client|setinfo, which redis-rs sends
+#             on every connect to name itself (it ignores a refusal, but each
+#             one would land in ACL LOG as noise).
+#   pub/sub   publish subscribe unsubscribe.
+#   scheduled set (payload, and pending with PX), getdel (claim), and
+#             multi exec discard because a schedule is one transaction.
+#   lifecycle xadd xtrim xrange (metadata), del, scan + type (list).
+#   durable   xadd xrevrange xread xreadgroup xautoclaim xpending xack, and of
+#             XGROUP only create and delconsumer.
+# Nothing else: no CONFIG, KEYS, FLUSH*, EVAL, XINFO, or XGROUP DESTROY.
 services:
   redis:
     image: redis:7-alpine
@@ -22,6 +55,7 @@ services:
       - "127.0.0.1:16381:6380"
     volumes:
       - ./tls/out:/certs:ro
+      - ./compose.redis.secure.acl:/etc/redis/users.acl:ro
       - redis-secure-data:/data
     command:
       - redis-server
@@ -47,6 +81,8 @@ services:
       - ""
       - --notify-keyspace-events
       - Ex
+      - --aclfile
+      - /etc/redis/users.acl
     healthcheck:
       test:
         - CMD
@@ -60,6 +96,11 @@ services:
         - /certs/client.crt
         - --key
         - /certs/client.key
+        - --user
+        - admin
+        - --pass
+        - admin-e2e-not-a-secret
+        - --no-auth-warning
         - ping
       interval: 1s
       timeout: 3s

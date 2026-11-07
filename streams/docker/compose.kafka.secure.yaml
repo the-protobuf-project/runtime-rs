@@ -1,27 +1,45 @@
-# A single-node KRaft Kafka over mutual TLS, with its log on a named volume,
-# for tests/kafka_e2e.rs. Generate the certificates first with
+# A single-node KRaft Kafka over TLS, with ACLs on and its log on a named
+# volume, for tests/kafka_e2e.rs. Generate the certificates first with
 # docker/tls/generate.sh, then from the workspace root:
 #
 #   docker compose -p tpp-streams-e2e-kafka -f streams/docker/compose.kafka.secure.yaml up -d --wait
 #   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features kafka,tls,live-tests --test kafka_e2e
 #   docker compose -p tpp-streams-e2e-kafka -f streams/docker/compose.kafka.secure.yaml down -v
 #
-# Clients reach one listener only, TLS on 127.0.0.1:19093, and must present a
-# certificate signed by docker/tls/out/ca.crt (ssl.client.auth=required). The
-# two plaintext listeners are bound to the container's own loopback and not
-# published: INTERNAL for the healthcheck, CONTROLLER for KRaft.
+# Clients reach two listeners, both TLS against docker/tls/out/ca.crt:
 #
-# The listener is named TLS rather than SSL on purpose: the image's configure
-# script takes any advertised "SSL://" listener as a request for its JKS
-# secrets layout, and this one is PEM straight from the mounted directory.
-# Kafka reads a PEM keystore as one file holding key then chain, so the
-# entrypoint concatenates the two before handing over to the image's own run.
+#   127.0.0.1:19093  TLS    mutual TLS (ssl.client.auth=required); the client
+#                           certificate's CN is the principal.
+#   127.0.0.1:19094  SCRAM  SASL_SSL, SCRAM-SHA-512 only, no client
+#                           certificate; the user and its password are in
+#                           compose.kafka.secure.env (test-only).
 #
-# Durability: the log and KRaft metadata live in the kafka-data volume, so
-# topics, records, and committed consumer-group offsets survive
-# `docker restart`. One broker means one copy of everything, so replication
-# factor and min.insync.replicas are 1; every record is fsynced as it is
-# appended, which is the most a single node can promise.
+# The two plaintext listeners are bound to the container's own loopback and not
+# published: INTERNAL for inter-broker traffic, the healthcheck and setup, and
+# CONTROLLER for KRaft. Their principal is User:ANONYMOUS, the only super user;
+# nothing outside the container can present it.
+#
+# Authorization is StandardAuthorizer with no allow-if-no-ACL fallback.
+# compose.kafka.secure.sh creates the SCRAM user (kafka-configs, stored in the
+# metadata log) and the ACLs once the broker answers, and the healthcheck waits
+# for that: the SCRAM user may create, describe, read, write and delete topics
+# prefixed sasl-, and read consumer groups prefixed sasl- or streams-reader-
+# (the driver's throwaway reader groups), and nothing else. The mTLS principal
+# gets every topic and group and cluster describe, as the existing suite needs.
+#
+# The listeners are named TLS and SCRAM rather than SSL and SASL_SSL on
+# purpose: the image's configure script takes any advertised "SSL://" listener
+# as a request for its JKS secrets layout and "SASL_*://" as one for a JAAS
+# file, and both are configured here directly. Kafka reads a PEM keystore as
+# one file holding key then chain, so the entrypoint concatenates the two
+# before handing over to the image's own run.
+#
+# Durability: the log and KRaft metadata (SCRAM credentials and ACLs included)
+# live in the kafka-data volume, so topics, records, committed consumer-group
+# offsets, the user and its ACLs survive `docker restart`. One broker means one
+# copy of everything, so replication factor and min.insync.replicas are 1;
+# every record is fsynced as it is appended, which is the most a single node
+# can promise.
 name: tpp-streams-e2e-kafka
 
 services:
@@ -30,25 +48,21 @@ services:
     container_name: tpp-streams-kafka-secure
     ports:
       - "127.0.0.1:19093:9094"
+      - "127.0.0.1:19094:9095"
     volumes:
       - ./tls/out:/certs:ro
+      - ./compose.kafka.secure.sh:/setup/entrypoint.sh:ro
       - kafka-data:/var/lib/kafka/data
-    entrypoint:
-      - /bin/bash
-      - -c
-      - |
-        set -e
-        cat /certs/server.key /certs/server-chain.crt > /tmp/keystore.pem
-        chmod 600 /tmp/keystore.pem
-        exec /etc/kafka/docker/run
+    entrypoint: ["/bin/bash", "/setup/entrypoint.sh"]
+    env_file: compose.kafka.secure.env
     environment:
       # Fixed, so a restart finds the storage it formatted the first time.
       CLUSTER_ID: dHBwLXN0cmVhbXMtZTJlLQ
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: TLS://0.0.0.0:9094,INTERNAL://127.0.0.1:29092,CONTROLLER://127.0.0.1:9093
-      KAFKA_ADVERTISED_LISTENERS: TLS://127.0.0.1:19093,INTERNAL://127.0.0.1:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: TLS:SSL,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: TLS://0.0.0.0:9094,SCRAM://0.0.0.0:9095,INTERNAL://127.0.0.1:29092,CONTROLLER://127.0.0.1:9093
+      KAFKA_ADVERTISED_LISTENERS: TLS://127.0.0.1:19093,SCRAM://127.0.0.1:19094,INTERNAL://127.0.0.1:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: TLS:SSL,SCRAM:SASL_SSL,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@127.0.0.1:9093
@@ -58,6 +72,22 @@ services:
       KAFKA_LISTENER_NAME_TLS_SSL_TRUSTSTORE_TYPE: PEM
       KAFKA_LISTENER_NAME_TLS_SSL_TRUSTSTORE_LOCATION: /certs/ca.crt
       KAFKA_LISTENER_NAME_TLS_SSL_CLIENT_AUTH: required
+      # The principal is the certificate's CN, not its whole DN.
+      KAFKA_SSL_PRINCIPAL_MAPPING_RULES: RULE:^CN=([^,]+),.*$$/$$1/,DEFAULT
+      # SCRAM-SHA-512 over server-authenticated TLS, PEM as above. The image
+      # turns ___ into - and _ into . in these names.
+      KAFKA_LISTENER_NAME_SCRAM_SSL_KEYSTORE_TYPE: PEM
+      KAFKA_LISTENER_NAME_SCRAM_SSL_KEYSTORE_LOCATION: /tmp/keystore.pem
+      KAFKA_LISTENER_NAME_SCRAM_SSL_TRUSTSTORE_TYPE: PEM
+      KAFKA_LISTENER_NAME_SCRAM_SSL_TRUSTSTORE_LOCATION: /certs/ca.crt
+      KAFKA_LISTENER_NAME_SCRAM_SSL_CLIENT_AUTH: none
+      KAFKA_LISTENER_NAME_SCRAM_SASL_ENABLED_MECHANISMS: SCRAM-SHA-512
+      KAFKA_LISTENER_NAME_SCRAM_SCRAM___SHA___512_SASL_JAAS_CONFIG: org.apache.kafka.common.security.scram.ScramLoginModule required;
+      # ACLs, enforced on every listener; only the in-container plaintext
+      # principal bypasses them.
+      KAFKA_AUTHORIZER_CLASS_NAME: org.apache.kafka.metadata.authorizer.StandardAuthorizer
+      KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND: "false"
+      KAFKA_SUPER_USERS: User:ANONYMOUS
       KAFKA_SSL_ENABLED_PROTOCOLS: TLSv1.3,TLSv1.2
       # Persistence.
       KAFKA_LOG_DIRS: /var/lib/kafka/data
@@ -73,7 +103,7 @@ services:
       # Tests join fresh groups constantly; the default 3s wait is per join.
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
     healthcheck:
-      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:29092 --list >/dev/null"]
+      test: ["CMD-SHELL", "test -f /tmp/auth-ready && /opt/kafka/bin/kafka-topics.sh --bootstrap-server 127.0.0.1:29092 --list >/dev/null"]
       interval: 5s
       timeout: 10s
       retries: 30

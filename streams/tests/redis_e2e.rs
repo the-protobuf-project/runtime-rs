@@ -15,6 +15,13 @@
 //! Every test runs under its own key prefix in database 3. The restart test
 //! takes a write lock that every other test reads, so nothing else is in
 //! flight while the server is down.
+//!
+//! The server also requires an ACL user (`docker/compose.redis.secure.acl`):
+//! every provider here connects as `streams`, which may run only the commands
+//! the driver sends, on only its own keys and channels. The helpers that
+//! inspect the server behind the provider's back (`command`) connect as
+//! `admin`, because XINFO, CONFIG GET, PUBSUB NUMSUB, and cleanup of keys a
+//! test planted are exactly what `streams` is denied.
 
 use std::{collections::HashSet, path::PathBuf, process::Command, sync::Arc, time::Duration};
 
@@ -77,14 +84,36 @@ fn container() -> String {
     std::env::var("REDIS_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-redis-secure".into())
 }
 
-/// A TLS client, presenting the client certificate when `mutual`.
+/// Test-only credentials, matching the hashes in the ACL file.
+const STREAMS_USER: &str = "streams";
+const STREAMS_PASSWORD: &str = "streams-e2e-not-a-secret";
+const ADMIN_USER: &str = "admin";
+const ADMIN_PASSWORD: &str = "admin-e2e-not-a-secret";
+
+/// Who a connection authenticates as: `None` sends no AUTH at all.
+type Login<'a> = Option<(&'a str, &'a str)>;
+
+const AS_STREAMS: Login<'static> = Some((STREAMS_USER, STREAMS_PASSWORD));
+const AS_ADMIN: Login<'static> = Some((ADMIN_USER, ADMIN_PASSWORD));
+
+/// A TLS client logging in as the `streams` user, presenting the client
+/// certificate when `mutual`.
 fn tls_client(mutual: bool) -> redis::Client {
+    tls_client_as(AS_STREAMS, mutual)
+}
+
+/// A TLS client logging in as `login`, presenting the client certificate when
+/// `mutual`.
+fn tls_client_as(login: Login<'_>, mutual: bool) -> redis::Client {
     let client_tls = mutual.then(|| ClientTlsConfig {
         client_cert: read_cert("client.crt"),
         client_key: read_cert("client.key"),
     });
+    let userinfo = login.map_or_else(String::new, |(user, password)| {
+        format!("{user}:{password}@")
+    });
     redis::Client::build_with_tls(
-        format!("rediss://{}/{DB}", addr()),
+        format!("rediss://{userinfo}{}/{DB}", addr()),
         TlsCertificates {
             client_tls,
             root_cert: Some(read_cert("ca.crt")),
@@ -93,12 +122,20 @@ fn tls_client(mutual: bool) -> redis::Client {
     .unwrap()
 }
 
+/// Connection settings for the test's own connections, which tolerate a
+/// loaded machine: the client's defaults give a TLS handshake one second.
+fn patient() -> redis::AsyncConnectionConfig {
+    redis::AsyncConnectionConfig::new()
+        .set_connection_timeout(Some(Duration::from_secs(10)))
+        .set_response_timeout(Some(Duration::from_secs(10)))
+}
+
 /// The mTLS client every test uses, failing loudly when no server answers:
 /// with `live-tests` on, a missing server is a failure, not a skip.
 async fn client() -> redis::Client {
     let client = tls_client(true);
     client
-        .get_multiplexed_async_connection()
+        .get_multiplexed_async_connection_with_config(&patient())
         .await
         .unwrap_or_else(|error| {
             panic!(
@@ -117,13 +154,30 @@ fn config() -> RedisConfig {
     }
 }
 
+/// Runs `cmd` as `admin`, for looking at the server behind the provider.
 async fn command<T: redis::FromRedisValue>(cmd: &redis::Cmd) -> T {
-    let mut conn = client()
-        .await
-        .get_multiplexed_async_connection()
+    let mut conn = tls_client_as(AS_ADMIN, true)
+        .get_multiplexed_async_connection_with_config(&patient())
         .await
         .unwrap();
     cmd.query_async(&mut conn).await.unwrap()
+}
+
+/// Runs `cmd` as `streams` on a fresh connection, returning the server's
+/// answer, refusal included.
+async fn as_streams<T: redis::FromRedisValue>(cmd: &redis::Cmd) -> redis::RedisResult<T> {
+    let mut conn = tls_client(true)
+        .get_multiplexed_async_connection_with_config(&patient())
+        .await?;
+    cmd.query_async(&mut conn).await
+}
+
+/// Asserts `result` is the ACL's refusal.
+fn noperm<T: std::fmt::Debug>(what: &str, result: redis::RedisResult<T>) {
+    match result {
+        Err(error) if error.code() == Some("NOPERM") => {}
+        other => panic!("{what}: expected NOPERM, got {other:?}"),
+    }
 }
 
 async fn exists(key: &str) -> bool {
@@ -285,6 +339,200 @@ async fn an_untrusted_server_is_refused() {
     );
 }
 
+// --- authentication: an ACL user on top of the certificate --------------------
+
+/// Connects as `login` and PINGs, returning whatever went wrong first.
+async fn ping_as(login: Login<'_>) -> redis::RedisResult<String> {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let mut conn = tls_client_as(login, true)
+            .get_multiplexed_async_connection_with_config(&patient())
+            .await?;
+        redis::cmd("PING").query_async::<String>(&mut conn).await
+    })
+    .await
+    .expect("the server did not answer at all")
+}
+
+#[tokio::test]
+async fn the_streams_user_logs_in() {
+    let _server = SERVER.read().await;
+    assert_eq!(ping_as(AS_STREAMS).await.unwrap(), "PONG");
+    let whoami: String = command(redis::cmd("ACL").arg("WHOAMI")).await;
+    assert_eq!(whoami, ADMIN_USER);
+}
+
+/// A valid certificate and no password is a connection that can run nothing:
+/// the client's SELECT is the first command, and the server refuses it.
+#[tokio::test]
+async fn no_password_is_refused() {
+    let _server = SERVER.read().await;
+    let error = ping_as(None).await.unwrap_err();
+    assert!(
+        error.to_string().contains("Authentication required"),
+        "{error}"
+    );
+}
+
+#[tokio::test]
+async fn a_wrong_password_is_refused() {
+    let _server = SERVER.read().await;
+    let error = ping_as(Some((STREAMS_USER, "not-the-password")))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        redis::ErrorKind::AuthenticationFailed,
+        "{error}"
+    );
+
+    // And the provider says so rather than limping on: its first command
+    // fails. The client library retries a failed login for a few seconds
+    // before giving up, hence the long timeout.
+    let wrong = redis::Client::build_with_tls(
+        format!("rediss://{STREAMS_USER}:not-the-password@{}/{DB}", addr()),
+        TlsCertificates {
+            client_tls: Some(ClientTlsConfig {
+                client_cert: read_cert("client.crt"),
+                client_key: read_cert("client.key"),
+            }),
+            root_cert: Some(read_cert("ca.crt")),
+        },
+    )
+    .unwrap();
+    let provider = RedisProvider::new(wrong, config());
+    let created = tokio::time::timeout(
+        Duration::from_secs(60),
+        provider.create(Stream {
+            name: "e2e".into(),
+            subjects: vec![SUBJECT.into()],
+            ..Stream::default()
+        }),
+    )
+    .await
+    .expect("a provider with a wrong password hung");
+    assert!(
+        matches!(&created, Err(StreamError::Internal(_))),
+        "{created:?}"
+    );
+}
+
+/// `default` is off: it cannot log in with any password, and is not the user
+/// an unauthenticated connection runs as.
+#[tokio::test]
+async fn the_default_user_is_disabled() {
+    let _server = SERVER.read().await;
+    for password in ["nopass", "default", STREAMS_PASSWORD, ADMIN_PASSWORD] {
+        let error = ping_as(Some(("default", password))).await.unwrap_err();
+        assert_eq!(
+            error.kind(),
+            redis::ErrorKind::AuthenticationFailed,
+            "default/{password:?}: {error}"
+        );
+    }
+    let user: Vec<redis::Value> = command(redis::cmd("ACL").arg("GETUSER").arg("default")).await;
+    let flags = format!("{user:?}");
+    assert!(
+        flags.contains("\"off\"") && !flags.contains("\"on\""),
+        "{flags}"
+    );
+    let users: Vec<String> = command(redis::cmd("ACL").arg("USERS")).await;
+    assert_eq!(users, [ADMIN_USER, "default", STREAMS_USER]);
+}
+
+/// The ACL is a real boundary: inside it the driver works (every other test),
+/// and one step outside, by command, key, or channel, is NOPERM.
+#[tokio::test]
+async fn the_acl_confines_the_streams_user() {
+    let _server = SERVER.read().await;
+    let mine = format!("e2e{}:durable:s:x:y", streams::provider::new_id());
+
+    // Commands no mode needs, even on its own keys.
+    noperm(
+        "CONFIG GET",
+        as_streams::<redis::Value>(redis::cmd("CONFIG").arg("GET").arg("port")).await,
+    );
+    noperm("FLUSHDB", as_streams::<()>(&redis::cmd("FLUSHDB")).await);
+    noperm(
+        "KEYS",
+        as_streams::<Vec<String>>(redis::cmd("KEYS").arg("*")).await,
+    );
+    noperm(
+        "EVAL",
+        as_streams::<redis::Value>(redis::cmd("EVAL").arg("return 1").arg(0)).await,
+    );
+    noperm(
+        "GET",
+        as_streams::<Option<String>>(redis::cmd("GET").arg(&mine)).await,
+    );
+    noperm(
+        "XINFO",
+        as_streams::<redis::Value>(redis::cmd("XINFO").arg("STREAM").arg(&mine)).await,
+    );
+    noperm(
+        "XGROUP DESTROY",
+        as_streams::<redis::Value>(redis::cmd("XGROUP").arg("DESTROY").arg(&mine).arg("g")).await,
+    );
+    noperm(
+        "ACL WHOAMI",
+        as_streams::<String>(redis::cmd("ACL").arg("WHOAMI")).await,
+    );
+
+    // A command it has, on a key outside its namespaces.
+    noperm(
+        "SET outside",
+        as_streams::<()>(redis::cmd("SET").arg("outside:key").arg("x")).await,
+    );
+    noperm(
+        "XADD another prefix",
+        as_streams::<String>(
+            redis::cmd("XADD")
+                .arg("orders:durable:s:x:y")
+                .arg("*")
+                .arg("msg")
+                .arg("x"),
+        )
+        .await,
+    );
+
+    // Channels: another prefix's subjects, and another database's expiries.
+    for channel in ["orders:stream:ch:x:y", "__keyevent@0__:expired"] {
+        noperm(
+            &format!("PUBLISH {channel}"),
+            as_streams::<u64>(redis::cmd("PUBLISH").arg(channel).arg("x")).await,
+        );
+        let mut pubsub = tls_client(true).get_async_pubsub().await.unwrap();
+        noperm(
+            &format!("SUBSCRIBE {channel}"),
+            pubsub.subscribe(channel).await,
+        );
+    }
+
+    // Through the provider: a prefix outside the ACL is refused at the first
+    // write, and the refusal reaches the caller.
+    let outside = RedisProvider::durable(
+        client().await,
+        RedisConfig {
+            prefix: "orders".into(),
+            ..RedisConfig::default()
+        },
+    );
+    let refused = outside
+        .create(Stream {
+            name: "e2e".into(),
+            subjects: vec![SUBJECT.into()],
+            ..Stream::default()
+        })
+        .await;
+    assert!(
+        matches!(&refused, Err(StreamError::Internal(message))
+            if message.to_ascii_uppercase().contains("NOPERM")),
+        "{refused:?}"
+    );
+    // Nothing the refusals touched exists.
+    assert!(!exists("outside:key").await);
+    assert!(!exists("orders:durable:s:x:y").await);
+}
+
 /// The server is configured the way the compose file says: TLS only, client
 /// certificates required, AOF fsynced on every write, expiry events on.
 #[tokio::test]
@@ -299,6 +547,7 @@ async fn the_server_is_tls_only_and_durable() {
     assert_eq!(get("tls-auth-clients").await, "yes");
     assert_eq!(get("appendonly").await, "yes");
     assert_eq!(get("appendfsync").await, "always");
+    assert_eq!(get("aclfile").await, "/etc/redis/users.acl");
     let events = get("notify-keyspace-events").await;
     assert!(events.contains('E') && events.contains('x'), "{events}");
 }
@@ -909,7 +1158,9 @@ async fn restart_broker() {
             .expect("docker is not runnable");
         let healthy = String::from_utf8_lossy(&health.stdout).trim() == "healthy";
         let answers = async {
-            let mut conn = tls_client(true).get_multiplexed_async_connection().await?;
+            let mut conn = tls_client(true)
+                .get_multiplexed_async_connection_with_config(&patient())
+                .await?;
             redis::cmd("PING").query_async::<String>(&mut conn).await
         };
         if healthy && matches!(answers.await, Ok(ref pong) if pong == "PONG") {
@@ -924,21 +1175,12 @@ async fn restart_broker() {
     }
 }
 
-/// Reads a stream through a provider whose shared connection predates a
-/// restart, retrying the one command that discovers the connection is dead.
-async fn get_after_restart(provider: &RedisProvider, id: &str) -> Stream {
-    let mut last = None;
-    for _ in 0..20 {
-        match provider.get(id).await {
-            Ok(stream) => return stream,
-            Err(error) => last = Some(error),
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    panic!("the provider never reconnected: {last:?}");
-}
-
 /// What survives `docker restart` of a server with an fsynced AOF.
+///
+/// Every provider's shared connection predates the restart, and the first
+/// command each sends afterwards succeeds without a retry: a read, and on the
+/// immediate stream a PUBLISH, which the driver never repeats, so it can only
+/// succeed because the dead connection was replaced before it was sent.
 ///
 /// Durable (Redis Streams): the stream's metadata, the log, the consumer
 /// group's position, and its pending list all survive. A consumer that was
@@ -1008,17 +1250,31 @@ async fn survives_a_broker_restart() {
         .unwrap();
     let scheduled_at = tokio::time::Instant::now();
 
+    // Immediate setup: a stream whose provider has used its shared connection.
+    let immediate = RedisProvider::new(client.clone(), config.clone());
+    let (live, p) = create(&immediate, &[SUBJECT]).await;
+
     restart_broker().await;
 
-    // The provider's shared connection learns the server went away on its
-    // next command, which fails, and reconnects behind it; a caller retries
-    // that one command (streams::with_retry exists for publishers).
-    // Everything durable is still on the server.
-    assert_eq!(get_after_restart(&durable, &stream.id).await, stream);
-    assert_eq!(
-        get_after_restart(&scheduled, &reminders.id).await,
-        reminders
-    );
+    // No retries from here on: each of these is the first command its
+    // provider sends after the restart, on a shared connection opened before
+    // it. Everything durable is still on the server.
+    assert_eq!(durable.get(&stream.id).await.unwrap(), stream);
+    assert_eq!(scheduled.get(&reminders.id).await.unwrap(), reminders);
+
+    // The first command on the immediate provider is a publish, which is
+    // never sent twice. The subscription opens its own connection, so the
+    // publish is still the shared connection's first command. It arrives
+    // exactly once.
+    let mut listener = p.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    let once = p
+        .publish(SUBJECT, event("after-restart", ""), &Options::default())
+        .await
+        .expect("the first publish after a restart failed");
+    assert_eq!(recv(&mut listener).await.id(), once);
+    silent(&mut listener, Duration::from_millis(500)).await;
+    drop(listener);
+    immediate.delete(&live.id).await.unwrap();
     assert_eq!(
         pending(&key, "workers").await,
         1,

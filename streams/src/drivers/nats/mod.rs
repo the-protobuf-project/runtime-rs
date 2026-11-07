@@ -40,6 +40,8 @@
 mod jetstream;
 mod plain;
 
+use std::time::Duration;
+
 use opentelemetry::metrics::Meter;
 use tracing::error;
 
@@ -75,6 +77,33 @@ pub struct NatsConfig {
     /// consumer already shares a subject, and a queue group layered on top
     /// would be a second answer to the same question.
     pub queue_group: Option<String>,
+
+    /// How long a JetStream durable consumer waits for a delivery to be
+    /// settled before it sends the message again. `None` leaves it to the
+    /// server, whose default is 30 seconds.
+    ///
+    /// Like [`max_deliver`](Self::max_deliver), it is written when the
+    /// consumer is created: a durable consumer that already exists on the
+    /// server keeps the settings it was created with.
+    pub ack_wait: Option<Duration>,
+
+    /// How many times a JetStream durable consumer delivers one message
+    /// before it gives up on it. `None` (or `Some(0)`) leaves it to the server,
+    /// whose default is no limit. Applies at creation; see
+    /// [`ack_wait`](Self::ack_wait).
+    pub max_deliver: Option<u32>,
+
+    /// How long the server keeps the ordered consumer behind a JetStream
+    /// [`subscribe`](crate::Subscriber::subscribe) once nobody pulls from it,
+    /// which is how a dropped subscription's consumer is cleaned up. `None`
+    /// keeps async-nats' default of 30 seconds.
+    ///
+    /// It applies to the consumer a subscription starts with. When the
+    /// ordered consumer has to replace itself (after a sequence gap or two
+    /// missed heartbeats), async-nats creates the replacement with its own
+    /// 30-second default, because its ordered configuration has no field for
+    /// this.
+    pub inactive_threshold: Option<Duration>,
 }
 
 impl NatsConfig {
@@ -93,6 +122,25 @@ impl NatsConfig {
     /// Joins every core subscription to the queue group `name`.
     pub fn with_queue_group(mut self, name: impl Into<String>) -> Self {
         self.queue_group = Some(name.into());
+        self
+    }
+
+    /// Redelivers an unsettled durable delivery after `wait`.
+    pub fn with_ack_wait(mut self, wait: Duration) -> Self {
+        self.ack_wait = Some(wait);
+        self
+    }
+
+    /// Stops redelivering a durable message after `attempts` deliveries.
+    pub fn with_max_deliver(mut self, attempts: u32) -> Self {
+        self.max_deliver = Some(attempts);
+        self
+    }
+
+    /// Lets the server discard an idle subscription's ordered consumer after
+    /// `threshold`.
+    pub fn with_inactive_threshold(mut self, threshold: Duration) -> Self {
+        self.inactive_threshold = Some(threshold);
         self
     }
 
@@ -200,5 +248,21 @@ mod tests {
         assert_eq!(config.queue_group.as_deref(), Some("workers"));
         assert!(config.registry.lookup("protobuf").is_ok());
         assert!(config.meter.is_none());
+
+        let config = NatsConfig::default()
+            .with_ack_wait(Duration::from_secs(2))
+            .with_max_deliver(3)
+            .with_inactive_threshold(Duration::from_secs(4));
+        assert_eq!(config.ack_wait, Some(Duration::from_secs(2)));
+        assert_eq!(config.max_deliver, Some(3));
+        assert_eq!(config.inactive_threshold, Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn jetstream_settings_default_to_the_server() {
+        let config = NatsConfig::default();
+        assert!(config.ack_wait.is_none());
+        assert!(config.max_deliver.is_none());
+        assert!(config.inactive_threshold.is_none());
     }
 }

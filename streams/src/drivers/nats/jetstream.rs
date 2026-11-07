@@ -1,6 +1,6 @@
 //! JetStream: the same subjects as core NATS, backed by a stored log.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use async_nats::{
     Client,
@@ -54,11 +54,20 @@ pub struct JetStreamProvider {
     shared: Arc<Shared>,
 }
 
+/// The inactive threshold async-nats gives an ordered consumer, kept when
+/// [`NatsConfig::inactive_threshold`] is unset.
+const ORDERED_INACTIVE_THRESHOLD: Duration = Duration::from_secs(30);
+
 /// What every manager bound from one provider needs.
 struct Shared {
     context: jetstream::Context,
     registry: Registry,
     metrics: provider::Metrics,
+    /// Zero leaves it to the server.
+    ack_wait: Duration,
+    /// Zero leaves it to the server.
+    max_deliver: i64,
+    inactive_threshold: Duration,
 }
 
 impl JetStreamProvider {
@@ -86,6 +95,11 @@ impl JetStreamProvider {
             shared: Arc::new(Shared {
                 context,
                 metrics: config.metrics(),
+                ack_wait: config.ack_wait.unwrap_or_default(),
+                max_deliver: config.max_deliver.map(i64::from).unwrap_or_default(),
+                inactive_threshold: config
+                    .inactive_threshold
+                    .unwrap_or(ORDERED_INACTIVE_THRESHOLD),
                 registry: config.registry,
             }),
         })
@@ -324,7 +338,8 @@ impl Subscriber for JetStreamManager {
     /// Subscribes from the end of the log.
     ///
     /// This is the undurable half: an ordered consumer that acknowledges
-    /// nothing and that the server discards once the stream is dropped. Nothing
+    /// nothing and that the server discards once the stream has been dropped
+    /// for [`NatsConfig::inactive_threshold`]. Nothing
     /// about what it saw survives it; reach for [`Durable::consume`] when that
     /// matters. [`Options::group`] is ignored, as in runtime-go: a group on
     /// JetStream is a durable consumer's name.
@@ -334,13 +349,21 @@ impl Subscriber for JetStreamManager {
             error!(subject, %error, "could not create an ordered consumer");
             StreamError::internal(&format!("nats: cannot subscribe to {subject:?}"), error)
         };
+        // async-nats' ordered configuration has no inactive threshold, so the
+        // first consumer is created with the same settings it would write,
+        // plus that one, and then read back as an ordered consumer.
+        let name = provider::new_id();
+        self.handle
+            .create_consumer(ordered_config(
+                &name,
+                subject,
+                self.shared.inactive_threshold,
+            ))
+            .await
+            .map_err(|error| fail(&error))?;
         let consumer = self
             .handle
-            .create_consumer(OrderedConfig {
-                filter_subjects: vec![subject.to_owned()],
-                deliver_policy: DeliverPolicy::New,
-                ..OrderedConfig::default()
-            })
+            .get_consumer::<OrderedConfig>(&name)
             .await
             .map_err(|error| fail(&error))?;
         let messages = consumer.messages().await.map_err(|error| fail(&error))?;
@@ -448,6 +471,8 @@ impl Positioned for JetStreamManager {
                         filter_subject: subject.to_owned(),
                         ack_policy: AckPolicy::Explicit,
                         deliver_policy: policy,
+                        ack_wait: self.shared.ack_wait,
+                        max_deliver: self.shared.max_deliver,
                         ..pull::Config::default()
                     })
                     .await
@@ -473,6 +498,23 @@ impl Positioned for JetStreamManager {
                 consumer: name,
             },
         ))
+    }
+}
+
+/// The consumer behind a JetStream subscription: what async-nats writes for an
+/// ordered consumer (ephemeral, unacknowledged, delivered once, in memory, one
+/// replica), named, with `inactive_threshold` in place of its fixed 30 seconds.
+fn ordered_config(name: &str, subject: &str, inactive_threshold: Duration) -> pull::Config {
+    pull::Config {
+        name: Some(name.to_owned()),
+        filter_subjects: vec![subject.to_owned()],
+        deliver_policy: DeliverPolicy::New,
+        ack_policy: AckPolicy::None,
+        max_deliver: 1,
+        memory_storage: true,
+        num_replicas: 1,
+        inactive_threshold,
+        ..pull::Config::default()
     }
 }
 
@@ -651,6 +693,21 @@ mod tests {
         assert_eq!(stream.id, "FOREIGN");
         assert!(stream.name.is_empty() && stream.description.is_empty());
         assert!(!stream.active);
+    }
+
+    #[test]
+    fn the_ordered_config_matches_async_nats() {
+        let ours = ordered_config("c", "orders.*", ORDERED_INACTIVE_THRESHOLD);
+        let theirs: pull::Config = OrderedConfig {
+            name: Some("c".into()),
+            filter_subjects: vec!["orders.*".into()],
+            deliver_policy: DeliverPolicy::New,
+            ..OrderedConfig::default()
+        }
+        .into();
+        assert_eq!(ours, theirs);
+        let short = ordered_config("c", "orders.*", Duration::from_secs(2));
+        assert_eq!(short.inactive_threshold, Duration::from_secs(2));
     }
 
     #[test]

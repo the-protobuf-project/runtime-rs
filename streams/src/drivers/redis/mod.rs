@@ -22,6 +22,27 @@
 //! blocking reads monopolise a connection) and never holds it anywhere but in
 //! the provider.
 //!
+//! # Surviving a server restart
+//!
+//! The shared connection speaks RESP3 whatever the client asks for, because
+//! that is how it hears the server hang up: the disconnect arrives as an
+//! event, the connection is replaced in the background, and the first command
+//! after a restart goes out on the new one instead of failing on the dead one.
+//! A server too old for RESP3 (before 6.0) gets the client's own protocol and
+//! loses only that early warning. Credentials, TLS, and the database come from
+//! the client unchanged, so an ACL user or `rediss://user:pass@host` works as
+//! it does anywhere else.
+//!
+//! A command that still meets a dropped connection is repeated once on the new
+//! one only when repeating it cannot do its work twice: reads, acks, group
+//! changes, deletes, and the metadata writes. A PUBLISH, an XADD of a message,
+//! or a scheduled message is never sent twice, because a connection that drops
+//! after the server ran the command and before its reply arrived looks exactly
+//! like one that dropped before sending it, and a repeat would deliver the
+//! message twice. Those are repeated only when the connection was refused
+//! outright, which proves nothing was sent; otherwise the caller decides, with
+//! [`with_retry`](crate::with_retry) where a duplicate is acceptable.
+//!
 //! # Which constructor
 //!
 //! [`RedisProvider::new`] and [`RedisProvider::scheduled`] hand a message over
@@ -58,7 +79,10 @@ mod stream;
 
 use std::{sync::Arc, time::Duration};
 
-use redis::aio::ConnectionManager;
+use redis::{
+    ProtocolVersion, RedisError, RedisResult,
+    aio::{ConnectionManager, ConnectionManagerConfig},
+};
 use tokio::sync::OnceCell;
 
 use crate::{Registry, Result, StreamError, provider::Metrics};
@@ -209,18 +233,105 @@ impl RedisProvider {
     }
 }
 
+/// How many times the shared connection retries reaching the server after it
+/// went away, and the longest wait between tries: about ten seconds in all,
+/// enough to ride out a restart rather than giving up halfway through one.
+const RECONNECT_ATTEMPTS: usize = 12;
+const RECONNECT_WAIT_UP_TO: Duration = Duration::from_secs(1);
+
+/// Whether a command may be sent a second time after the connection dropped
+/// under it. See "Surviving a server restart" in the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Replay {
+    /// Running it twice leaves the server as running it once does.
+    Idempotent,
+    /// Running it twice does its work twice: a PUBLISH delivers twice, an
+    /// XADD appends a second entry. Repeated only when provably never sent.
+    Once,
+}
+
+impl Replay {
+    /// Whether `error` permits the one repeat.
+    fn again(self, error: &RedisError) -> bool {
+        // A refused connection carried nothing, so even a publish may go again.
+        if error.is_connection_refusal() {
+            return true;
+        }
+        self == Self::Idempotent && error.is_connection_dropped()
+    }
+}
+
 impl Inner {
     /// The shared command connection, opened on first use.
     ///
     /// A clone of a [`ConnectionManager`] addresses the same multiplexed
     /// connection, so handing one out per call costs nothing and lets commands
     /// run concurrently.
-    async fn conn(&self) -> Result<ConnectionManager> {
+    async fn manager(&self) -> RedisResult<ConnectionManager> {
         self.commands
-            .get_or_try_init(|| self.client.get_connection_manager())
+            .get_or_try_init(|| async {
+                let config = ConnectionManagerConfig::new()
+                    .set_number_of_retries(RECONNECT_ATTEMPTS)
+                    .set_max_delay(RECONNECT_WAIT_UP_TO);
+                let info = self.client.get_connection_info();
+                if info.redis_settings().protocol().supports_resp3() {
+                    return self.client.get_connection_manager_with_config(config).await;
+                }
+                let resp3 = redis::Client::open(
+                    info.clone().set_redis_settings(
+                        info.redis_settings()
+                            .clone()
+                            .set_protocol(ProtocolVersion::RESP3),
+                    ),
+                )?;
+                // One plain attempt first, because the manager retries every
+                // failure for seconds, a refused HELLO included.
+                let client = match resp3.get_multiplexed_async_connection().await {
+                    Err(error) if error.kind() == redis::ErrorKind::RESP3NotSupported => {
+                        tracing::info!("redis: server predates RESP3; using the client's protocol");
+                        self.client.clone()
+                    }
+                    _ => resp3,
+                };
+                client.get_connection_manager_with_config(config).await
+            })
             .await
             .cloned()
-            .map_err(|error| StreamError::internal("redis: cannot connect", error))
+    }
+
+    /// Runs one command on the shared connection, repeating it once on the
+    /// replacement connection when the first one had dropped and `replay`
+    /// allows it.
+    pub(super) async fn query<T: redis::FromRedisValue>(
+        &self,
+        cmd: &redis::Cmd,
+        replay: Replay,
+    ) -> RedisResult<T> {
+        let mut conn = self.manager().await?;
+        match cmd.query_async(&mut conn).await {
+            Err(error) if replay.again(&error) => {
+                tracing::debug!(%error, "redis: connection dropped; sending once more");
+                cmd.query_async(&mut conn).await
+            }
+            done => done,
+        }
+    }
+
+    /// [`Inner::query`] for a pipeline or transaction, which is repeated
+    /// whole or not at all.
+    pub(super) async fn query_pipe<T: redis::FromRedisValue>(
+        &self,
+        pipe: &redis::Pipeline,
+        replay: Replay,
+    ) -> RedisResult<T> {
+        let mut conn = self.manager().await?;
+        match pipe.query_async(&mut conn).await {
+            Err(error) if replay.again(&error) => {
+                tracing::debug!(%error, "redis: connection dropped; sending once more");
+                pipe.query_async(&mut conn).await
+            }
+            done => done,
+        }
     }
 
     /// A connection of its own for a blocking read.
@@ -242,4 +353,47 @@ impl Inner {
 /// Wraps a Redis failure with what was being attempted.
 fn fail(context: impl AsRef<str>) -> impl FnOnce(redis::RedisError) -> StreamError {
     move |error| StreamError::internal(context.as_ref(), error)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io;
+
+    use super::*;
+
+    fn io(kind: io::ErrorKind) -> RedisError {
+        RedisError::from(io::Error::from(kind))
+    }
+
+    #[test]
+    fn a_dropped_connection_repeats_only_what_is_idempotent() {
+        for kind in [
+            io::ErrorKind::BrokenPipe,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(Replay::Idempotent.again(&io(kind)), "{kind:?}");
+            assert!(!Replay::Once.again(&io(kind)), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_refused_connection_repeats_anything() {
+        let refused = io(io::ErrorKind::ConnectionRefused);
+        assert!(Replay::Idempotent.again(&refused));
+        assert!(Replay::Once.again(&refused));
+    }
+
+    #[test]
+    fn nothing_repeats_a_timeout_or_an_answer() {
+        let answers = [
+            io(io::ErrorKind::TimedOut),
+            RedisError::from((redis::ErrorKind::AuthenticationFailed, "WRONGPASS")),
+            RedisError::from((redis::ErrorKind::Client, "NOPERM")),
+        ];
+        for error in answers {
+            assert!(!Replay::Idempotent.again(&error), "{error}");
+            assert!(!Replay::Once.again(&error), "{error}");
+        }
+    }
 }

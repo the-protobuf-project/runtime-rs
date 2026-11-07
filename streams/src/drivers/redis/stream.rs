@@ -11,7 +11,8 @@ use crate::{
 };
 
 use super::{
-    DurableManager, Inner, PubSubManager, RedisProvider, fail, keys::Kind, keys::METADATA_FIELD,
+    DurableManager, Inner, PubSubManager, RedisProvider, Replay, fail, keys::Kind,
+    keys::METADATA_FIELD,
 };
 
 /// How many keys one SCAN step asks for.
@@ -34,14 +35,16 @@ impl Inner {
 
     /// Loads and decodes a stream's metadata entry.
     async fn read(&self, key: &str, id: &str) -> Result<Stream> {
-        let mut conn = self.conn().await?;
-        let reply: StreamRangeReply = redis::cmd("XRANGE")
-            .arg(key)
-            .arg("-")
-            .arg("+")
-            .arg("COUNT")
-            .arg(1)
-            .query_async(&mut conn)
+        let reply: StreamRangeReply = self
+            .query(
+                redis::cmd("XRANGE")
+                    .arg(key)
+                    .arg("-")
+                    .arg("+")
+                    .arg("COUNT")
+                    .arg(1),
+                Replay::Idempotent,
+            )
             .await
             .map_err(fail(format!("redis: cannot read stream {id}")))?;
         let Some(entry) = reply.ids.first() else {
@@ -82,13 +85,17 @@ impl Streams for RedisProvider {
             stream.id.clone()
         };
         let (out, body) = normalized(&id, stream)?;
-        let mut conn = self.inner.conn().await?;
-        redis::cmd("XADD")
-            .arg(self.inner.keys.stream(&id))
-            .arg("*")
-            .arg(METADATA_FIELD)
-            .arg(body)
-            .query_async::<()>(&mut conn)
+        // Idempotent in effect: a repeat appends a second, identical metadata
+        // entry, every reader takes the first, and an update trims to one.
+        self.inner
+            .query::<()>(
+                redis::cmd("XADD")
+                    .arg(self.inner.keys.stream(&id))
+                    .arg("*")
+                    .arg(METADATA_FIELD)
+                    .arg(body),
+                Replay::Idempotent,
+            )
             .await
             .map_err(fail(format!("redis: cannot create stream {id}")))?;
         tracing::info!(id = %id, name = %out.name, "stream created");
@@ -122,21 +129,24 @@ impl Streams for RedisProvider {
         self.get(id).await?;
         let (out, body) = normalized(id, stream)?;
         let key = self.inner.keys.stream(id);
-        let mut conn = self.inner.conn().await?;
-        redis::pipe()
-            .atomic()
-            .cmd("XADD")
-            .arg(&key)
-            .arg("*")
-            .arg(METADATA_FIELD)
-            .arg(body)
-            .ignore()
-            .cmd("XTRIM")
-            .arg(&key)
-            .arg("MAXLEN")
-            .arg(1)
-            .ignore()
-            .query_async::<()>(&mut conn)
+        // A repeat writes the same entry and trims to it again.
+        self.inner
+            .query_pipe::<()>(
+                redis::pipe()
+                    .atomic()
+                    .cmd("XADD")
+                    .arg(&key)
+                    .arg("*")
+                    .arg(METADATA_FIELD)
+                    .arg(body)
+                    .ignore()
+                    .cmd("XTRIM")
+                    .arg(&key)
+                    .arg("MAXLEN")
+                    .arg(1)
+                    .ignore(),
+                Replay::Idempotent,
+            )
             .await
             .map_err(fail(format!("redis: cannot update stream {id}")))?;
         tracing::info!(id, "stream updated");
@@ -146,10 +156,14 @@ impl Streams for RedisProvider {
     /// A stream that is not there is reported rather than treated as success:
     /// a silent `Ok` once made a failed delete look like a completed one.
     async fn delete(&self, id: &str) -> Result<()> {
-        let mut conn = self.inner.conn().await?;
-        let removed: u64 = redis::cmd("DEL")
-            .arg(self.inner.keys.stream(id))
-            .query_async(&mut conn)
+        // The server ends up the same either way; only a reply lost after the
+        // delete ran makes the repeat report NotFound for it.
+        let removed: u64 = self
+            .inner
+            .query(
+                redis::cmd("DEL").arg(self.inner.keys.stream(id)),
+                Replay::Idempotent,
+            )
             .await
             .map_err(fail(format!("redis: cannot delete stream {id}")))?;
         if removed == 0 {
@@ -163,24 +177,27 @@ impl Streams for RedisProvider {
     /// block the server, and each candidate's type is checked before it is
     /// read, because something else may own a matching key.
     async fn list(&self) -> Result<Vec<Stream>> {
-        let mut conn = self.inner.conn().await?;
         let pattern = self.inner.keys.stream_pattern();
         let mut out = Vec::new();
         let mut cursor: u64 = 0;
         loop {
-            let (next, keys): (u64, Vec<String>) = redis::cmd("SCAN")
-                .arg(cursor)
-                .arg("MATCH")
-                .arg(&pattern)
-                .arg("COUNT")
-                .arg(SCAN_COUNT)
-                .query_async(&mut conn)
+            let (next, keys): (u64, Vec<String>) = self
+                .inner
+                .query(
+                    redis::cmd("SCAN")
+                        .arg(cursor)
+                        .arg("MATCH")
+                        .arg(&pattern)
+                        .arg("COUNT")
+                        .arg(SCAN_COUNT),
+                    Replay::Idempotent,
+                )
                 .await
                 .map_err(fail("redis: cannot list streams"))?;
             for key in keys {
-                let kind: String = redis::cmd("TYPE")
-                    .arg(&key)
-                    .query_async(&mut conn)
+                let kind: String = self
+                    .inner
+                    .query(redis::cmd("TYPE").arg(&key), Replay::Idempotent)
                     .await
                     .map_err(fail(format!("redis: cannot type {key}")))?;
                 if kind != "stream" {

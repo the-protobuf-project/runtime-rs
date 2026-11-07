@@ -22,7 +22,7 @@ use crate::{
 };
 
 use super::{
-    Inner, fail,
+    Inner, Replay, fail,
     keys::PAYLOAD_FIELD,
     pubsub::{capacity, refuse_group},
 };
@@ -99,8 +99,10 @@ impl Publisher for DurableManager {
         let id = publish_id(opts);
         let mut pipe = redis::pipe();
         self.queue_append(&mut pipe, &self.key(subject), pack(&id, &payload));
-        let mut conn = self.inner.conn().await?;
-        pipe.query_async::<()>(&mut conn)
+        // Once: XADD * mints a new entry id each time, so a repeat appends the
+        // message twice.
+        self.inner
+            .query_pipe::<()>(&pipe, Replay::Once)
             .await
             .map_err(fail(format!("redis: cannot append to {subject:?}")))?;
         tracing::debug!(subject, id, "appended");
@@ -130,13 +132,11 @@ impl Batch for DurableManager {
         for (id, payload) in ids.iter().zip(&payloads) {
             self.queue_append(&mut pipe, &key, pack(id, payload));
         }
-        let sent = match self.inner.conn().await {
-            Ok(mut conn) => pipe
-                .query_async::<()>(&mut conn)
-                .await
-                .map_err(fail(format!("redis: cannot append a batch to {subject:?}"))),
-            Err(error) => Err(error),
-        };
+        let sent = self
+            .inner
+            .query_pipe::<()>(&pipe, Replay::Once)
+            .await
+            .map_err(fail(format!("redis: cannot append a batch to {subject:?}")));
         // One failure for the lot; some entries may still have landed.
         let failures = match sent {
             Ok(()) => Vec::new(),
@@ -261,16 +261,20 @@ impl Positioned for DurableManager {
             Position::New => "$",
             Position::Earliest => "0",
         };
-        let mut conn = self.inner.conn().await?;
         // MKSTREAM so a consumer may attach before anything is published;
-        // BUSYGROUP is the answer we want from a create run on every attach.
-        let created = redis::cmd("XGROUP")
-            .arg("CREATE")
-            .arg(&key)
-            .arg(consumer)
-            .arg(start)
-            .arg("MKSTREAM")
-            .query_async::<()>(&mut conn)
+        // BUSYGROUP is the answer we want from a create run on every attach,
+        // which is also what makes repeating it harmless.
+        let created = self
+            .inner
+            .query::<()>(
+                redis::cmd("XGROUP")
+                    .arg("CREATE")
+                    .arg(&key)
+                    .arg(consumer)
+                    .arg(start)
+                    .arg("MKSTREAM"),
+                Replay::Idempotent,
+            )
             .await;
         if let Err(error) = created
             && error.code() != Some("BUSYGROUP")
@@ -581,24 +585,30 @@ impl ConsumeLoop {
     /// still holding messages stays, so they can be reclaimed from it.
     async fn leave(&self) {
         let cleanup = async {
-            let mut conn = self.inner.conn().await.ok()?;
-            let pending: StreamPendingCountReply = redis::cmd("XPENDING")
-                .arg(&self.key)
-                .arg(&self.group)
-                .arg("-")
-                .arg("+")
-                .arg(1)
-                .arg(&self.name)
-                .query_async(&mut conn)
+            let pending: StreamPendingCountReply = self
+                .inner
+                .query(
+                    redis::cmd("XPENDING")
+                        .arg(&self.key)
+                        .arg(&self.group)
+                        .arg("-")
+                        .arg("+")
+                        .arg(1)
+                        .arg(&self.name),
+                    Replay::Idempotent,
+                )
                 .await
                 .ok()?;
             if pending.ids.is_empty() {
-                redis::cmd("XGROUP")
-                    .arg("DELCONSUMER")
-                    .arg(&self.key)
-                    .arg(&self.group)
-                    .arg(&self.name)
-                    .query_async::<()>(&mut conn)
+                self.inner
+                    .query::<()>(
+                        redis::cmd("XGROUP")
+                            .arg("DELCONSUMER")
+                            .arg(&self.key)
+                            .arg(&self.group)
+                            .arg(&self.name),
+                        Replay::Idempotent,
+                    )
                     .await
                     .ok()?;
             }
@@ -650,26 +660,28 @@ impl Acker for RedisAck {
 }
 
 async fn xack(inner: &Inner, key: &str, group: &str, entry: &str) -> Result<()> {
-    let mut conn = inner.conn().await?;
-    redis::cmd("XACK")
-        .arg(key)
-        .arg(group)
-        .arg(entry)
-        .query_async::<()>(&mut conn)
+    // Acknowledging an acknowledged entry is a no-op.
+    inner
+        .query::<()>(
+            redis::cmd("XACK").arg(key).arg(group).arg(entry),
+            Replay::Idempotent,
+        )
         .await
         .map_err(fail("redis: XACK failed"))
 }
 
 /// The id of the newest entry in `key`, or the beginning when it is empty.
 async fn last_id(inner: &Inner, key: &str) -> Result<String> {
-    let mut conn = inner.conn().await?;
-    let reply: StreamRangeReply = redis::cmd("XREVRANGE")
-        .arg(key)
-        .arg("+")
-        .arg("-")
-        .arg("COUNT")
-        .arg(1)
-        .query_async(&mut conn)
+    let reply: StreamRangeReply = inner
+        .query(
+            redis::cmd("XREVRANGE")
+                .arg(key)
+                .arg("+")
+                .arg("-")
+                .arg("COUNT")
+                .arg(1),
+            Replay::Idempotent,
+        )
         .await
         .map_err(fail(format!("redis: cannot read the end of {key:?}")))?;
     Ok(reply

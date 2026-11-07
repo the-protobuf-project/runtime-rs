@@ -6416,6 +6416,7 @@ dependencies = [
  "bytes",
  "futures",
  "lapin",
+ "nkeys",
  "opentelemetry",
  "prost",
  "rdkafka",

@@ -1,14 +1,18 @@
-//! The Kafka provider end to end, over mutual TLS, against a durable broker.
+//! The Kafka provider end to end, over mutual TLS and over SASL/SCRAM on TLS,
+//! against a durable broker with ACLs on.
 //!
 //! Start one with
 //! `docker compose -p tpp-streams-e2e-kafka -f docker/compose.kafka.secure.yaml up -d --wait`
 //! (certificates from `docker/tls/generate.sh`), then
 //! `cargo test -p tpp-streams --features kafka,tls,live-tests --test kafka_e2e`.
 //!
-//! `KAFKA_E2E_ADDR` overrides the broker (default `127.0.0.1:19093`) and
-//! `STREAMS_E2E_TLS_DIR` the certificate directory (default `docker/tls/out`).
-//! The restart test runs only with `STREAMS_E2E_RESTART=1`, because it restarts
-//! the `tpp-streams-kafka-secure` container.
+//! `KAFKA_E2E_ADDR` overrides the mutual-TLS listener (default
+//! `127.0.0.1:19093`), `KAFKA_E2E_SASL_ADDR` the SASL_SSL one (default
+//! `127.0.0.1:19094`), and `STREAMS_E2E_TLS_DIR` the certificate directory
+//! (default `docker/tls/out`). The SCRAM user, its password and the prefix its
+//! ACLs cover are read from `docker/compose.kafka.secure.env`, as the broker
+//! reads them. The restart test runs only with `STREAMS_E2E_RESTART=1`, because
+//! it restarts the `tpp-streams-kafka-secure` container.
 
 use std::{
     collections::HashSet,
@@ -92,13 +96,77 @@ fn tls_client(mutual: bool) -> ClientConfig {
     client
 }
 
-fn fresh_prefix() -> String {
-    format!("e2e-{}", streams::provider::new_id().to_lowercase())
+fn sasl_addr() -> String {
+    std::env::var("KAFKA_E2E_SASL_ADDR").unwrap_or_else(|_| "127.0.0.1:19094".into())
 }
 
-async fn provider_at(prefix: &str, partitions: i32) -> KafkaProvider {
+/// One value from `docker/compose.kafka.secure.env`, the file the broker
+/// creates its SCRAM user and ACLs from.
+fn scram(key: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/compose.kafka.secure.env");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()));
+    text.lines()
+        .filter_map(|line| line.split_once('='))
+        .find(|(name, _)| name.trim() == key)
+        .map(|(_, value)| value.trim().to_owned())
+        .unwrap_or_else(|| panic!("{key} is not set in {}", path.display()))
+}
+
+/// A client config for the SASL_SSL listener: TLS verifying the broker, no
+/// client certificate, SCRAM-SHA-512 as `password` says.
+fn sasl_client(password: &str) -> ClientConfig {
+    let mut client = ClientConfig::new();
+    client
+        .set("bootstrap.servers", sasl_addr())
+        .set("security.protocol", "sasl_ssl")
+        .set("ssl.ca.location", cert("ca.crt"))
+        .set("ssl.endpoint.identification.algorithm", "https")
+        .set("sasl.mechanism", "SCRAM-SHA-512")
+        .set("sasl.username", scram("E2E_SCRAM_USER"))
+        .set("sasl.password", password);
+    client
+}
+
+/// Who a test connects as.
+#[derive(Clone, Copy, Debug)]
+enum Auth {
+    /// The client certificate on the mutual-TLS listener, allowed everything.
+    Mtls,
+    /// The SCRAM user on the SASL_SSL listener, allowed only names under its
+    /// prefix.
+    Scram,
+}
+
+impl Auth {
+    fn client(self) -> ClientConfig {
+        match self {
+            Self::Mtls => tls_client(true),
+            Self::Scram => sasl_client(&scram("E2E_SCRAM_PASSWORD")),
+        }
+    }
+
+    /// A topic prefix no other test uses, inside this principal's ACLs.
+    fn fresh_prefix(self) -> String {
+        let id = streams::provider::new_id().to_lowercase();
+        match self {
+            Self::Mtls => format!("e2e-{id}"),
+            Self::Scram => format!("{}{id}", scram("E2E_SCRAM_PREFIX")),
+        }
+    }
+
+    /// A consumer name this principal may use as a group.
+    fn consumer(self, name: &str) -> String {
+        match self {
+            Self::Mtls => name.to_owned(),
+            Self::Scram => format!("{}{name}", scram("E2E_SCRAM_PREFIX")),
+        }
+    }
+}
+
+async fn provider_at(auth: Auth, prefix: &str, partitions: i32) -> KafkaProvider {
     KafkaProvider::connect(
-        tls_client(true),
+        auth.client(),
         KafkaConfig {
             prefix: prefix.into(),
             partitions,
@@ -106,12 +174,18 @@ async fn provider_at(prefix: &str, partitions: i32) -> KafkaProvider {
         },
     )
     .await
-    .expect("secure Kafka is not reachable; start docker/compose.kafka.secure.yaml")
+    .unwrap_or_else(|error| {
+        panic!("secure Kafka is not reachable as {auth:?}; start docker/compose.kafka.secure.yaml: {error}")
+    })
+}
+
+async fn provider_as(auth: Auth, partitions: i32) -> (KafkaProvider, String) {
+    let prefix = auth.fresh_prefix();
+    (provider_at(auth, &prefix, partitions).await, prefix)
 }
 
 async fn provider(partitions: i32) -> (KafkaProvider, String) {
-    let prefix = fresh_prefix();
-    (provider_at(&prefix, partitions).await, prefix)
+    provider_as(Auth::Mtls, partitions).await
 }
 
 async fn declare(provider: &KafkaProvider) -> (Stream, Arc<dyn Manager>) {
@@ -241,13 +315,113 @@ async fn tls_with_an_untrusted_broker_ca_is_refused() {
 }
 
 // ---------------------------------------------------------------------------
+// SASL/SCRAM over TLS, and ACLs
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_wrong_scram_password_is_refused() {
+    let _broker = BROKER.read().await;
+    // The right password gets in, so the refusal below is the broker's
+    // verdict on the password and not an outage.
+    provider_as(Auth::Scram, 1).await;
+    let result =
+        KafkaProvider::connect(sasl_client("not-the-password"), KafkaConfig::default()).await;
+    assert!(
+        result.is_err(),
+        "the broker accepted a SCRAM client with the wrong password"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scram_without_tls_is_refused() {
+    let _broker = BROKER.read().await;
+    provider_as(Auth::Scram, 1).await;
+    // Right credentials, but in the clear: the listener speaks only TLS.
+    let mut client = Auth::Scram.client();
+    client.set("security.protocol", "sasl_plaintext");
+    let result = KafkaProvider::connect(client, KafkaConfig::default()).await;
+    assert!(
+        result.is_err(),
+        "a SCRAM client without TLS reached the SASL_SSL listener"
+    );
+}
+
+/// Asserts `result` failed because the broker refused the topic, and says so
+/// in the error the caller gets.
+fn assert_topic_denied<T>(result: streams::Result<T>, what: &str) {
+    match result {
+        Ok(_) => panic!("{what}: the SCRAM user reached a topic outside its ACLs"),
+        Err(StreamError::Internal(message)) => assert!(
+            message.contains("Topic authorization failed"),
+            "{what}: refused, but not for authorization: {message}"
+        ),
+        Err(other) => panic!("{what}: refused with the wrong kind of error: {other:?}"),
+    }
+}
+
+/// The SCRAM user's ACLs cover topics under its prefix and nothing else, and
+/// the broker's TOPIC_AUTHORIZATION_FAILED comes back as a [`StreamError`]
+/// naming it, whether the topics are new or already there.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_scram_user_is_denied_topics_outside_its_acls() {
+    let _broker = BROKER.read().await;
+    // Its own prefix works.
+    provider_as(Auth::Scram, 1).await;
+
+    // A prefix nobody has used: creating the metadata topic is refused.
+    let unused = format!("denied-{}", streams::provider::new_id().to_lowercase());
+    assert_topic_denied(
+        KafkaProvider::connect(
+            Auth::Scram.client(),
+            KafkaConfig {
+                prefix: unused,
+                ..KafkaConfig::default()
+            },
+        )
+        .await,
+        "a fresh prefix",
+    );
+
+    // Streams another principal declared: their topics exist, and the SCRAM
+    // user may not even learn that.
+    let (owner, prefix) = provider(1).await;
+    let (stream, _) = declare(&owner).await;
+    assert_topic_denied(
+        KafkaProvider::connect(
+            Auth::Scram.client(),
+            KafkaConfig {
+                prefix: prefix.clone(),
+                ..KafkaConfig::default()
+            },
+        )
+        .await,
+        "another principal's prefix",
+    );
+    owner.delete(&stream.id).await.unwrap();
+    assert_topics_gone(&prefix, &stream.id).await;
+    owner.close().await.unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread")]
 async fn lifecycle_over_tls() {
     let _broker = BROKER.read().await;
-    let (provider, prefix) = provider(1).await;
+    lifecycle(Auth::Mtls).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lifecycle_over_sasl_ssl() {
+    let _broker = BROKER.read().await;
+    lifecycle(Auth::Scram).await;
+}
+
+/// Declare, read, list, update, bind, publish, subscribe, and delete, as
+/// `auth`.
+async fn lifecycle(auth: Auth) {
+    let (provider, prefix) = provider_as(auth, 1).await;
 
     // Explicit id, sanitised the way Go sanitises it.
     let explicit = provider
@@ -854,69 +1028,93 @@ async fn restart_broker() {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     // The healthcheck speaks to the in-container plaintext listener; wait
-    // until the TLS listener also answers a few metadata reads in a row, so
-    // the tests that run after this one do not meet a broker still settling.
+    // until both client listeners also answer a few metadata reads in a row,
+    // so the tests that run after this one do not meet a broker still settling.
     let mut streak = 0;
     while streak < 3 {
         let ok = tokio::task::spawn_blocking(|| {
-            let consumer: BaseConsumer = tls_client(true).create().unwrap();
-            consumer
-                .fetch_metadata(None, Duration::from_secs(5))
-                .is_ok()
+            [Auth::Mtls, Auth::Scram].into_iter().all(|auth| {
+                let consumer: BaseConsumer = auth.client().create().unwrap();
+                consumer
+                    .fetch_metadata(None, Duration::from_secs(5))
+                    .is_ok()
+            })
         })
         .await
         .unwrap();
         streak = if ok { streak + 1 } else { 0 };
         assert!(
             Instant::now() < deadline,
-            "{CONTAINER} TLS listener never settled after restart"
+            "{CONTAINER} client listeners never settled after restart"
         );
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 
-/// An acked message stays acked and an unacked one is redelivered after the
-/// broker restarts; the stream declaration and the log survive too.
-#[tokio::test(flavor = "multi_thread")]
-async fn acknowledged_state_survives_a_broker_restart() {
-    if std::env::var("STREAMS_E2E_RESTART").as_deref() != Ok("1") {
-        eprintln!("skipped: set STREAMS_E2E_RESTART=1 to restart {CONTAINER}");
-        return;
+/// What one principal left on the broker before the restart.
+struct Seeded {
+    auth: Auth,
+    prefix: String,
+    stream: String,
+    acked: String,
+    pending: String,
+}
+
+/// Declares a stream as `auth`, publishes two messages, and acks only the
+/// first under a named consumer.
+async fn seed(auth: Auth) -> Seeded {
+    let prefix = auth.fresh_prefix();
+    let provider = provider_at(auth, &prefix, 1).await;
+    let (stream, manager) = declare(&provider).await;
+    let acked = manager
+        .publish(SUBJECT, event("acked", ""), &Options::default())
+        .await
+        .unwrap();
+    let pending = manager
+        .publish(SUBJECT, event("pending", ""), &Options::default())
+        .await
+        .unwrap();
+    let mut deliveries = as_positioned(manager.as_ref())
+        .unwrap()
+        .consume_from(
+            SUBJECT,
+            &auth.consumer("survivor"),
+            Position::Earliest,
+            &Options::default(),
+        )
+        .await
+        .unwrap();
+    let first = next(&mut deliveries).await;
+    assert_eq!(first.id(), acked);
+    first.ack().await.unwrap();
+    let second = next(&mut deliveries).await;
+    assert_eq!(second.id(), pending);
+    // Left unsettled on purpose.
+    drop(second);
+    drop(deliveries);
+    provider.close().await.unwrap();
+    Seeded {
+        auth,
+        prefix,
+        stream: stream.id,
+        acked,
+        pending,
     }
-    let _broker = BROKER.write().await;
-    let prefix = fresh_prefix();
-    let (stream_id, acked, pending) = {
-        let provider = provider_at(&prefix, 1).await;
-        let (stream, manager) = declare(&provider).await;
-        let acked = manager
-            .publish(SUBJECT, event("acked", ""), &Options::default())
-            .await
-            .unwrap();
-        let pending = manager
-            .publish(SUBJECT, event("pending", ""), &Options::default())
-            .await
-            .unwrap();
-        let mut deliveries = as_positioned(manager.as_ref())
-            .unwrap()
-            .consume_from(SUBJECT, "survivor", Position::Earliest, &Options::default())
-            .await
-            .unwrap();
-        let first = next(&mut deliveries).await;
-        assert_eq!(first.id(), acked);
-        first.ack().await.unwrap();
-        let second = next(&mut deliveries).await;
-        assert_eq!(second.id(), pending);
-        // Left unsettled on purpose.
-        drop(second);
-        drop(deliveries);
-        provider.close().await.unwrap();
-        (stream.id, acked, pending)
-    };
+}
 
-    restart_broker().await;
-
+/// Checks, as a freshly built provider would see it after the restart, that
+/// the declaration, the committed offset, and the whole log survived, and that
+/// the broker takes new publishes; then cleans up.
+async fn verify(seeded: Seeded) {
+    let Seeded {
+        auth,
+        prefix,
+        stream: stream_id,
+        acked,
+        pending,
+    } = seeded;
     // A new provider, as a restarted process would build.
-    let provider = provider_at(&prefix, 1).await;
+    let provider = provider_at(auth, &prefix, 1).await;
     let stream = provider
         .get(&stream_id)
         .await
@@ -927,14 +1125,14 @@ async fn acknowledged_state_survives_a_broker_restart() {
     // The committed offset survived: the name resumes at the unacked message.
     let mut resumed = as_durable(manager.as_ref())
         .unwrap()
-        .consume(SUBJECT, "survivor", &Options::default())
+        .consume(SUBJECT, &auth.consumer("survivor"), &Options::default())
         .await
         .unwrap();
     let delivery = next(&mut resumed).await;
     assert_eq!(
         delivery.id(),
         pending,
-        "the acked message came back, or the unacked one did not"
+        "{auth:?}: the acked message came back, or the unacked one did not"
     );
     delivery.ack().await.unwrap();
     drop(resumed);
@@ -942,7 +1140,12 @@ async fn acknowledged_state_survives_a_broker_restart() {
     // The log survived whole: a fresh name replays both from the start.
     let mut replay = as_positioned(manager.as_ref())
         .unwrap()
-        .consume_from(SUBJECT, "auditor", Position::Earliest, &Options::default())
+        .consume_from(
+            SUBJECT,
+            &auth.consumer("auditor"),
+            Position::Earliest,
+            &Options::default(),
+        )
         .await
         .unwrap();
     for want in [&acked, &pending] {
@@ -967,4 +1170,24 @@ async fn acknowledged_state_survives_a_broker_restart() {
     provider.delete(&stream_id).await.unwrap();
     assert_topics_gone(&prefix, &stream_id).await;
     provider.close().await.unwrap();
+}
+
+/// An acked message stays acked and an unacked one is redelivered after the
+/// broker restarts; the stream declaration and the log survive too. Checked
+/// for both principals, across one restart: the SCRAM user and its ACLs live
+/// in the metadata log, so they must survive with everything else.
+#[tokio::test(flavor = "multi_thread")]
+async fn acknowledged_state_survives_a_broker_restart() {
+    if std::env::var("STREAMS_E2E_RESTART").as_deref() != Ok("1") {
+        eprintln!("skipped: set STREAMS_E2E_RESTART=1 to restart {CONTAINER}");
+        return;
+    }
+    let _broker = BROKER.write().await;
+    let seeded = [seed(Auth::Mtls).await, seed(Auth::Scram).await];
+
+    restart_broker().await;
+
+    for seeded in seeded {
+        verify(seeded).await;
+    }
 }

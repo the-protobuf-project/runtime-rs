@@ -1,5 +1,7 @@
 //! The RabbitMQ provider end to end over mutual TLS, against a broker that
-//! keeps its data across a restart.
+//! keeps its data across a restart. The client certificate is also the login:
+//! the broker offers only SASL EXTERNAL and maps the certificate's CN,
+//! `tpp-streams-e2e`, to the one user it has.
 //!
 //! ```text
 //! docker compose -p tpp-streams-e2e-rabbitmq -f streams/docker/compose.rabbitmq.secure.yaml up -d --wait
@@ -76,7 +78,16 @@ fn read(name: &str) -> Vec<u8> {
     })
 }
 
+/// The user the broker derives from the client certificate's CN.
+const CERT_USER: &str = "tpp-streams-e2e";
+
+/// AMQPS with SASL EXTERNAL: no username or password, the certificate logs in.
 fn amqps() -> String {
+    format!("amqps://{}/%2f?auth_mechanism=external", addr())
+}
+
+/// AMQPS with SASL PLAIN as guest/guest, the broker's usual default login.
+fn amqps_guest() -> String {
     format!("amqps://guest:guest@{}/%2f", addr())
 }
 
@@ -93,10 +104,18 @@ fn mutual_tls() -> OwnedTLSConfig {
 
 /// Connects, or says why not; a handshake that hangs counts as refused.
 async fn connect_with(uri: String, tls: OwnedTLSConfig) -> Result<Connection, String> {
+    connect_named(uri, tls, ConnectionProperties::default()).await
+}
+
+async fn connect_named(
+    uri: String,
+    tls: OwnedTLSConfig,
+    properties: ConnectionProperties,
+) -> Result<Connection, String> {
     let builder = DefaultConnectionBuilder::new()
         .map_err(|e| e.to_string())?
         .with_uri_str(uri)
-        .with_properties(ConnectionProperties::default())
+        .with_properties(properties)
         .with_tls_config(tls);
     match tokio::time::timeout(WAIT, builder.connect()).await {
         Ok(result) => result.map_err(|e| e.to_string()),
@@ -164,23 +183,31 @@ where
     }
 }
 
-/// Names of the broker's exchanges or queues starting with `prefix`.
-fn on_broker(what: &str, prefix: &str) -> Vec<String> {
+/// `rabbitmqctl -q <args>` inside the broker container, one line per row.
+fn rabbitmqctl(args: &[&str]) -> Vec<String> {
     let out = Command::new("docker")
-        .args(["exec", &container(), "rabbitmqctl", "-q", what, "name"])
+        .args(["exec", &container(), "rabbitmqctl", "-q"])
+        .args(args)
         .output()
         .expect("docker is not on PATH");
     assert!(
         out.status.success(),
-        "rabbitmqctl {what}: {}",
+        "rabbitmqctl {args:?}: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     String::from_utf8(out.stdout)
         .unwrap()
         .lines()
         .map(str::trim)
-        .filter(|name| name.starts_with(prefix))
         .map(str::to_owned)
+        .collect()
+}
+
+/// Names of the broker's exchanges or queues starting with `prefix`.
+fn on_broker(what: &str, prefix: &str) -> Vec<String> {
+    rabbitmqctl(&[what, "name"])
+        .into_iter()
+        .filter(|name| name.starts_with(prefix))
         .collect()
 }
 
@@ -204,8 +231,70 @@ async fn plaintext_is_refused() {
 }
 
 #[tokio::test]
-async fn tls_without_a_client_certificate_is_refused() {
+async fn plain_guest_is_refused() {
     let _shared = BROKER.read().await;
+    // A trusted certificate on the wire, but asking to log in as guest/guest
+    // with PLAIN: the broker offers only EXTERNAL, and has no guest.
+    let guest = connect_with(amqps_guest(), mutual_tls()).await;
+    refused(guest, "a PLAIN guest/guest login was accepted");
+    let users: Vec<_> = rabbitmqctl(&["list_users", "--no-table-headers"])
+        .into_iter()
+        .filter_map(|row| row.split_whitespace().next().map(str::to_owned))
+        .collect();
+    assert_eq!(users, vec![CERT_USER.to_owned()], "the broker's users");
+}
+
+#[tokio::test]
+async fn the_certificate_is_the_login() {
+    let _shared = BROKER.read().await;
+    let name = prefix();
+    let conn = connect_named(
+        amqps(),
+        mutual_tls(),
+        ConnectionProperties::default().with_connection_name(name.clone().into()),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("EXTERNAL login refused: {e}"));
+    // The broker lists the connection under the user named by the CN.
+    let mut user = None;
+    for _ in 0..20 {
+        // client_properties carries the connection name chosen above.
+        user = rabbitmqctl(&[
+            "list_connections",
+            "--no-table-headers",
+            "user",
+            "auth_mechanism",
+            "peer_cert_subject",
+            "client_properties",
+        ])
+        .into_iter()
+        .find(|row| row.contains(&name))
+        .map(|row| {
+            let cols: Vec<_> = row.split('\t').map(str::trim).collect();
+            (cols[0].to_owned(), cols[1].to_owned(), cols[2].to_owned())
+        });
+        if user.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(
+        user,
+        Some((
+            CERT_USER.to_owned(),
+            "EXTERNAL".to_owned(),
+            format!("CN={CERT_USER},O=tpp-streams e2e")
+        )),
+        "the broker's view of connection {name}"
+    );
+    conn.close(200, "OK".into()).await.unwrap();
+}
+
+#[tokio::test]
+async fn external_without_a_client_certificate_is_refused() {
+    let _shared = BROKER.read().await;
+    // EXTERNAL has nothing to log in with; the TLS handshake already fails,
+    // since the broker requires a client certificate.
     let anonymous = connect_with(
         amqps(),
         OwnedTLSConfig {

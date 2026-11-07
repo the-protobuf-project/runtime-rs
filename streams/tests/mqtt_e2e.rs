@@ -1,12 +1,16 @@
 //! The MQTT provider end to end against Mosquitto over mutual TLS, with
-//! persistent sessions on disk.
+//! persistent sessions on disk, authenticated two ways: by the client
+//! certificate's identity on one listener, and by username and password, under
+//! ACLs, on another.
 //!
 //! Start the broker with
 //! `docker compose -p tpp-streams-e2e-mqtt -f streams/docker/compose.mqtt.secure.yaml up -d --wait`,
 //! then run
 //! `STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features mqtt,tls,live-tests --test mqtt_e2e`.
 //!
-//! `MQTT_E2E_ADDR` (default `127.0.0.1:18883`), `STREAMS_E2E_TLS_DIR` (default
+//! `MQTT_E2E_ADDR` (default `127.0.0.1:18883`, the certificate-identity
+//! listener), `MQTT_E2E_PASSWORD_ADDR` (default `127.0.0.1:18884`, the
+//! password listener), `STREAMS_E2E_TLS_DIR` (default
 //! `docker/tls/out`), and `MQTT_E2E_CONTAINER` (default
 //! `tpp-streams-mqtt-secure`) point it elsewhere. The restart test runs only
 //! with `STREAMS_E2E_RESTART=1`, because it restarts that container.
@@ -53,10 +57,28 @@ struct Event2 {
     action: String,
 }
 
+/// The test-only users of the password listener, from
+/// `docker/compose.mqtt.secure.yaml`. `docker/compose.mqtt.secure.acl` confines
+/// each to the topics under its own name.
+const APP: (&str, &str) = ("e2e-app", "e2e-app-secret");
+const OTHER: (&str, &str) = ("e2e-other", "e2e-other-secret");
+
+fn parse_addr(var: &str, default: &str) -> (String, u16) {
+    let addr = std::env::var(var).unwrap_or_else(|_| default.into());
+    let (host, port) = addr
+        .rsplit_once(':')
+        .unwrap_or_else(|| panic!("{var} is host:port"));
+    (host.to_owned(), port.parse().expect("a port number"))
+}
+
+/// The listener where the certificate's common name is the username.
 fn addr() -> (String, u16) {
-    let addr = std::env::var("MQTT_E2E_ADDR").unwrap_or_else(|_| "127.0.0.1:18883".into());
-    let (host, port) = addr.rsplit_once(':').expect("MQTT_E2E_ADDR is host:port");
-    (host.to_owned(), port.parse().expect("MQTT_E2E_ADDR port"))
+    parse_addr("MQTT_E2E_ADDR", "127.0.0.1:18883")
+}
+
+/// The listener that wants a certificate and then a username and password.
+fn password_addr() -> (String, u16) {
+    parse_addr("MQTT_E2E_PASSWORD_ADDR", "127.0.0.1:18884")
 }
 
 fn tls_dir() -> PathBuf {
@@ -101,9 +123,13 @@ fn tls(client_cert: bool, trust_ca: bool) -> Arc<ClientConfig> {
     Arc::new(config)
 }
 
-/// The connection template: the secure address, and TLS when given.
+/// The connection template: the certificate-identity address, and TLS when
+/// given.
 fn options(tls: Option<Arc<ClientConfig>>) -> MqttOptions {
-    let (host, port) = addr();
+    options_at(addr(), tls)
+}
+
+fn options_at((host, port): (String, u16), tls: Option<Arc<ClientConfig>>) -> MqttOptions {
     let mut options = MqttOptions::new("template", host, port);
     options.set_connection_timeout(5);
     if let Some(config) = tls {
@@ -131,6 +157,30 @@ async fn connect(prefix: &str) -> MqttProvider {
     MqttProvider::connect(options(Some(tls(true, true))), config(prefix))
         .await
         .expect("connect over mutual TLS")
+}
+
+/// The password listener's template, over mutual TLS, logging in as `user`
+/// with `password` when given. The provider clones it for every connection it
+/// opens, so the credentials have to survive that to reach subscribers,
+/// durable sessions, and shared subscriptions.
+fn password_options(user: Option<&str>, password: Option<&str>) -> MqttOptions {
+    let mut options = options_at(password_addr(), Some(tls(true, true)));
+    if let Some(user) = user {
+        options.set_credentials(user, password.unwrap_or_default());
+    }
+    options
+}
+
+/// A provider logged in as `user` on the password listener.
+async fn connect_as((user, password): (&str, &str), prefix: &str) -> MqttProvider {
+    MqttProvider::connect(password_options(Some(user), Some(password)), config(prefix))
+        .await
+        .unwrap_or_else(|e| panic!("connect as {user} over mutual TLS: {e}"))
+}
+
+/// A fresh prefix inside the topic tree the ACLs give `user`.
+fn fresh_for((user, _): (&str, &str), tag: &str) -> String {
+    format!("{user}/{}", fresh(tag))
 }
 
 async fn declare(streams: &MqttProvider, id: &str, subjects: &[&str]) -> Arc<dyn Manager> {
@@ -229,10 +279,174 @@ async fn tls_is_required_and_mutual() {
     streams.close().await.unwrap();
 }
 
+/// Connects to the password listener with `user` and `password`, expecting a
+/// refusal, and returns what the provider said.
+async fn refused(user: Option<&str>, password: Option<&str>) -> String {
+    match MqttProvider::connect(password_options(user, password), config("refused")).await {
+        Ok(_) => panic!("the password listener accepted user {user:?} with password {password:?}"),
+        Err(error) => error.to_string(),
+    }
+}
+
+// The password listener takes a certificate and then a login. Mosquitto
+// answers every bad login with CONNACK reason 0x87, not authorized, rather
+// than 0x86, bad username or password, so the two cannot be told apart from
+// the client, and the provider reports the broker's reason as given.
+#[tokio::test]
+async fn passwords_are_checked() {
+    let _serial = SERIAL.lock().await;
+
+    for (user, password, what) in [
+        (Some(APP.0), Some("not-the-password"), "a wrong password"),
+        (Some(APP.0), None, "a missing password"),
+        (Some(APP.0), Some(OTHER.1), "another user's password"),
+        (Some("nobody"), Some("anything"), "an unknown user"),
+        // The certificate alone is the whole login on 18883, and none here.
+        (None, None, "no credentials at all"),
+    ] {
+        let error = refused(user, password).await;
+        assert!(
+            error.contains("NotAuthorized"),
+            "{what} was refused, but not as not authorized: {error}"
+        );
+    }
+
+    // Without a client certificate the right password never gets that far:
+    // the TLS handshake fails first.
+    let mut no_cert = options_at(password_addr(), Some(tls(false, true)));
+    no_cert.set_credentials(APP.0, APP.1);
+    assert!(
+        MqttProvider::connect(no_cert, config("nocert"))
+            .await
+            .is_err(),
+        "the password listener accepted a client without a certificate"
+    );
+
+    // The right password over mutual TLS works end to end.
+    let streams = connect_as(APP, &fresh_for(APP, "login")).await;
+    let manager = declare(&streams, "login", &[SUBJECT]).await;
+    let mut subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    let id = manager
+        .publish(SUBJECT, event("ada", "login"), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut subscription).await.id(), id);
+    drop(subscription);
+    streams.close().await.unwrap();
+}
+
+/// Waits `window` and asserts nothing arrived on `subscription`.
+async fn hears_nothing(subscription: &mut Subscription, window: Duration, what: &str) {
+    if let Ok(message) = timeout(window, subscription.next()).await {
+        panic!("{what} received {message:?}");
+    }
+}
+
+// Each password user is confined to its own topic tree, and the ACLs are the
+// password listener's alone: the certificate identity on 18883 is not
+// confined.
+#[tokio::test]
+async fn acls_confine_each_user() {
+    let _serial = SERIAL.lock().await;
+    let theirs = fresh_for(OTHER, "acl");
+    const QUIET: Duration = Duration::from_millis(1500);
+
+    // e2e-other, in its own tree, sees its own messages.
+    let owner = connect_as(OTHER, &theirs).await;
+    let owned = declare(&owner, "acl", &[SUBJECT]).await;
+    let mut owners_view = owned.subscribe(SUBJECT, &Options::default()).await.unwrap();
+
+    // e2e-app aimed at e2e-other's tree: the same topics, its own login.
+    // Its durable session expires a second after it leaves, rather than
+    // lingering to move the broker's counts under a later test.
+    let intruder = MqttProvider::connect(
+        password_options(Some(APP.0), Some(APP.1)),
+        MqttConfig {
+            session_expiry: Duration::from_secs(1),
+            ..config(&theirs)
+        },
+    )
+    .await
+    .expect("connect as e2e-app");
+    let trespass = declare(&intruder, "acl", &[SUBJECT]).await;
+
+    // Publishing outside its tree is refused outright: Mosquitto answers the
+    // QoS 1 PUBLISH with PUBACK reason 0x87, and the provider fails the call
+    // with that reason rather than reporting it published.
+    let error = trespass
+        .publish(SUBJECT, event("mallory", "write"), &Options::default())
+        .await
+        .expect_err("a publish outside the user's topics was acknowledged")
+        .to_string();
+    assert!(error.contains("NotAuthorized"), "{error}");
+    hears_nothing(&mut owners_view, QUIET, "the owner, of a refused publish").await;
+
+    // Subscribing outside its tree is not refused: Mosquitto's acl_file
+    // grants the SUBACK and enforces read access per message instead. So the
+    // subscription, a plain one, a shared one, and a durable one alike, is
+    // made, and hears nothing of what is published there.
+    let mut plain = trespass
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .expect("Mosquitto grants the SUBACK; it denies each message instead");
+    let mut shared = trespass
+        .subscribe(SUBJECT, &Options::default().with_group(fresh("spies")))
+        .await
+        .expect("a shared subscription is granted the same way");
+    let mut durable = as_durable(trespass.as_ref())
+        .unwrap()
+        .consume(SUBJECT, &fresh("spy"), &Options::default())
+        .await
+        .expect("a durable subscription is granted the same way");
+    let id = owned
+        .publish(SUBJECT, event("ada", "secret"), &Options::default())
+        .await
+        .unwrap();
+    // It was published: its owner has it.
+    assert_eq!(next(&mut owners_view).await.id(), id);
+    hears_nothing(
+        &mut plain,
+        QUIET,
+        "a subscription outside the user's topics",
+    )
+    .await;
+    hears_nothing(&mut shared, QUIET, "a shared subscription outside them").await;
+    if let Ok(delivery) = timeout(QUIET, durable.next()).await {
+        panic!("a durable consumer outside the user's topics received {delivery:?}");
+    }
+    drop((plain, shared, durable));
+    intruder.close().await.unwrap();
+
+    // The certificate identity on 18883 is under no ACL: the same topics are
+    // open to it, both ways.
+    let identity = connect(&theirs).await;
+    let unconfined = declare(&identity, "acl", &[SUBJECT]).await;
+    let mut identitys_view = unconfined
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    let id = unconfined
+        .publish(SUBJECT, event("cert", "write"), &Options::default())
+        .await
+        .expect("the certificate identity is not confined");
+    assert_eq!(next(&mut identitys_view).await.id(), id);
+    assert_eq!(next(&mut owners_view).await.id(), id);
+    drop(identitys_view);
+    identity.close().await.unwrap();
+
+    drop(owners_view);
+    owner.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn lifecycle() {
     let _serial = SERIAL.lock().await;
-    let streams = connect(&fresh("life")).await;
+    // As the password user: its subscription is a connection of its own, which
+    // logs in with the template's credentials.
+    let streams = connect_as(APP, &fresh_for(APP, "life")).await;
 
     let explicit = streams
         .create(Stream {
@@ -578,7 +792,9 @@ async fn durable_ack_nak_and_redelivery() {
 #[tokio::test]
 async fn groups_share_the_subject() {
     let _serial = SERIAL.lock().await;
-    let streams = connect(&fresh("group")).await;
+    // As the password user, so every member, durable or not, is a connection
+    // that has to log in, and a shared subscription the ACLs have to allow.
+    let streams = connect_as(APP, &fresh_for(APP, "group")).await;
     let manager = declare(&streams, "group", &[SUBJECT]).await;
     let durable = as_durable(manager.as_ref()).unwrap();
     const TOTAL: usize = 8;
@@ -690,16 +906,16 @@ impl SysWatch {
         least.unwrap_or_else(|| panic!("the broker never published {topic}"))
     }
 
-    async fn reaches(&self, topic: &str, want: u64) {
+    async fn reaches(&self, topic: &str, want: u64) -> Result<(), String> {
         let mut last = None;
         for _ in 0..150 {
             last = self.get(topic);
             if last == Some(want) {
-                return;
+                return Ok(());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        panic!("{topic} stayed at {last:?}, expected {want}");
+        Err(format!("{topic} stayed at {last:?}, expected {want}"))
     }
 }
 
@@ -734,31 +950,17 @@ async fn dropping_leaves_nothing_on_the_broker() {
     let watch = SysWatch::start().await;
     let manager = declare(&streams, "cleanup", &[SUBJECT]).await;
 
-    let clients = watch.baseline(CONNECTED).await;
-    let subscriptions = watch.baseline(SUBSCRIPTIONS).await;
-
-    let subscription = manager
-        .subscribe(SUBJECT, &Options::default())
-        .await
-        .unwrap();
-    watch.reaches(CONNECTED, clients + 1).await;
-    watch.reaches(SUBSCRIPTIONS, subscriptions + 1).await;
-    drop(subscription);
-    watch.reaches(CONNECTED, clients).await;
-    watch.reaches(SUBSCRIPTIONS, subscriptions).await;
-
-    let durable = as_durable(manager.as_ref()).unwrap();
-    let deliveries = durable
-        .consume(SUBJECT, &fresh("kept"), &Options::default())
-        .await
-        .unwrap();
-    watch.reaches(CONNECTED, clients + 1).await;
-    watch.reaches(SUBSCRIPTIONS, subscriptions + 1).await;
-    drop(deliveries);
-    watch.reaches(CONNECTED, clients).await;
-    // The session, and its subscription, outlive the connection.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(watch.get(SUBSCRIPTIONS), Some(subscriptions + 1));
+    // The counts are the whole broker's. Sessions earlier tests, or earlier
+    // runs, left behind expire when they will, each taking a subscription
+    // with it, so a measurement one of them lands in is taken again.
+    let mut failures = Vec::new();
+    for _ in 0..3 {
+        match subscriptions_come_and_go(&watch, manager.as_ref()).await {
+            Ok(()) => break,
+            Err(failure) => failures.push(failure),
+        }
+    }
+    assert!(failures.len() < 3, "every measurement failed: {failures:?}");
 
     drop(manager);
     streams.delete("cleanup").await.unwrap();
@@ -772,6 +974,44 @@ async fn dropping_leaves_nothing_on_the_broker() {
     let open = watch.baseline(CONNECTED).await;
     streams.close().await.unwrap();
     watch.falls_to(CONNECTED, open - 1).await;
+}
+
+/// One measurement of what subscribing and dropping leave on the broker.
+async fn subscriptions_come_and_go(watch: &SysWatch, manager: &dyn Manager) -> Result<(), String> {
+    let clients = watch.baseline(CONNECTED).await;
+    let subscriptions = watch.baseline(SUBSCRIPTIONS).await;
+
+    let subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    watch.reaches(CONNECTED, clients + 1).await?;
+    watch.reaches(SUBSCRIPTIONS, subscriptions + 1).await?;
+    drop(subscription);
+    watch.reaches(CONNECTED, clients).await?;
+    watch.reaches(SUBSCRIPTIONS, subscriptions).await?;
+
+    let durable = as_durable(manager).unwrap();
+    let deliveries = durable
+        .consume(SUBJECT, &fresh("kept"), &Options::default())
+        .await
+        .unwrap();
+    watch.reaches(CONNECTED, clients + 1).await?;
+    watch.reaches(SUBSCRIPTIONS, subscriptions + 1).await?;
+    drop(deliveries);
+    watch.reaches(CONNECTED, clients).await?;
+    // The session, and its subscription, outlive the connection. Read as the
+    // least over a few seconds, as the baseline was, so the healthcheck's own
+    // passing subscription is not counted.
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let kept = watch.baseline(SUBSCRIPTIONS).await;
+    if kept != subscriptions + 1 {
+        return Err(format!(
+            "{SUBSCRIPTIONS} is {kept} after a durable consumer left, expected {}",
+            subscriptions + 1
+        ));
+    }
+    Ok(())
 }
 
 /// Restarts the broker container and waits for it to report healthy again.
@@ -808,9 +1048,11 @@ async fn a_session_survives_a_broker_restart() {
         return;
     }
     let _serial = SERIAL.lock().await;
-    let prefix = fresh("restart");
+    // As the password user: the durable session logs in, and so does the
+    // publisher when it redials the restarted broker.
+    let prefix = fresh_for(APP, "restart");
     let consumer = fresh("ledger");
-    let streams = connect(&prefix).await;
+    let streams = connect_as(APP, &prefix).await;
     let manager = declare(&streams, "ledger", &[SUBJECT]).await;
     let durable = as_durable(manager.as_ref()).unwrap();
 
@@ -863,7 +1105,7 @@ async fn a_session_survives_a_broker_restart() {
     streams.close().await.unwrap();
 
     // A new process: a new provider, the same declaration, the same name.
-    let streams = connect(&prefix).await;
+    let streams = connect_as(APP, &prefix).await;
     let manager = declare(&streams, "ledger", &[SUBJECT]).await;
     let durable = as_durable(manager.as_ref()).unwrap();
     let mut resumed = durable

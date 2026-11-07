@@ -14,7 +14,7 @@ use crate::{
     provider::{batch_result, check_batch, new_id, pack, prefetch, publish_id, unpack},
 };
 
-use super::{Inner, fail, keys::Kind};
+use super::{Inner, Replay, fail, keys::Kind};
 
 /// Publishes to and subscribes from one immediate or scheduled stream.
 ///
@@ -121,10 +121,14 @@ impl PubSubManager {
 /// Reads a scheduled frame and removes it in one command, so one expiry
 /// delivers one message even with several subscribers racing for it.
 async fn claim(inner: &Inner, subject: &str, id: &str) -> Result<Option<Message>> {
-    let mut conn = inner.conn().await?;
-    let raw: Option<Vec<u8>> = redis::cmd("GETDEL")
-        .arg(inner.keys.payload(id))
-        .query_async(&mut conn)
+    // Safe to repeat: GETDEL hands a payload to one caller at most, so a
+    // repeat after a lost reply finds it already claimed and delivers nothing,
+    // which is what losing the reply had already cost.
+    let raw: Option<Vec<u8>> = inner
+        .query(
+            redis::cmd("GETDEL").arg(inner.keys.payload(id)),
+            Replay::Idempotent,
+        )
         .await
         .map_err(fail(format!("redis: cannot claim scheduled message {id}")))?;
     raw.map(|raw| unpack(&inner.registry, subject, raw))
@@ -211,13 +215,16 @@ impl Publisher for PubSubManager {
         let delay = self.delay(opts)?;
         let id = publish_id(opts);
         let frame = pack(&id, &payload);
-        let mut conn = self.inner.conn().await?;
 
         if let Some(ttl) = delay {
             let mut pipe = redis::pipe();
             pipe.atomic();
             self.queue_schedule(&mut pipe, subject, &id, frame, ttl);
-            pipe.query_async::<()>(&mut conn)
+            // Once: a repeat after the first had landed restarts the timer,
+            // and one that lands after a short timer already fired schedules
+            // the message a second time.
+            self.inner
+                .query_pipe::<()>(&pipe, Replay::Once)
                 .await
                 .map_err(fail(format!("redis: cannot schedule on {subject:?}")))?;
             tracing::debug!(subject, id, ?ttl, "scheduled");
@@ -227,10 +234,13 @@ impl Publisher for PubSubManager {
         // Exactly once. Subscribe confirms its subscription before returning,
         // so there is no window a second send would cover; it would only
         // deliver the message twice.
-        redis::cmd("PUBLISH")
-            .arg(self.inner.keys.channel(&self.stream.id, subject))
-            .arg(frame)
-            .query_async::<()>(&mut conn)
+        self.inner
+            .query::<()>(
+                redis::cmd("PUBLISH")
+                    .arg(self.inner.keys.channel(&self.stream.id, subject))
+                    .arg(frame),
+                Replay::Once,
+            )
             .await
             .map_err(fail(format!("redis: cannot publish on {subject:?}")))?;
         tracing::debug!(subject, id, "published");
@@ -309,15 +319,13 @@ impl Batch for PubSubManager {
             }
         }
 
-        let sent = match self.inner.conn().await {
-            Ok(mut conn) => pipe
-                .query_async::<()>(&mut conn)
-                .await
-                .map_err(fail(format!(
-                    "redis: cannot publish a batch on {subject:?}"
-                ))),
-            Err(error) => Err(error),
-        };
+        let sent = self
+            .inner
+            .query_pipe::<()>(&pipe, Replay::Once)
+            .await
+            .map_err(fail(format!(
+                "redis: cannot publish a batch on {subject:?}"
+            )));
         // A pipeline reports one failure for the lot, so every entry carries
         // it; some may still have landed, which is what at-least-once allows.
         let failures = match sent {

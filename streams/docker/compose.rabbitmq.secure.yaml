@@ -6,7 +6,11 @@
 #   docker compose -p tpp-streams-e2e-rabbitmq -f streams/docker/compose.rabbitmq.secure.yaml down -v
 #
 # AMQPS on 127.0.0.1:15671 only; the plaintext listener is disabled and a
-# client certificate is required (compose.rabbitmq.secure.conf). The node's
+# client certificate is required (compose.rabbitmq.secure.conf). The
+# certificate is also the login: SASL EXTERNAL (rabbitmq_auth_mechanism_ssl,
+# compose.rabbitmq.secure.enabled_plugins) is the only mechanism offered, and
+# its CN names the one user, which compose.rabbitmq.secure.definitions.json
+# creates without a password. There is no guest. The node's
 # data directory is a named volume and the hostname and node name are fixed,
 # so durable exchanges, durable queues, and persistent messages are found
 # again after `docker restart tpp-streams-rabbitmq-secure`.
@@ -20,11 +24,14 @@ services:
     user: rabbitmq
     environment:
       RABBITMQ_NODENAME: rabbit@rabbitmq
+      RABBITMQ_ENABLED_PLUGINS_FILE: /etc/rabbitmq/enabled_plugins.secure
     ports:
       - "127.0.0.1:15671:5671" # AMQPS, client certificate required
     volumes:
       - ./tls/out:/certs:ro
       - ./compose.rabbitmq.secure.conf:/etc/rabbitmq/conf.d/20-secure.conf:ro
+      - ./compose.rabbitmq.secure.definitions.json:/etc/rabbitmq/definitions.json:ro
+      - ./compose.rabbitmq.secure.enabled_plugins:/etc/rabbitmq/enabled_plugins.secure:ro
       - rabbitmq-data:/var/lib/rabbitmq
     healthcheck:
       test: ["CMD-SHELL", "rabbitmq-diagnostics -q check_running && rabbitmq-diagnostics -q check_port_listener 5671"]

@@ -1,10 +1,15 @@
-//! Both NATS providers end to end over mutual TLS, against a server that keeps
-//! JetStream on disk.
+//! Both NATS providers end to end over mutual TLS with authentication, against
+//! a server that keeps JetStream on disk.
 //!
 //! Start it with
 //! `docker compose -p tpp-streams-e2e-nats -f streams/docker/compose.nats.secure.yaml up -d --wait`.
-//! `NATS_E2E_URL` overrides the default `tls://127.0.0.1:14223` and
+//! `NATS_E2E_URL` overrides the default `tls://127.0.0.1:14223` (mTLS plus a
+//! password or NKey), `NATS_E2E_CERTMAP_URL` the default
+//! `tls://127.0.0.1:14224` (mTLS where the certificate is the user), and
 //! `NATS_E2E_CERTS` the certificate directory (default `docker/tls/out`).
+//!
+//! Every user is limited to `e2e.>` plus what JetStream needs, so every
+//! subject here starts with `e2e.`.
 //!
 //! The broker-restart test runs only with `STREAMS_E2E_RESTART=1`, because it
 //! restarts the `tpp-streams-nats-secure` container. The other tests hold a
@@ -17,7 +22,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use async_nats::{ConnectOptions, jetstream::stream::StorageType};
+use async_nats::{
+    ConnectErrorKind, ConnectOptions, Event as NatsEvent, jetstream::stream::StorageType,
+};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use streams::{
@@ -34,6 +41,15 @@ use tokio::{
 
 const CONTAINER: &str = "tpp-streams-nats-secure";
 const WITHIN: Duration = Duration::from_secs(5);
+
+/// The test-only password user in docker/compose.nats.secure.conf.
+const PASSWORD_USER: &str = "e2e-password";
+const PASSWORD: &str = "e2e-test-only-password";
+
+/// Shortened JetStream settings, so redelivery and cleanup happen within a
+/// test rather than after the 30-second defaults.
+const ACK_WAIT: Duration = Duration::from_secs(1);
+const INACTIVE: Duration = Duration::from_secs(2);
 
 /// Readers are ordinary tests; the restart test is the one writer.
 static GATE: RwLock<()> = RwLock::const_new(());
@@ -54,6 +70,10 @@ fn event(user: &str) -> Payload {
 
 fn url() -> String {
     std::env::var("NATS_E2E_URL").unwrap_or_else(|_| "tls://127.0.0.1:14223".into())
+}
+
+fn certmap_url() -> String {
+    std::env::var("NATS_E2E_CERTMAP_URL").unwrap_or_else(|_| "tls://127.0.0.1:14224".into())
 }
 
 /// `host:port` from the URL, for the raw plaintext probe.
@@ -79,29 +99,78 @@ fn trusting() -> ConnectOptions {
         .connection_timeout(WITHIN)
 }
 
-/// Mutual TLS: the test CA plus the client certificate the server requires.
-async fn client() -> async_nats::Client {
+/// Mutual TLS: the test CA plus the client certificate the server requires,
+/// with no credentials yet.
+fn mtls() -> ConnectOptions {
     let dir = certs();
-    trusting()
-        .add_client_certificate(dir.join("client.crt"), dir.join("client.key"))
-        .connect(url())
-        .await
-        .unwrap_or_else(|error| {
-            panic!(
-                "no NATS over mTLS at {} ({error}); see docker/compose.nats.secure.yaml",
-                url()
-            )
-        })
+    trusting().add_client_certificate(dir.join("client.crt"), dir.join("client.key"))
+}
+
+fn with_password(options: ConnectOptions) -> ConnectOptions {
+    options.user_and_password(PASSWORD_USER.into(), PASSWORD.into())
+}
+
+/// The test-only NKey seed: the one line of docker/compose.nats.secure.nkey
+/// that is not a comment.
+fn seed() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/compose.nats.secure.nkey");
+    std::fs::read_to_string(&path)
+        .unwrap()
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("SU"))
+        .expect("a user seed")
+        .to_owned()
+}
+
+async fn connect(options: ConnectOptions, url: String) -> async_nats::Client {
+    options.connect(&url).await.unwrap_or_else(|error| {
+        panic!("no NATS over mTLS at {url} ({error}); see docker/compose.nats.secure.yaml")
+    })
+}
+
+/// Mutual TLS as the password user.
+async fn client() -> async_nats::Client {
+    connect(with_password(mtls()), url()).await
+}
+
+/// Mutual TLS as the NKey user.
+async fn nkey_client() -> async_nats::Client {
+    connect(mtls().nkey(seed()), url()).await
+}
+
+/// Mutual TLS where the certificate is the user.
+async fn certmap_client() -> async_nats::Client {
+    connect(mtls(), certmap_url()).await
+}
+
+/// Expects the server to refuse `options` as unauthorized.
+async fn unauthorized(options: ConnectOptions) {
+    let attempt = tokio::time::timeout(Duration::from_secs(10), options.connect(url())).await;
+    match attempt {
+        Ok(Err(error)) => assert_eq!(
+            error.kind(),
+            ConnectErrorKind::AuthorizationViolation,
+            "{error}"
+        ),
+        Ok(Ok(_)) => panic!("the server let the client in"),
+        Err(_) => panic!("the server neither admitted nor refused the client"),
+    }
 }
 
 async fn jetstream(nc: async_nats::Client) -> JetStreamProvider {
-    JetStreamProvider::new(nc, NatsConfig::default())
+    jetstream_with(nc, NatsConfig::default()).await
+}
+
+async fn jetstream_with(nc: async_nats::Client, config: NatsConfig) -> JetStreamProvider {
+    JetStreamProvider::new(nc, config)
         .await
         .expect("the server has JetStream enabled")
 }
 
+/// A fresh subject (or id) under `e2e.`, the only subjects the users may use.
 fn unique(prefix: &str) -> String {
-    format!("{prefix}.{}", provider::new_id())
+    format!("e2e.{prefix}.{}", provider::new_id())
 }
 
 fn subjects(list: &[&str]) -> Vec<String> {
@@ -161,6 +230,7 @@ async fn plaintext_is_refused() {
     assert!(info.starts_with("INFO "), "{info}");
     assert!(info.contains(r#""tls_required":true"#), "{info}");
     assert!(info.contains(r#""tls_verify":true"#), "{info}");
+    assert!(info.contains(r#""auth_required":true"#), "{info}");
 
     let _ = socket
         .write_all(b"CONNECT {\"verbose\":false,\"pedantic\":false}\r\nPING\r\n")
@@ -192,7 +262,7 @@ async fn an_unknown_server_certificate_is_refused() {
 async fn tls_without_a_client_certificate_is_refused() {
     let _gate = GATE.read().await;
     let attempt = async {
-        let nc = trusting().connect(url()).await?;
+        let nc = with_password(trusting()).connect(url()).await?;
         nc.flush().await?;
         Ok::<_, Box<dyn std::error::Error + Send + Sync>>(())
     };
@@ -210,7 +280,147 @@ async fn mutual_tls_connects() {
     nc.flush().await.unwrap();
     let info = nc.server_info();
     assert!(info.tls_required);
+    assert!(info.auth_required);
     assert!(info.jetstream);
+}
+
+// ---------------------------------------------------------- authentication
+
+/// The client certificate admits the connection; it is not a user on this
+/// port, so it still needs credentials.
+#[tokio::test]
+async fn a_certificate_without_credentials_is_refused() {
+    let _gate = GATE.read().await;
+    unauthorized(mtls()).await;
+}
+
+#[tokio::test]
+async fn a_wrong_password_is_refused() {
+    let _gate = GATE.read().await;
+    unauthorized(mtls().user_and_password(PASSWORD_USER.into(), "not-the-password".into())).await;
+    unauthorized(mtls().user_and_password("nobody".into(), PASSWORD.into())).await;
+}
+
+/// A well-formed NKey that is not a user: it signs the nonce correctly, and
+/// the server still has no such key.
+#[tokio::test]
+async fn an_unknown_nkey_is_refused() {
+    let _gate = GATE.read().await;
+    let stranger = nkeys::KeyPair::new_user().seed().unwrap();
+    assert_ne!(stranger, seed());
+    unauthorized(mtls().nkey(stranger)).await;
+}
+
+#[tokio::test]
+async fn an_nkey_user_connects() {
+    let _gate = GATE.read().await;
+    let nc = nkey_client().await;
+    nc.flush().await.unwrap();
+    assert!(nc.server_info().auth_required);
+}
+
+/// With verify_and_map the certificate's subject is the user.
+#[tokio::test]
+async fn a_certificate_mapped_user_connects() {
+    let _gate = GATE.read().await;
+    let nc = certmap_client().await;
+    nc.flush().await.unwrap();
+    let info = nc.server_info();
+    assert!(info.tls_required && info.auth_required && info.jetstream);
+}
+
+/// Every user may publish and subscribe under `e2e.` only. Outside it the
+/// server refuses: a core publish or subscribe is answered with a permissions
+/// violation, and a JetStream publish is never stored, so its ack never comes
+/// and the publish fails.
+#[tokio::test]
+async fn permissions_restrict_what_a_user_may_publish() {
+    let _gate = GATE.read().await;
+    let (tx, mut violations) = tokio::sync::mpsc::unbounded_channel();
+    let nc = connect(
+        with_password(mtls()).event_callback(move |event| {
+            let tx = tx.clone();
+            async move {
+                if let NatsEvent::ServerError(error) = event {
+                    let _ = tx.send(error.to_string().to_lowercase());
+                }
+            }
+        }),
+        url(),
+    )
+    .await;
+    let mut violation = async || {
+        tokio::time::timeout(WITHIN, violations.recv())
+            .await
+            .expect("the server said nothing")
+            .unwrap()
+    };
+
+    // Core NATS: the client sends, the server refuses.
+    let forbidden = format!("forbidden.{}", provider::new_id());
+    let core = NatsProvider::new(nc.clone(), NatsConfig::default());
+    let s = core
+        .create(Stream {
+            subjects: subjects(&[&forbidden]),
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let m = core.bind(&s.id).await.unwrap();
+    m.publish(&forbidden, event("x"), &Options::default())
+        .await
+        .unwrap();
+    nc.flush().await.unwrap();
+    let said = violation().await;
+    assert!(said.contains("permissions violation for publish"), "{said}");
+    assert!(said.contains(&forbidden.to_lowercase()), "{said}");
+    let _sub = m.subscribe(&forbidden, &Options::default()).await.unwrap();
+    nc.flush().await.unwrap();
+    let said = violation().await;
+    assert!(
+        said.contains("permissions violation for subscription"),
+        "{said}"
+    );
+    core.delete(&s.id).await.unwrap();
+
+    // The same user is served under e2e., on the same connection.
+    let allowed = unique("allowed");
+    let s = core
+        .create(Stream {
+            subjects: subjects(&[&allowed]),
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let m = core.bind(&s.id).await.unwrap();
+    let mut sub = m.subscribe(&allowed, &Options::default()).await.unwrap();
+    let id = m
+        .publish(&allowed, event("ok"), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut sub).await.id(), id);
+    core.delete(&s.id).await.unwrap();
+
+    // JetStream: declaring the stream is a call to the JetStream API, which
+    // the user may make; publishing into it is not.
+    let forbidden = format!("forbidden.{}", provider::new_id());
+    let p = jetstream(nc.clone()).await;
+    let s = p
+        .create(Stream {
+            subjects: subjects(&[&forbidden]),
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let m = p.bind(&s.id).await.unwrap();
+    let result = m.publish(&forbidden, event("x"), &Options::default()).await;
+    assert!(result.is_err(), "a forbidden publish was acked: {result:?}");
+    let said = violation().await;
+    assert!(said.contains("permissions violation for publish"), "{said}");
+    let js = async_nats::jetstream::new(nc.clone());
+    let mut raw = js.get_stream(&s.id).await.unwrap();
+    assert_eq!(raw.info().await.unwrap().state.messages, 0);
+    p.delete(&s.id).await.unwrap();
 }
 
 // ---------------------------------------------------------------- core NATS
@@ -410,9 +620,24 @@ async fn core_queue_groups_share_and_fan_out() {
 // ---------------------------------------------------------------- JetStream
 
 #[tokio::test]
-async fn jetstream_full_lifecycle_over_tls() {
+async fn jetstream_full_lifecycle_as_a_password_user() {
     let _gate = GATE.read().await;
-    let nc = client().await;
+    jetstream_lifecycle(client().await).await;
+}
+
+#[tokio::test]
+async fn jetstream_full_lifecycle_as_an_nkey_user() {
+    let _gate = GATE.read().await;
+    jetstream_lifecycle(nkey_client().await).await;
+}
+
+#[tokio::test]
+async fn jetstream_full_lifecycle_as_a_certificate_mapped_user() {
+    let _gate = GATE.read().await;
+    jetstream_lifecycle(certmap_client().await).await;
+}
+
+async fn jetstream_lifecycle(nc: async_nats::Client) {
     let js = async_nats::jetstream::new(nc.clone());
     let p = jetstream(nc.clone()).await;
     let subject = unique("user.created");
@@ -650,6 +875,172 @@ async fn jetstream_full_lifecycle_over_tls() {
     assert!(!names.contains(&updated.id) && !names.contains(&explicit.id));
 }
 
+// ------------------------------------------------------- JetStream settings
+
+/// Unset, every setting is the server's (or async-nats') own default, as
+/// before they existed.
+#[tokio::test]
+async fn default_settings_are_the_servers() {
+    let _gate = GATE.read().await;
+    let nc = client().await;
+    let p = jetstream(nc.clone()).await;
+    let subject = unique("defaults");
+    let s = p
+        .create(Stream {
+            subjects: subjects(&[&subject]),
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let m = p.bind(&s.id).await.unwrap();
+    let raw = async_nats::jetstream::new(nc)
+        .get_stream(&s.id)
+        .await
+        .unwrap();
+
+    let sub = m.subscribe(&subject, &Options::default()).await.unwrap();
+    let ordered = only_consumer(&raw).await;
+    assert_eq!(ordered.config.inactive_threshold, Duration::from_secs(30));
+    assert_eq!(ordered.config.durable_name, None);
+    drop(sub);
+
+    let deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(&subject, "defaults", &Options::default())
+        .await
+        .unwrap();
+    let durable = raw.consumer_info("defaults").await.unwrap();
+    assert_eq!(durable.config.ack_wait, Duration::from_secs(30));
+    assert_eq!(durable.config.max_deliver, -1);
+    drop(deliveries);
+    p.delete(&s.id).await.unwrap();
+}
+
+async fn consumers(
+    raw: &async_nats::jetstream::stream::Stream,
+) -> Vec<async_nats::jetstream::consumer::Info> {
+    raw.consumers().map(Result::unwrap).collect().await
+}
+
+async fn only_consumer(
+    raw: &async_nats::jetstream::stream::Stream,
+) -> async_nats::jetstream::consumer::Info {
+    let mut all = consumers(raw).await;
+    assert_eq!(all.len(), 1, "{all:?}");
+    all.pop().unwrap()
+}
+
+/// `ack_wait` brings back what was left unsettled, and `max_deliver` stops
+/// after that many attempts however the last one ended.
+#[tokio::test]
+async fn ack_wait_and_max_deliver_bound_redelivery() {
+    let _gate = GATE.read().await;
+    let nc = client().await;
+    let config = NatsConfig::default()
+        .with_ack_wait(ACK_WAIT)
+        .with_max_deliver(3);
+    let p = jetstream_with(nc.clone(), config).await;
+    let subject = unique("bounded");
+    let s = p
+        .create(Stream {
+            subjects: subjects(&[&subject]),
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let m = p.bind(&s.id).await.unwrap();
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(&subject, "bounded", &Options::default().with_prefetch(1))
+        .await
+        .unwrap();
+    let raw = async_nats::jetstream::new(nc)
+        .get_stream(&s.id)
+        .await
+        .unwrap();
+    let info = raw.consumer_info("bounded").await.unwrap();
+    assert_eq!(info.config.ack_wait, ACK_WAIT);
+    assert_eq!(info.config.max_deliver, 3);
+
+    let id = m
+        .publish(&subject, event("retry"), &Options::default())
+        .await
+        .unwrap();
+    // A nak returns it at once.
+    let d = next(&mut deliveries).await;
+    assert_eq!((d.id(), d.attempt()), (id.as_str(), 1));
+    d.nak().await.unwrap();
+    // Left unsettled, it returns once the ack wait runs out.
+    let d = next(&mut deliveries).await;
+    assert_eq!((d.id(), d.attempt()), (id.as_str(), 2));
+    let left = Instant::now();
+    drop(d);
+    let d = next_within(&mut deliveries, ACK_WAIT * 5).await;
+    let waited = left.elapsed();
+    assert_eq!((d.id(), d.attempt()), (id.as_str(), 3));
+    assert!(waited >= ACK_WAIT / 2, "redelivered after {waited:?}");
+    // The third attempt is the last, nak or not.
+    d.nak().await.unwrap();
+    nothing(&mut deliveries, ACK_WAIT * 3).await;
+    drop(deliveries);
+    p.delete(&s.id).await.unwrap();
+}
+
+/// The ordered consumer behind a subscription outlives it only by the
+/// inactive threshold.
+#[tokio::test]
+async fn a_dropped_subscription_releases_its_ordered_consumer() {
+    let _gate = GATE.read().await;
+    let nc = client().await;
+    let p = jetstream_with(
+        nc.clone(),
+        NatsConfig::default().with_inactive_threshold(INACTIVE),
+    )
+    .await;
+    let subject = unique("ordered");
+    let s = p
+        .create(Stream {
+            subjects: subjects(&[&subject]),
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let m = p.bind(&s.id).await.unwrap();
+    let raw = async_nats::jetstream::new(nc)
+        .get_stream(&s.id)
+        .await
+        .unwrap();
+    assert!(consumers(&raw).await.is_empty());
+
+    let mut sub = m.subscribe(&subject, &Options::default()).await.unwrap();
+    let id = m
+        .publish(&subject, event("ordered"), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut sub).await.id(), id);
+    let ordered = only_consumer(&raw).await;
+    assert_eq!(ordered.config.inactive_threshold, INACTIVE);
+    assert_eq!(ordered.config.durable_name, None);
+
+    // Still in use: the consumer outlives the threshold while it is pulled.
+    tokio::time::sleep(INACTIVE * 2).await;
+    assert_eq!(only_consumer(&raw).await.name, ordered.name);
+
+    drop(sub);
+    let dropped = Instant::now();
+    let deadline = INACTIVE + Duration::from_secs(3);
+    while !consumers(&raw).await.is_empty() {
+        assert!(
+            dropped.elapsed() < deadline,
+            "{} outlived its subscription by {:?}",
+            ordered.name,
+            dropped.elapsed()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    p.delete(&s.id).await.unwrap();
+}
+
 // ---------------------------------------------------------------- restart
 
 fn docker(args: &[&str]) -> String {
@@ -690,9 +1081,10 @@ async fn jetstream_survives_a_broker_restart() {
 
     let subject = unique("durable.orders");
     let consumer = "restart-workers";
+    let fast = || NatsConfig::default().with_ack_wait(ACK_WAIT);
     let (stream_id, acked, inflight, queued) = {
         let nc = client().await;
-        let p = jetstream(nc.clone()).await;
+        let p = jetstream_with(nc.clone(), fast()).await;
         let s = p
             .create(Stream {
                 name: "durable".into(),
@@ -742,7 +1134,7 @@ async fn jetstream_survives_a_broker_restart() {
     wait_healthy().await;
 
     let nc = client().await;
-    let p = jetstream(nc.clone()).await;
+    let p = jetstream_with(nc.clone(), fast()).await;
     let s = p.get(&stream_id).await.expect("the stream survived");
     assert_eq!(s.name, "durable");
     let m = p.bind(&stream_id).await.unwrap();
@@ -753,11 +1145,19 @@ async fn jetstream_survives_a_broker_restart() {
         .unwrap();
 
     // The never-delivered one comes at once; the in-flight one once its ack
-    // wait (JetStream's default 30s) runs out, as a second attempt. The acked
-    // one never comes back.
+    // wait (shortened to ACK_WAIT, and kept across the restart) runs out, as a
+    // second attempt. The acked one never comes back.
+    let info = async_nats::jetstream::new(nc.clone())
+        .get_stream(&stream_id)
+        .await
+        .unwrap()
+        .consumer_info(consumer)
+        .await
+        .unwrap();
+    assert_eq!(info.config.ack_wait, ACK_WAIT);
     let mut seen = Vec::new();
     while seen.len() < 2 {
-        let d = next_within(&mut deliveries, Duration::from_secs(45)).await;
+        let d = next_within(&mut deliveries, ACK_WAIT + WITHIN).await;
         assert_ne!(d.id(), acked, "an acked message was redelivered");
         if d.id() == inflight {
             assert!(d.attempt() >= 2, "{d:?}");
