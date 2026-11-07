@@ -137,3 +137,10 @@ required-features = ["live-tests", "tls", "nats"]
 [[test]]
 name = "rabbitmq_e2e"
 required-features = ["live-tests", "tls", "rabbitmq"]
+
+# Throughput and latency across every backend; see benches/README.md.
+[[bench]]
+name = "throughput"
+path = "benches/throughput/main.rs"
+harness = false
+required-features = ["live-tests", "protobuf"]
