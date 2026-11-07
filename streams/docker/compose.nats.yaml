@@ -1,0 +1,32 @@
+# A single NATS server with JetStream, for tests/nats_live.rs and examples/nats.rs.
+#
+#   docker compose -f streams/docker/compose.nats.yaml up -d --wait
+#   NATS_URL=nats://127.0.0.1:14222 cargo test -p tpp-streams --features nats,live-tests --test nats_live
+#
+# Host ports are in the 14xxx range so this can run beside a NATS already
+# listening on 4222.
+services:
+  nats:
+    # The alpine image, because the default one is built from scratch and has
+    # no shell or wget for the healthcheck to run.
+    image: nats:2.11-alpine
+    container_name: tpp-streams-nats
+    ports:
+      - "127.0.0.1:14222:4222" # clients
+      - "127.0.0.1:14822:8222" # monitoring
+    # JetStream is off by default, and without it JetStreamProvider::new fails
+    # at startup and Durable and Positioned have nothing behind them.
+    command:
+      - "-js"
+      - "--store_dir=/data"
+      - "--http_port=8222"
+    tmpfs:
+      # Tests create uniquely named streams; nothing is worth keeping between runs.
+      - /data
+    healthcheck:
+      # healthz answers ok only once the server, JetStream included, is serving.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+    restart: "no"

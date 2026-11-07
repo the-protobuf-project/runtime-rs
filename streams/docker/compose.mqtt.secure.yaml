@@ -1,0 +1,75 @@
+# Mosquitto 2 over mutual TLS with persistent sessions, for tests/mqtt_e2e.rs.
+#
+#   streams/docker/tls/generate.sh            # once, if tls/out/ is empty
+#   docker compose -p tpp-streams-e2e-mqtt -f streams/docker/compose.mqtt.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features mqtt,tls,live-tests --test mqtt_e2e
+#   docker compose -p tpp-streams-e2e-mqtt -f streams/docker/compose.mqtt.secure.yaml down -v
+#
+# MQTTS only, no plaintext listener, a client certificate signed by the test CA
+# required on both ports:
+#
+#   127.0.0.1:18883  the certificate's CN is the username
+#   127.0.0.1:18884  username and password on top of the certificate, from a
+#                    password file written at start, and ACLs
+#                    (compose.mqtt.secure.acl) confining each user to its topics
+#
+# The users are test-only: e2e-app / e2e-app-secret and
+# e2e-other / e2e-other-secret. Sessions and their queued QoS 1 messages
+# persist to the `mqtt-data` volume, so the restart test can prove a durable
+# consumer's backlog survives the broker going away.
+name: tpp-streams-e2e-mqtt
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: tpp-streams-mqtt-secure
+    ports:
+      - "127.0.0.1:18883:8883"
+      - "127.0.0.1:18884:8884"
+    volumes:
+      - ./compose.mqtt.secure.mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./compose.mqtt.secure.acl:/mosquitto/acl.src:ro
+      - ./tls/out:/certs:ro
+      - mqtt-data:/mosquitto/data
+    # Writes the password file (hashed by mosquitto_passwd) and the ACLs, owned
+    # by the broker's user as Mosquitto 2.1 wants them, then runs the broker.
+    # It runs again on every restart, so the files are always these.
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        rm -rf /mosquitto/auth && mkdir /mosquitto/auth
+        mosquitto_passwd -c -b /mosquitto/auth/passwd e2e-app e2e-app-secret
+        mosquitto_passwd -b /mosquitto/auth/passwd e2e-other e2e-other-secret
+        cp /mosquitto/acl.src /mosquitto/auth/acl
+        chown -R mosquitto:mosquitto /mosquitto/auth /mosquitto/data
+        chmod 0700 /mosquitto/auth
+        chmod 0600 /mosquitto/auth/passwd /mosquitto/auth/acl
+        exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+    healthcheck:
+      test:
+        - CMD
+        - mosquitto_sub
+        - -h
+        - localhost
+        - -p
+        - "8883"
+        - --cafile
+        - /certs/ca.crt
+        - --cert
+        - /certs/client.crt
+        - --key
+        - /certs/client.key
+        - -i
+        - healthcheck
+        - -t
+        - $$SYS/broker/uptime
+        - -C
+        - "1"
+        - -W
+        - "3"
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    restart: "no"
+volumes:
+  mqtt-data:

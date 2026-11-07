@@ -1,0 +1,23 @@
+# ACLs for the password listener (8884, host 18884) of the secure Mosquitto in
+# compose.mqtt.secure.yaml. Test-only users; their passwords are in that file.
+#
+# Each user owns one topic tree, the prefix its tests run under, and nothing
+# else. How Mosquitto 2.1's acl_file plugin enforces it, as tests/mqtt_e2e.rs
+# observes:
+#
+#   publish elsewhere     refused, PUBACK reason 0x87 (not authorized)
+#   subscribe elsewhere   granted in the SUBACK, but every message on it fails
+#                         the read check and is never delivered
+#   shared subscriptions  checked the same way, against the topic each message
+#                         was published on, so `$share/<group>/e2e-app/...`
+#                         needs nothing beyond the read grant below
+#
+# Mosquitto has no topic-level refusal at SUBSCRIBE time in this plugin; the
+# dynamic-security plugin's subscribe ACLs are what would turn the SUBACK into
+# 0x87.
+
+user e2e-app
+topic readwrite e2e-app/#
+
+user e2e-other
+topic readwrite e2e-other/#

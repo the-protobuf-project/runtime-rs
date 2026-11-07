@@ -1,0 +1,146 @@
+[package]
+name = "tpp-streams"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, and ZeroMQ"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+keywords = ["streams", "messaging", "kafka", "nats", "pubsub"]
+categories = ["asynchronous", "network-programming"]
+
+# Consumed by tools/docgen to build the README's "Go source" column.
+[package.metadata.docgen]
+go-source = "runtime-go/streams"
+
+[lib]
+name = "streams"
+
+[features]
+default = []
+# One feature per backend, so an application builds and audits only the clients it talks to.
+# Kafka in particular compiles librdkafka from C, which nobody using NATS should have to pay for.
+kafka = ["dep:rdkafka"]
+nats = ["dep:async-nats"]
+rabbitmq = ["dep:lapin"]
+redis = ["dep:redis"]
+mqtt = ["dep:rumqttc"]
+zeromq = ["dep:zeromq"]
+# The protobuf codec, for payloads that are prost messages rather than serde values.
+protobuf = ["dep:prost"]
+# TLS for the backends whose client keeps it behind a feature. NATS, RabbitMQ, and MQTT carry
+# rustls already. Kafka's TLS is librdkafka's own OpenSSL, built from source so the result does
+# not depend on what the host has installed.
+tls = ["redis?/tls-rustls", "redis?/tokio-rustls-comp", "rdkafka?/ssl-vendored"]
+# Tests that need a real broker from docker/; see tests/README.md.
+live-tests = []
+
+[dependencies]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+opentelemetry = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+ulid = "1.2"
+
+prost = { workspace = true, optional = true }
+
+# Backend clients. Each is the most-starred maintained Rust client for its broker; see
+# src/drivers/README.md for how each was chosen.
+rdkafka = { version = "0.39", optional = true }
+async-nats = { version = "0.52", optional = true }
+# The workspace runs rustls on ring; lapin and rumqttc default to aws-lc, so both are pinned to ring.
+lapin = { version = "4.12", optional = true, default-features = false, features = ["default-runtime", "rustls--ring", "rustls-native-certs"] }
+redis = { version = "1.8", optional = true, features = ["tokio-comp", "connection-manager", "streams"] }
+rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider"] }
+zeromq = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime", "all-transport"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
+tokio-test = { workspace = true }
+# An in-process MQTT broker, so tests/mqtt.rs runs in plain `cargo test`.
+rumqttd = { version = "0.20", default-features = false }
+# rumqttc is built without a crypto provider; tests/mqtt_e2e.rs builds its TLS config on ring.
+rustls = { workspace = true }
+# tests/nats_e2e.rs makes an NKey the server has never heard of. async-nats uses the same crate.
+nkeys = "0.4"
+
+[[test]]
+name = "zeromq"
+required-features = ["zeromq"]
+
+[[example]]
+name = "zeromq"
+required-features = ["zeromq"]
+
+[[test]]
+name = "kafka_live"
+required-features = ["live-tests", "kafka"]
+
+[[example]]
+name = "kafka"
+required-features = ["kafka"]
+
+[[test]]
+name = "rabbitmq_live"
+required-features = ["live-tests", "rabbitmq"]
+
+[[example]]
+name = "rabbitmq"
+required-features = ["rabbitmq"]
+
+[[test]]
+name = "nats_live"
+required-features = ["live-tests", "nats"]
+
+[[example]]
+name = "nats"
+required-features = ["nats"]
+
+[[test]]
+name = "redis_live"
+required-features = ["live-tests", "redis"]
+
+[[example]]
+name = "redis"
+required-features = ["redis"]
+
+[[test]]
+name = "mqtt"
+required-features = ["mqtt"]
+
+[[example]]
+name = "mqtt"
+required-features = ["mqtt"]
+
+[[test]]
+name = "redis_e2e"
+required-features = ["live-tests", "tls", "redis"]
+
+[[test]]
+name = "mqtt_e2e"
+required-features = ["live-tests", "tls", "mqtt"]
+
+[[test]]
+name = "kafka_e2e"
+required-features = ["live-tests", "tls", "kafka"]
+
+[[test]]
+name = "nats_e2e"
+required-features = ["live-tests", "tls", "nats"]
+
+[[test]]
+name = "rabbitmq_e2e"
+required-features = ["live-tests", "tls", "rabbitmq"]
+
+# Throughput and latency across every backend; see benches/README.md.
+[[bench]]
+name = "throughput"
+path = "benches/throughput/main.rs"
+harness = false
+required-features = ["live-tests", "protobuf"]

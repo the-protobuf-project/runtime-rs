@@ -1,0 +1,58 @@
+# NATS with JetStream behind mutual TLS and authentication, persisted on a
+# named volume, for tests/nats_e2e.rs.
+#
+#   docker compose -p tpp-streams-e2e-nats -f streams/docker/compose.nats.secure.yaml up -d --wait
+#   STREAMS_E2E_RESTART=1 cargo test -p tpp-streams --features nats,tls,live-tests --test nats_e2e
+#   docker compose -p tpp-streams-e2e-nats -f streams/docker/compose.nats.secure.yaml down -v
+#
+# Certificates come from tls/generate.sh (tls/out). Both client ports accept
+# TLS only and require a client certificate signed by tls/out/ca.crt.
+#
+# `nats` (port 14223) then wants credentials: the test-only username and
+# password, or the NKey in compose.nats.secure.nkey, each limited to the e2e
+# subjects. JetStream stores on the `nats-data` volume with
+# sync_interval: always, so acked messages and consumer positions survive
+# `docker restart`.
+#
+# `nats-certmap` (port 14224) uses verify_and_map: the client certificate's
+# subject is the user, with no further credentials.
+services:
+  nats:
+    # The alpine image, because the default one has no shell or wget for the
+    # healthcheck.
+    image: nats:2.11-alpine
+    container_name: tpp-streams-nats-secure
+    ports:
+      - "127.0.0.1:14223:4222" # clients, mTLS + credentials
+      - "127.0.0.1:14823:8222" # monitoring, loopback only
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./compose.nats.secure.conf:/etc/nats/nats.conf:ro
+      - ./tls/out:/certs:ro
+      - nats-data:/data
+    healthcheck:
+      # healthz answers ok only once the server, JetStream included, is serving.
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+  nats-certmap:
+    image: nats:2.11-alpine
+    container_name: tpp-streams-nats-certmap
+    ports:
+      - "127.0.0.1:14224:4222" # clients, mTLS, certificate is the user
+    command: ["-c", "/etc/nats/nats.conf"]
+    volumes:
+      - ./compose.nats.certmap.conf:/etc/nats/nats.conf:ro
+      - ./tls/out:/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz?js-enabled-only=true"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: "no"
+
+volumes:
+  nats-data:

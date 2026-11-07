@@ -11,7 +11,7 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 
 ## Crates
 
-6 crates. Each declares a `description` in its `Cargo.toml` and carries crate-level
+7 crates. Each declares a `description` in its `Cargo.toml` and carries crate-level
 `//!` docs; this table is generated from those and verified on every push.
 
 | Crate | Published as | Go source | Summary |
@@ -21,6 +21,7 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 | [`database`](database) | `tpp-database` | `runtime-go/database` | runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends |
 | [`grpc`](grpc) | `tpp-grpc` | `runtime-go/grpc` | One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS |
 | [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions |
+| [`streams`](streams) | `tpp-streams` | `runtime-go/streams` | Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, and ZeroMQ |
 | [`telemetry`](telemetry) | `tpp-telemetry` | `runtime-go/telemetry` | Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers |
 
 ## Installation
@@ -31,6 +32,7 @@ cargo add tpp-cache      # Cache drivers and read-through/write-through strategi
 cargo add tpp-database   # runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends
 cargo add tpp-grpc       # One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS
 cargo add tpp-network    # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
+cargo add tpp-streams    # Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, and ZeroMQ
 cargo add tpp-telemetry  # Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers
 ```
 
@@ -46,6 +48,7 @@ trace execution and shutdown; test guides explain verification and fixtures.
 | `database` | [Guide](database/README.md) | [Source](database/src/README.md) | [Tests](database/tests/README.md) | [tpp-database](https://docs.rs/tpp-database) |
 | `grpc` | [Guide](grpc/README.md) | [Source](grpc/src/README.md) | [Tests](grpc/tests/README.md) | [tpp-grpc](https://docs.rs/tpp-grpc) |
 | `network` | [Guide](network/README.md) | [Source](network/src/README.md) | [Tests](network/tests/README.md) | [tpp-network](https://docs.rs/tpp-network) |
+| `streams` | [Guide](streams/README.md) | [Source](streams/src/README.md) | [Tests](streams/tests/README.md) | [tpp-streams](https://docs.rs/tpp-streams) |
 | `telemetry` | [Guide](telemetry/README.md) | [Source](telemetry/src/README.md) | [Tests](telemetry/tests/README.md) | [tpp-telemetry](https://docs.rs/tpp-telemetry) |
 
 Runtime composition: `grpc` hosts services and gateways and drives `agents`
