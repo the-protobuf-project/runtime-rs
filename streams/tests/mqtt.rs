@@ -382,10 +382,30 @@ async fn dropping_a_subscription_stops_it() {
     drop(first);
     // A second subscriber still gets everything, and publishing to a topic
     // whose old subscriber is gone does not fail or stall.
-    let mut second = manager
-        .subscribe(SUBJECT, &Options::default())
-        .await
-        .unwrap();
+    //
+    // Under heavy load the in-process rumqttd sometimes closes the new
+    // connection while the dropped one is leaving the same filter (a few runs
+    // in a hundred, only with many test brokers in one busy process). The
+    // driver reports it as an error rather than hanging, and the same steps
+    // against Mosquitto never failed under the same load, so a connection the
+    // broker closed is retried here; any other error still fails the test.
+    let mut second = None;
+    for _ in 0..3 {
+        match manager.subscribe(SUBJECT, &Options::default()).await {
+            Ok(subscription) => {
+                second = Some(subscription);
+                break;
+            }
+            Err(StreamError::Internal(error))
+                if error.contains("Connection reset by peer")
+                    || error.contains("Connection closed by peer") =>
+            {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Err(error) => panic!("subscribe: {error}"),
+        }
+    }
+    let mut second = second.expect("the broker closed every attempt to subscribe");
     for _ in 0..3 {
         manager
             .publish(SUBJECT, event("ada", ""), &Options::default())

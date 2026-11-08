@@ -37,9 +37,26 @@
 # Durability: the log and KRaft metadata (SCRAM credentials and ACLs included)
 # live in the kafka-data volume, so topics, records, committed consumer-group
 # offsets, the user and its ACLs survive `docker restart`. One broker means one
-# copy of everything, so replication factor and min.insync.replicas are 1;
-# every record is fsynced as it is appended, which is the most a single node
-# can promise.
+# copy of everything, so replication factor and min.insync.replicas are 1.
+#
+# STREAMS_DURABILITY picks how hard the broker pushes the log to disk:
+#
+#   strict (default)  log.flush.interval.messages=1: every record is fsynced
+#                     as it is appended, before the produce is acknowledged.
+#                     The most a single node can promise; what the e2e suite
+#                     runs against. Costs a disk sync per produce request.
+#   prod              Kafka's own default: no forced flush, the OS page cache
+#                     writes the log back on its own schedule, and durability
+#                     comes from replication (acks=all over min.insync
+#                     replicas). On this one-node cluster a power loss can
+#                     drop the last seconds of acknowledged records; a broker
+#                     process restart (docker restart) loses nothing, since the
+#                     page cache outlives the JVM. This is how Kafka is run in
+#                     production, so it is what throughput should be measured
+#                     against.
+#
+#   STREAMS_DURABILITY=prod docker compose -p tpp-streams-e2e-kafka \
+#       -f streams/docker/compose.kafka.secure.yaml up -d --wait --force-recreate
 name: tpp-streams-e2e-kafka
 
 services:
@@ -91,6 +108,9 @@ services:
       KAFKA_SSL_ENABLED_PROTOCOLS: TLSv1.3,TLSv1.2
       # Persistence.
       KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # strict or prod, see the header; compose.kafka.secure.sh drops the
+      # forced flush below for prod.
+      STREAMS_DURABILITY: ${STREAMS_DURABILITY:-strict}
       KAFKA_LOG_FLUSH_INTERVAL_MESSAGES: 1
       KAFKA_UNCLEAN_LEADER_ELECTION_ENABLE: "false"
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"

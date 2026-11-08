@@ -1,11 +1,11 @@
 //! A stream bound to its exchange: publishing, subscribing, and durable
 //! consumers.
 
-use std::sync::Arc;
+use std::{sync::Arc, task::Poll};
 
 use futures::StreamExt;
 use lapin::{
-    BasicProperties, Confirmation, Consumer, PublisherConfirm,
+    BasicProperties, Channel, Confirmation, Consumer, PublisherConfirm,
     message::Delivery as AmqpDelivery,
     options::{
         BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions,
@@ -183,7 +183,9 @@ impl Publisher for RabbitManager {
     /// is for.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let id = provider::publish_id(opts);
-        let pending = self.send(subject, &id, &payload, opts).await?;
+        self.check_publish(subject, opts)?;
+        let channel = self.shared.publish_channel().await?;
+        let pending = self.send(&channel, subject, &id, &payload).await?;
         confirmed(subject, &id, pending).await?;
         Ok(id)
     }
@@ -212,17 +214,21 @@ impl RabbitManager {
         Ok(())
     }
 
-    /// Hands one persistent message to the broker and returns its pending
+    /// Hands one persistent message to `channel` and returns its pending
     /// confirmation without waiting for it, so a batch can send everything
-    /// before awaiting anything.
+    /// before awaiting anything. The caller has run
+    /// [`check_publish`](Self::check_publish).
+    ///
+    /// Nothing is sent until the returned future is first polled; that poll
+    /// numbers the message for confirmation and queues its frames, so futures
+    /// first polled in order are sent in order.
     async fn send(
         &self,
+        channel: &Channel,
         subject: &str,
         id: &str,
         payload: &Payload,
-        opts: &Options,
     ) -> Result<PublisherConfirm> {
-        self.check_publish(subject, opts)?;
         let body = provider::pack(id, payload);
         let properties = BasicProperties::default()
             .with_message_id(short("message id", id)?)
@@ -230,9 +236,7 @@ impl RabbitManager {
             .with_content_type(CONTENT_TYPE.into());
         let exchange = short("exchange name", self.exchange.as_str())?;
         let routing_key = short("routing key", subject)?;
-        self.shared
-            .channel()
-            .await?
+        channel
             .basic_publish(
                 exchange,
                 routing_key,
@@ -246,6 +250,38 @@ impl RabbitManager {
                 StreamError::internal(&format!("rabbitmq: cannot publish on {subject:?}"), e)
             })
     }
+}
+
+/// Drives every future to completion, first polling each in the order given,
+/// and returns their outputs in that order.
+///
+/// `join_all` makes no promise about the order of first polls once it holds
+/// many futures, and for a publish the first poll is what fixes the order on
+/// the wire.
+async fn in_order<F: Future>(futures: impl IntoIterator<Item = F>) -> Vec<F::Output> {
+    let mut futures: Vec<_> = futures.into_iter().map(Box::pin).collect();
+    let mut outputs: Vec<Option<F::Output>> = futures.iter().map(|_| None).collect();
+    let mut left = futures.len();
+    std::future::poll_fn(|cx| {
+        for (future, output) in futures.iter_mut().zip(outputs.iter_mut()) {
+            if output.is_none()
+                && let Poll::Ready(value) = future.as_mut().poll(cx)
+            {
+                *output = Some(value);
+                left -= 1;
+            }
+        }
+        if left == 0 {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    })
+    .await;
+    outputs
+        .into_iter()
+        .map(|o| o.expect("every future completed"))
+        .collect()
 }
 
 /// Waits for the broker's publisher confirm.
@@ -401,6 +437,10 @@ impl Durable for RabbitManager {
 impl Batch for RabbitManager {
     /// Sends every payload, then waits for every confirmation, as runtime-go
     /// does: a batch costs one round trip rather than one per message.
+    ///
+    /// Every message goes on one channel, queued in order before any write is
+    /// awaited, so the broker receives the batch in order and in as few
+    /// writes as the connection allows.
     async fn publish_batch(
         &self,
         subject: &str,
@@ -410,10 +450,12 @@ impl Batch for RabbitManager {
         provider::check_batch(opts)?;
         self.check_publish(subject, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
-        let mut pending = Vec::with_capacity(ids.len());
-        for (payload, id) in payloads.iter().zip(&ids) {
-            pending.push(self.send(subject, id, payload, opts).await);
-        }
+        let channel = self.shared.publish_channel().await?;
+        let sends = payloads
+            .iter()
+            .zip(&ids)
+            .map(|(payload, id)| self.send(&channel, subject, id, payload));
+        let pending = in_order(sends).await;
         let mut failures = Vec::new();
         for (index, (sent, id)) in pending.into_iter().zip(&ids).enumerate() {
             let outcome = match sent {

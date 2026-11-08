@@ -139,6 +139,24 @@ pub struct RedisConfig {
     /// message stays in the dead consumer's pending list forever.
     pub reclaim_after: Duration,
 
+    /// Whether a durable [`Delivery::ack`](crate::Delivery::ack) waits for
+    /// Redis to answer the XACK before returning. On by default.
+    ///
+    /// Waiting is what lets an ack report a failure, but it costs a round trip
+    /// per message to a consumer that acknowledges one message before reading
+    /// the next, which caps it at one message per round trip. Off, an ack is
+    /// queued and returns at once; queued acks go out together as one
+    /// multi-id XACK, and a failure is logged rather than returned.
+    ///
+    /// Turning it off does not weaken at-least-once: an entry stays pending
+    /// until its XACK lands, so one whose XACK is lost (a dropped connection,
+    /// a process killed with acks still queued) is reclaimed and delivered
+    /// again, exactly as if the handler had died before acknowledging. What is
+    /// given up is hearing about it, and an ack that returned may still be
+    /// followed by a redelivery, which handlers built for at-least-once already
+    /// tolerate. NATS JetStream's plain ack makes the same trade.
+    pub confirm_acks: bool,
+
     /// The codecs a received frame may name. JSON is always accepted.
     pub registry: Registry,
 
@@ -153,6 +171,7 @@ impl Default for RedisConfig {
             database: None,
             max_len: None,
             reclaim_after: DEFAULT_RECLAIM,
+            confirm_acks: true,
             registry: Registry::new(),
             metrics: Metrics::default(),
         }
@@ -180,6 +199,7 @@ pub(super) struct Inner {
     database: i64,
     max_len: Option<usize>,
     reclaim_after: Duration,
+    confirm_acks: bool,
     registry: Registry,
     metrics: Metrics,
 }
@@ -226,6 +246,7 @@ impl RedisProvider {
                 database,
                 max_len: config.max_len,
                 reclaim_after: config.reclaim_after,
+                confirm_acks: config.confirm_acks,
                 registry: config.registry,
                 metrics: config.metrics,
             }),
@@ -238,6 +259,17 @@ impl RedisProvider {
 /// enough to ride out a restart rather than giving up halfway through one.
 const RECONNECT_ATTEMPTS: usize = 12;
 const RECONNECT_WAIT_UP_TO: Duration = Duration::from_secs(1);
+
+/// How long a command on the shared connection may wait for its reply.
+///
+/// The client's default of half a second is shorter than a loaded server
+/// takes: one with `appendfsync always` answers a burst of XADDs only as fast
+/// as its disk syncs, and every reply queued behind a slow fsync times out
+/// together. A timed-out publish is the worst failure there is, because it may
+/// have landed and is never repeated (see [`Replay::Once`]), so the caller
+/// cannot tell a loss from a success. A dead server is noticed by the
+/// connection dropping, not by this, so a generous bound costs nothing there.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Whether a command may be sent a second time after the connection dropped
 /// under it. See "Surviving a server restart" in the module docs.
@@ -272,7 +304,8 @@ impl Inner {
             .get_or_try_init(|| async {
                 let config = ConnectionManagerConfig::new()
                     .set_number_of_retries(RECONNECT_ATTEMPTS)
-                    .set_max_delay(RECONNECT_WAIT_UP_TO);
+                    .set_max_delay(RECONNECT_WAIT_UP_TO)
+                    .set_response_timeout(Some(COMMAND_TIMEOUT));
                 let info = self.client.get_connection_info();
                 if info.redis_settings().protocol().supports_resp3() {
                     return self.client.get_connection_manager_with_config(config).await;

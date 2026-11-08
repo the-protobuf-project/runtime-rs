@@ -215,12 +215,29 @@ impl Inner {
 /// idempotence stops a retry after a lost acknowledgement from appending the
 /// record twice. runtime-go's client (franz-go) does both by default and
 /// librdkafka does not enable idempotence, so without this a Rust publisher
-/// would be weaker than a Go one on the same cluster. A caller who sets either
-/// key keeps their value; only the producer's copy is changed, since a consumer
-/// warns about producer-only keys.
+/// would be weaker than a Go one on the same cluster.
+///
+/// The rest is throughput, none of it weakening the above. A publish waits for
+/// its acknowledgement, so a publisher's rate is how many publishes it has in
+/// flight divided by how long one takes, and librdkafka's default
+/// `linger.ms=5` adds five milliseconds to every one of them. One millisecond
+/// still lets concurrent publishes share a request, and under load the
+/// idempotent producer's five requests in flight per broker make records queue
+/// and batch anyway. The queue bounds are raised so many concurrent batches
+/// wait for room in the network rather than fail with a full queue.
+///
+/// A caller who sets any of these keys keeps their value; only the producer's
+/// copy is changed, since a consumer warns about producer-only keys.
 fn producer_config(client: &ClientConfig) -> ClientConfig {
     let mut producer = client.clone();
-    for (key, value) in [("acks", "all"), ("enable.idempotence", "true")] {
+    for (key, value) in [
+        ("acks", "all"),
+        ("enable.idempotence", "true"),
+        ("linger.ms", "1"),
+        ("queue.buffering.max.messages", "1000000"),
+        ("queue.buffering.max.kbytes", "1048576"),
+        ("batch.num.messages", "10000"),
+    ] {
         if producer.get(key).is_none() {
             producer.set(key, value);
         }
@@ -319,6 +336,7 @@ mod tests {
         let producer = producer_config(&client);
         assert_eq!(producer.get("acks"), Some("all"));
         assert_eq!(producer.get("enable.idempotence"), Some("true"));
+        assert_eq!(producer.get("linger.ms"), Some("1"));
         // The caller's own config is left alone, for the consumers built from it.
         assert_eq!(client.get("acks"), None);
 

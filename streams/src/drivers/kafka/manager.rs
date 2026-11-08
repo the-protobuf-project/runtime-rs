@@ -1,19 +1,23 @@
 //! Publishing to and consuming from one bound stream.
 
 use std::{
-    sync::{Arc, Weak},
+    collections::{BTreeSet, HashMap},
+    sync::{Arc, Mutex, PoisonError},
     time::Duration,
 };
 
 use bytes::Bytes;
 use futures::{StreamExt, future::join_all};
 use rdkafka::{
-    Message as _, Offset, TopicPartitionList,
-    consumer::{CommitMode, Consumer, StreamConsumer},
+    ClientContext, Message as _, Offset, TopicPartitionList,
+    consumer::{
+        BaseConsumer, CommitMode, Consumer, ConsumerContext, RebalanceProtocol, StreamConsumer,
+    },
     error::KafkaError,
     producer::FutureRecord,
+    types::RDKafkaRespErr,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 use crate::{
     Acker, Batch, Deliveries, Delivery, Durable, Manager, Message, Options, Payload, Position,
@@ -38,6 +42,9 @@ const ERROR_BACKOFF: Duration = Duration::from_millis(250);
 pub struct KafkaManager {
     inner: Arc<Inner>,
     stream: Stream,
+    /// Each declared subject's topic name, worked out once rather than on
+    /// every publish.
+    topics: HashMap<String, String>,
 }
 
 /// Which consumer a subscription needs.
@@ -53,7 +60,24 @@ enum Reader {
 
 impl KafkaManager {
     pub(super) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
-        Self { inner, stream }
+        let topics = stream
+            .subjects
+            .iter()
+            .map(|subject| (subject.clone(), inner.topic(&stream.id, subject)))
+            .collect();
+        Self {
+            inner,
+            stream,
+            topics,
+        }
+    }
+
+    /// The topic carrying `subject`, which [`Self::check_subject`] has passed.
+    fn topic(&self, subject: &str) -> String {
+        self.topics
+            .get(subject)
+            .cloned()
+            .unwrap_or_else(|| self.inner.topic(&self.stream.id, subject))
     }
 
     /// Rejects a subject the stream does not declare.
@@ -100,8 +124,8 @@ impl KafkaManager {
     }
 
     /// Builds the consumer a subscription reads with, positioned and ready.
-    async fn consumer(&self, subject: &str, reader: &Reader) -> Result<Arc<StreamConsumer>> {
-        let topic = self.inner.topic(&self.stream.id, subject);
+    async fn consumer(&self, subject: &str, reader: &Reader) -> Result<Arc<Kafka>> {
+        let topic = self.topic(subject);
         let fail = |error: KafkaError| {
             StreamError::internal(&format!("kafka: cannot consume {subject:?}"), error)
         };
@@ -133,8 +157,31 @@ impl KafkaManager {
                     .set("auto.offset.reset", reset);
             }
         }
-        let consumer = Arc::new(client.create::<StreamConsumer>().map_err(fail)?);
+        let consumer = Arc::new(
+            client
+                .create_with_context::<_, Kafka>(Start::default())
+                .map_err(fail)?,
+        );
 
+        if let Reader::Shared(_) = reader {
+            // A group member is assigned its partitions whenever the group
+            // settles, after this returns, and a partition the group has never
+            // committed would then start at whatever the end is by that time,
+            // skipping what was published in between. Note the ends now, so
+            // such a partition starts where it stood when subscribe was called.
+            let (noted, topic) = (Arc::clone(&consumer), topic.clone());
+            blocking(move || -> std::result::Result<(), KafkaError> {
+                let ends = watermarks(&noted, &topic)?;
+                *noted
+                    .context()
+                    .ends
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner) = ends;
+                Ok(())
+            })
+            .await?
+            .map_err(fail)?;
+        }
         if !matches!(reader, Reader::Tail) {
             consumer.subscribe(&[&topic]).map_err(fail)?;
             return Ok(consumer);
@@ -145,18 +192,9 @@ impl KafkaManager {
         // so a publish made after subscribe returns is delivered, not raced.
         let pinned = Arc::clone(&consumer);
         blocking(move || -> std::result::Result<(), KafkaError> {
-            let metadata = pinned.fetch_metadata(Some(&topic), DIAL_TIMEOUT)?;
             let mut assignment = TopicPartitionList::new();
-            for described in metadata.topics() {
-                for partition in described.partitions() {
-                    let (_, high) =
-                        pinned.fetch_watermarks(&topic, partition.id(), DIAL_TIMEOUT)?;
-                    assignment.add_partition_offset(
-                        &topic,
-                        partition.id(),
-                        Offset::Offset(high),
-                    )?;
-                }
+            for (partition, high) in watermarks(&pinned, &topic)? {
+                assignment.add_partition_offset(&topic, partition, Offset::Offset(high))?;
             }
             pinned.assign(&assignment)
         })
@@ -196,6 +234,13 @@ impl KafkaManager {
         let registry = self.inner.config.registry.clone();
         let metrics = self.inner.config.metrics.clone();
         let (subject, name) = (subject.to_owned(), consumer.to_owned());
+        let topic = self.topic(&subject);
+        let commits = Arc::new(Commits::new(topic));
+        let committer = tokio::spawn(commit_acked(
+            Arc::clone(&reader),
+            Arc::clone(&commits),
+            subject.clone(),
+        ));
         tokio::spawn(async move {
             let mut delivered = 0usize;
             loop {
@@ -212,26 +257,27 @@ impl KafkaManager {
                         continue;
                     }
                 };
+                let (partition, offset) = (record.partition(), record.offset());
+                let frame = Bytes::copy_from_slice(record.payload().unwrap_or_default());
+                drop(record);
+                commits.delivered(partition, offset);
                 let settle = Settle {
-                    consumer: Arc::downgrade(&reader),
-                    topic: record.topic().to_owned(),
-                    partition: record.partition(),
-                    offset: record.offset(),
+                    commits: Arc::clone(&commits),
+                    partition,
+                    offset,
                     metrics: metrics.clone(),
                     subject: subject.clone(),
                     name: name.clone(),
                 };
-                let frame = Bytes::copy_from_slice(record.payload().unwrap_or_default());
-                drop(record);
                 let message = match provider::unpack(&registry, &subject, frame) {
                     Ok(message) => message,
                     Err(error) => {
                         // Nothing will ever decode this, so no handler will ever
                         // acknowledge it and the group would stall on it
-                        // forever. Commit past it and say so.
-                        tracing::warn!(subject = %subject, offset = settle.offset, error = %error,
+                        // forever. Settle it here and say so.
+                        tracing::warn!(subject = %subject, offset, error = %error,
                             "committing past a malformed message");
-                        let _ = reader.commit(&settle.list(), CommitMode::Async);
+                        let _ = commits.ack(partition, offset);
                         continue;
                     }
                 };
@@ -249,10 +295,109 @@ impl KafkaManager {
                 }
             }
             tracing::info!(subject = %subject, consumer = %name, delivered, "consumer stopped");
+            // Commit what was acknowledged before leaving the group, so the
+            // next member under this name starts after it.
+            commits.close();
+            let _ = committer.await;
             // Closing leaves the group, which blocks for a round trip.
             let _ = blocking(move || drop(reader)).await;
         });
         Ok(receive(rx))
+    }
+}
+
+/// The consumers this module builds.
+type Kafka = StreamConsumer<Start>;
+
+/// The current end of every partition of `topic`.
+fn watermarks(consumer: &Kafka, topic: &str) -> std::result::Result<HashMap<i32, i64>, KafkaError> {
+    let metadata = consumer.fetch_metadata(Some(topic), DIAL_TIMEOUT)?;
+    let mut ends = HashMap::new();
+    for described in metadata.topics() {
+        for partition in described.partitions() {
+            let (_, high) = consumer.fetch_watermarks(topic, partition.id(), DIAL_TIMEOUT)?;
+            ends.insert(partition.id(), high);
+        }
+    }
+    Ok(ends)
+}
+
+/// The context every consumer here runs with: librdkafka's own rebalancing,
+/// except that a group member starts a partition its group has never
+/// committed at the end it had when the member subscribed, rather than at
+/// whatever the end is once the group settles.
+#[derive(Default)]
+struct Start {
+    /// Partition ends noted at subscribe; empty for every other reader.
+    ends: Mutex<HashMap<i32, i64>>,
+}
+
+impl ClientContext for Start {}
+
+impl ConsumerContext for Start {
+    fn rebalance(
+        &self,
+        consumer: &BaseConsumer<Self>,
+        err: RDKafkaRespErr,
+        tpl: &mut TopicPartitionList,
+    ) {
+        let cooperative = matches!(
+            consumer.rebalance_protocol(),
+            RebalanceProtocol::Cooperative
+        );
+        let result = match err {
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__ASSIGN_PARTITIONS => {
+                self.start_uncommitted(consumer, tpl);
+                if cooperative {
+                    consumer.incremental_assign(tpl)
+                } else {
+                    consumer.assign(tpl)
+                }
+            }
+            RDKafkaRespErr::RD_KAFKA_RESP_ERR__REVOKE_PARTITIONS => {
+                if cooperative {
+                    consumer.incremental_unassign(tpl)
+                } else {
+                    consumer.unassign()
+                }
+            }
+            other => {
+                tracing::warn!(error = ?other, "kafka: rebalance failed");
+                consumer.unassign()
+            }
+        };
+        if let Err(error) = result {
+            tracing::warn!(error = %error, "kafka: could not apply a rebalance");
+        }
+    }
+}
+
+impl Start {
+    /// Points each newly assigned partition that has no committed offset at
+    /// its noted end. Partitions with one are left alone, to resume there.
+    fn start_uncommitted(&self, consumer: &BaseConsumer<Self>, tpl: &mut TopicPartitionList) {
+        let ends = self.ends.lock().unwrap_or_else(PoisonError::into_inner);
+        if ends.is_empty() {
+            return;
+        }
+        let committed = match consumer.committed_offsets(tpl.clone(), DIAL_TIMEOUT) {
+            Ok(committed) => committed,
+            Err(error) => {
+                // Falls back to the reset policy, which is what a group
+                // without this would have done anyway.
+                tracing::warn!(error = %error, "kafka: could not read committed offsets");
+                return;
+            }
+        };
+        for entry in committed.elements() {
+            if entry.offset() != Offset::Invalid {
+                continue;
+            }
+            if let Some(&end) = ends.get(&entry.partition()) {
+                let _ =
+                    tpl.set_partition_offset(entry.topic(), entry.partition(), Offset::Offset(end));
+            }
+        }
     }
 }
 
@@ -277,7 +422,7 @@ impl Publisher for KafkaManager {
         Self::check_ttl(opts)?;
         let id = provider::publish_id(opts);
         let frame = provider::pack(&id, &payload);
-        let topic = self.inner.topic(&self.stream.id, subject);
+        let topic = self.topic(subject);
         if let Err(error) = self
             .send(&topic, &frame, opts.partition_key.as_deref())
             .await
@@ -310,7 +455,7 @@ impl Batch for KafkaManager {
         provider::check_batch(opts)?;
         Self::check_ttl(opts)?;
 
-        let topic = self.inner.topic(&self.stream.id, subject);
+        let topic = self.topic(subject);
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
         let frames: Vec<Vec<u8>> = payloads
             .iter()
@@ -414,13 +559,22 @@ impl Positioned for KafkaManager {
     /// comes back resumes from the last offset the name committed. The position
     /// applies only when the group has no committed offset yet.
     ///
-    /// # Acknowledging is sequential
+    /// # Acknowledging
     ///
-    /// Kafka keeps one offset per partition, not one per message, so
-    /// acknowledging a delivery marks everything before it in that partition as
-    /// handled too. Handlers that acknowledge out of order will mark messages
-    /// they never finished; where that matters, process a partition in order,
-    /// which is what a partition key is for.
+    /// Kafka keeps one offset per partition, not one per message, so the
+    /// committed offset is the lowest one still unsettled in each partition:
+    /// a delivery acknowledged out of order is remembered, but nothing is
+    /// committed past an earlier delivery that has not been acknowledged.
+    /// A delivery that is naked, or dropped unsettled, holds its partition's
+    /// committed offset where it is, so it and everything after it is read
+    /// again when the partition is next assigned.
+    ///
+    /// An ack is recorded at once and committed in the background, one commit
+    /// at a time per consumer covering every ack since the last, rather than
+    /// one blocking round trip per message. The commit is made before the
+    /// consumer leaves its group, so a clean shutdown loses no
+    /// acknowledgement; a process that dies between an ack and its commit has
+    /// the message redelivered, which is at-least-once doing what it promised.
     async fn consume_from(
         &self,
         subject: &str,
@@ -446,15 +600,180 @@ impl Manager for KafkaManager {
     }
 }
 
-/// Settles one delivery by committing its offset.
-///
-/// It holds the consumer weakly: once the subscription is dropped the consumer
-/// has left the group and its partitions belong to someone else, so an ack
-/// then fails rather than committing on behalf of a member that no longer
-/// exists, and the message is redelivered as the contract promises.
-struct Settle {
-    consumer: Weak<StreamConsumer>,
+/// What a durable consumer has delivered and its handlers have settled, per
+/// partition, and so what it may commit.
+struct Commits {
     topic: String,
+    ledger: Mutex<Ledger>,
+    /// Woken by every ack and by closing; a wake-up while a commit is in
+    /// flight is kept, so the next commit covers every ack made meanwhile.
+    wake: Notify,
+}
+
+#[derive(Default)]
+struct Ledger {
+    partitions: HashMap<i32, Partition>,
+    /// Set once the consumer stops: an ack after that cannot be committed.
+    closed: bool,
+}
+
+#[derive(Default)]
+struct Partition {
+    /// Delivered and not yet acknowledged.
+    unacked: BTreeSet<i64>,
+    /// One past the highest offset delivered.
+    next: i64,
+    /// The offset last committed, or being committed.
+    committed: i64,
+}
+
+impl Partition {
+    /// The offset that may be committed: the oldest unacknowledged delivery,
+    /// or, when everything delivered is acknowledged, the one after the last.
+    fn safe(&self) -> i64 {
+        self.unacked.first().copied().unwrap_or(self.next)
+    }
+}
+
+impl Commits {
+    fn new(topic: String) -> Self {
+        Self {
+            topic,
+            ledger: Mutex::default(),
+            wake: Notify::new(),
+        }
+    }
+
+    fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
+        self.ledger.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Records a delivery as outstanding.
+    fn delivered(&self, partition: i32, offset: i64) {
+        let mut ledger = self.ledger();
+        let part = ledger.partitions.entry(partition).or_default();
+        if offset < part.next {
+            // The partition was read again from its committed offset, after a
+            // rebalance or a reset: what came before it is handled, and what
+            // was outstanding from here on is being delivered anew.
+            part.unacked.clear();
+            part.committed = offset;
+        } else if part.unacked.is_empty() && part.next == 0 {
+            // First sight of this partition: nothing below this is ours.
+            part.committed = offset;
+        }
+        part.unacked.insert(offset);
+        part.next = offset + 1;
+    }
+
+    /// Marks a delivery handled, so a commit may pass it. Fails once the
+    /// consumer has stopped, since nothing will commit it then.
+    fn ack(&self, partition: i32, offset: i64) -> bool {
+        let mut ledger = self.ledger();
+        if ledger.closed {
+            return false;
+        }
+        if let Some(part) = ledger.partitions.get_mut(&partition) {
+            part.unacked.remove(&offset);
+        }
+        drop(ledger);
+        self.wake.notify_one();
+        true
+    }
+
+    /// Stops taking acks and asks for a last commit.
+    fn close(&self) {
+        self.ledger().closed = true;
+        self.wake.notify_one();
+    }
+
+    /// What has become committable since the last commit, marked as
+    /// committed, or `None` if nothing has. `owned` limits it to the
+    /// partitions this member is still assigned; the rest are forgotten.
+    fn take(&self, owned: Option<&TopicPartitionList>) -> (Option<TopicPartitionList>, bool) {
+        let mut ledger = self.ledger();
+        if let Some(owned) = owned {
+            ledger
+                .partitions
+                .retain(|partition, _| owned.find_partition(&self.topic, *partition).is_some());
+        }
+        let mut list = TopicPartitionList::new();
+        for (partition, part) in &mut ledger.partitions {
+            let safe = part.safe();
+            if safe > part.committed {
+                // Kafka's committed offset is the next one to read.
+                let _ = list.add_partition_offset(&self.topic, *partition, Offset::Offset(safe));
+                part.committed = safe;
+            }
+        }
+        let list = (list.count() > 0).then_some(list);
+        (list, ledger.closed)
+    }
+
+    /// After a failed commit, makes the next one try those partitions again.
+    fn retry(&self, list: &TopicPartitionList) {
+        let mut ledger = self.ledger();
+        for entry in list.elements() {
+            if let (Some(part), Offset::Offset(offset)) = (
+                ledger.partitions.get_mut(&entry.partition()),
+                entry.offset(),
+            ) && part.committed == offset
+            {
+                part.committed = -1;
+            }
+        }
+    }
+}
+
+/// Commits acknowledged offsets in the background until the consumer stops,
+/// then once more.
+///
+/// One synchronous commit at a time, off the async workers: under load each
+/// one carries every ack made while the last was in flight, so commits cost a
+/// round trip per batch of acks rather than per message, and they reach the
+/// broker in order.
+async fn commit_acked(consumer: Arc<Kafka>, commits: Arc<Commits>, subject: String) {
+    loop {
+        commits.wake.notified().await;
+        let (consumer, ledger) = (Arc::clone(&consumer), Arc::clone(&commits));
+        let round = blocking(move || {
+            // Asking librdkafka for the assignment waits on its own thread.
+            let owned = consumer.assignment().ok();
+            let (list, closed) = ledger.take(owned.as_ref());
+            let failed = list.and_then(|list| {
+                consumer
+                    .commit(&list, CommitMode::Sync)
+                    .err()
+                    .map(|error| (list, error))
+            });
+            (failed, closed)
+        })
+        .await;
+        let Ok((failed, closed)) = round else { break };
+        if let Some((list, error)) = failed {
+            tracing::warn!(subject = %subject, error = %error,
+                "could not commit acknowledged offsets; retrying");
+            commits.retry(&list);
+            if !closed {
+                tokio::time::sleep(ERROR_BACKOFF).await;
+                commits.wake.notify_one();
+            }
+        }
+        if closed {
+            break;
+        }
+    }
+}
+
+/// Settles one delivery by recording it in its consumer's ledger, from which
+/// the committer commits.
+///
+/// Once the subscription is dropped the consumer leaves the group and its
+/// partitions belong to someone else, so an ack then fails rather than
+/// committing on behalf of a member that no longer exists, and the message is
+/// redelivered as the contract promises.
+struct Settle {
+    commits: Arc<Commits>,
     partition: i32,
     offset: i64,
     metrics: provider::Metrics,
@@ -462,40 +781,16 @@ struct Settle {
     name: String,
 }
 
-impl Settle {
-    /// The commit that marks this record handled: Kafka's committed offset is
-    /// the next one to read, not the last one read.
-    fn list(&self) -> TopicPartitionList {
-        let mut list = TopicPartitionList::new();
-        // Only fails for an invalid offset, which a delivered record never has.
-        let _ =
-            list.add_partition_offset(&self.topic, self.partition, Offset::Offset(self.offset + 1));
-        list
-    }
-}
-
 #[async_trait::async_trait]
 impl Acker for Settle {
     async fn ack(self: Box<Self>) -> Result<()> {
-        let Some(consumer) = self.consumer.upgrade() else {
+        if !self.commits.ack(self.partition, self.offset) {
             return Err(StreamError::Internal(format!(
                 "kafka: cannot acknowledge offset {} on {:?}: its consumer was dropped, \
                  so the message will be redelivered",
                 self.offset, self.subject
             )));
-        };
-        let list = self.list();
-        blocking(move || consumer.commit(&list, CommitMode::Sync))
-            .await?
-            .map_err(|error| {
-                StreamError::internal(
-                    &format!(
-                        "kafka: cannot acknowledge offset {} on {:?}",
-                        self.offset, self.subject
-                    ),
-                    error,
-                )
-            })?;
+        }
         self.metrics.settled(&self.subject, &self.name, "ack");
         Ok(())
     }
@@ -644,34 +939,95 @@ mod tests {
         );
     }
 
-    #[test]
-    fn an_ack_commits_the_next_offset() {
-        let settle = Settle {
-            consumer: Weak::new(),
-            topic: "t".into(),
-            partition: 2,
-            offset: 41,
+    fn settle(commits: &Arc<Commits>, partition: i32, offset: i64) -> Box<Settle> {
+        Box::new(Settle {
+            commits: Arc::clone(commits),
+            partition,
+            offset,
             metrics: provider::Metrics::default(),
             subject: SUBJECT.into(),
             name: "billing".into(),
-        };
-        let list = settle.list();
-        let entry = list.find_partition("t", 2).unwrap();
-        assert_eq!(entry.offset(), Offset::Offset(42));
+        })
+    }
+
+    fn committed(commits: &Commits) -> Vec<(i32, i64)> {
+        let (list, _) = commits.take(None);
+        let mut out: Vec<(i32, i64)> = list
+            .map(|list| {
+                list.elements()
+                    .iter()
+                    .map(|entry| match entry.offset() {
+                        Offset::Offset(offset) => (entry.partition(), offset),
+                        other => panic!("unexpected offset {other:?}"),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort_unstable();
+        out
+    }
+
+    #[tokio::test]
+    async fn an_ack_commits_the_next_offset() {
+        let commits = Arc::new(Commits::new("t".into()));
+        commits.delivered(2, 41);
+        settle(&commits, 2, 41).ack().await.unwrap();
+        assert_eq!(committed(&commits), [(2, 42)]);
+        // Nothing new, nothing to commit.
+        assert!(committed(&commits).is_empty());
+    }
+
+    #[tokio::test]
+    async fn nothing_is_committed_past_an_unacked_delivery() {
+        let commits = Arc::new(Commits::new("t".into()));
+        for offset in 10..13 {
+            commits.delivered(0, offset);
+        }
+        commits.delivered(1, 5);
+        // Out of order: 11 and 12 are handled, 10 is not.
+        settle(&commits, 0, 12).ack().await.unwrap();
+        settle(&commits, 0, 11).ack().await.unwrap();
+        settle(&commits, 1, 5).ack().await.unwrap();
+        assert_eq!(committed(&commits), [(1, 6)]);
+        // A nak holds the partition where it is.
+        settle(&commits, 0, 10).nak().await.unwrap();
+        assert!(committed(&commits).is_empty());
+        // Reassigned, the partition is read again from 10.
+        for offset in 10..13 {
+            commits.delivered(0, offset);
+            settle(&commits, 0, offset).ack().await.unwrap();
+        }
+        assert_eq!(committed(&commits), [(0, 13)]);
+    }
+
+    #[tokio::test]
+    async fn a_rewound_partition_starts_over() {
+        let commits = Arc::new(Commits::new("t".into()));
+        commits.delivered(0, 7);
+        commits.delivered(0, 8);
+        // Reassigned and read again from 7: the old 7 and 8 are being
+        // redelivered, not lost.
+        commits.delivered(0, 7);
+        settle(&commits, 0, 7).ack().await.unwrap();
+        assert_eq!(committed(&commits), [(0, 8)]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_commit_is_retried() {
+        let commits = Arc::new(Commits::new("t".into()));
+        commits.delivered(0, 3);
+        settle(&commits, 0, 3).ack().await.unwrap();
+        let (list, _) = commits.take(None);
+        commits.retry(&list.unwrap());
+        assert_eq!(committed(&commits), [(0, 4)]);
     }
 
     #[tokio::test]
     async fn an_ack_after_the_consumer_is_gone_fails_loudly() {
-        let settle = Box::new(Settle {
-            consumer: Weak::new(),
-            topic: "t".into(),
-            partition: 0,
-            offset: 7,
-            metrics: provider::Metrics::default(),
-            subject: SUBJECT.into(),
-            name: "billing".into(),
-        });
-        let error = settle.ack().await.unwrap_err();
+        let commits = Arc::new(Commits::new("t".into()));
+        commits.delivered(0, 7);
+        commits.close();
+        let error = settle(&commits, 0, 7).ack().await.unwrap_err();
         assert!(error.to_string().contains("redelivered"), "{error}");
     }
 }

@@ -17,7 +17,7 @@ docker compose -f streams/docker/compose.redis.yaml down
 | `compose.nats.yaml` | nats with JetStream (`-js`) | 14222 (monitor 14822) |
 | `compose.nats.secure.yaml` | nats, mTLS plus test-only password and NKey users (`compose.nats.secure.conf`, seed in `compose.nats.secure.nkey`) limited to `e2e.>`, JetStream file store on a named volume; and `nats-certmap`, mTLS with `verify_and_map` (`compose.nats.certmap.conf`) | 14223 (monitor 14823), certmap 14224 |
 | `compose.rabbitmq.yaml` | rabbitmq:management-alpine | 15682 (UI 15683) |
-| `compose.rabbitmq.secure.yaml` | rabbitmq:management-alpine, AMQPS-only mTLS (`compose.rabbitmq.secure.conf`), SASL EXTERNAL only with the cert CN `tpp-streams-e2e` as the sole user and no guest (`.definitions.json`, `.enabled_plugins`), data dir on a named volume | 15671 (UI not published) |
+| `compose.rabbitmq.secure.yaml` | rabbitmq:management-alpine, AMQPS-only mTLS (`compose.rabbitmq.secure.conf`), SASL EXTERNAL only with the cert CN `tpp-streams-e2e` as the sole user and no guest (`.definitions.json`, `.enabled_plugins`), data dir on a named volume; `STREAMS_DURABILITY=strict\|prod` is accepted, and both are RabbitMQ's default (confirm after the fsync) | 15671 (UI not published) |
 | `compose.redis.yaml` | redis:7-alpine, keyspace expiry events on | 16380 |
 | `compose.redis.secure.yaml` | redis:7-alpine, TLS-only mTLS (`--port 0`) plus ACL users (`compose.redis.secure.acl`: `default` off, `streams` limited to the driver's commands, keys and channels, `admin` for test inspection), AOF `appendfsync always` on a named volume, expiry events on | 16381 |
 | `compose.mqtt.yaml` | eclipse-mosquitto (`compose.mqtt.mosquitto.conf`) | 11883 |

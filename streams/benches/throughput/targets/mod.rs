@@ -25,7 +25,10 @@ pub struct Conn {
 
 impl Conn {
     pub fn one(streams: impl Streams + 'static) -> Self {
-        Self { publisher: Box::new(streams), subscriber: None }
+        Self {
+            publisher: Box::new(streams),
+            subscriber: None,
+        }
     }
 }
 

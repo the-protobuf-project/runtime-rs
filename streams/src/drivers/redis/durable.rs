@@ -2,7 +2,11 @@
 //! consumer name, and a pending list that holds each message until it is
 //! acknowledged.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use futures::StreamExt;
 use redis::{
@@ -12,13 +16,13 @@ use redis::{
         StreamRangeReply, StreamReadReply,
     },
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
     Acker, Batch, Deliveries, Delivery, Durable, Manager, Message, Options, Payload, Position,
     Positioned, Publisher, Registry, Result, Stream, StreamError, Subscriber, Subscription,
-    provider::{batch_result, check_batch, new_id, pack, publish_id, unpack},
+    provider::{batch_result, check_batch, new_id, pack, prefetch, publish_id, unpack},
 };
 
 use super::{
@@ -28,13 +32,38 @@ use super::{
 };
 
 /// How many entries one read asks for: one round trip per batch rather than
-/// per message.
+/// per message. A durable consumer asks for its prefetch instead, within
+/// [`MAX_READ_BATCH`].
 const READ_BATCH: usize = 64;
+
+/// The most entries one group read or reclaim asks for, however large the
+/// prefetch: a reply this size is already a few hundred kilobytes, and a
+/// bigger one only delays the first message of the batch.
+const MAX_READ_BATCH: usize = 1024;
+
+/// The most entry ids one XACK carries when acknowledgements arrive faster
+/// than they can be sent one by one.
+const MAX_ACK_BATCH: usize = 1024;
+
+/// The longest a consumer goes between looks for abandoned messages while new
+/// ones keep arriving. Checking before every read cost a round trip per batch
+/// on the reader's connection, the one that bounds a consumer's throughput.
+const RECLAIM_EVERY_UP_TO: Duration = Duration::from_secs(1);
+
+/// How often a consumer records its pending count.
+const MEASURE_LAG_EVERY: Duration = Duration::from_secs(1);
 
 /// How long a read waits at the server before coming back empty. It bounds how
 /// long a loop goes without checking for work to reclaim, so it is short
 /// enough to feel responsive and long enough not to poll in a hot loop.
 pub(super) const BLOCK_FOR: Duration = Duration::from_secs(2);
+/// How long a consumer waits after a read that came back nearly empty, so the
+/// next read collects a batch. Without it, every blocked reader is woken for
+/// nearly every entry at moderate rates, and Redis spends its single thread
+/// answering one-entry reads: on TLS, two consumers per subject capped a paced
+/// 50k/s run at about 42k/s, against 50k/s with the pause. It costs at most
+/// this much latency, and only when traffic is light enough to afford it.
+const COALESCE_FOR: Duration = Duration::from_millis(1);
 
 /// How long a stopping consumer may spend removing itself from its group.
 const CLEANUP_FOR: Duration = Duration::from_secs(5);
@@ -290,12 +319,20 @@ impl Positioned for DurableManager {
         tracing::info!(subject, consumer, identity = %name, from = start, "consuming");
 
         let (tx, rx) = mpsc::channel(capacity(opts));
+        let target = Arc::new(AckTarget {
+            inner: Arc::clone(&self.inner),
+            key: key.clone(),
+            group: consumer.to_owned(),
+            subject: subject.to_owned(),
+        });
         let loop_ = ConsumeLoop {
             inner: Arc::clone(&self.inner),
             key,
             subject: subject.to_owned(),
             group: consumer.to_owned(),
             name,
+            batch: prefetch(opts).clamp(1, MAX_READ_BATCH),
+            acks: Acks::start(target),
             tx,
         };
         tokio::spawn(loop_.run(reader));
@@ -325,6 +362,10 @@ struct ConsumeLoop {
     subject: String,
     group: String,
     name: String,
+    /// How many entries one read or reclaim asks for: the prefetch.
+    batch: usize,
+    /// Where this consumer's deliveries send their acknowledgements.
+    acks: Acks,
     tx: mpsc::Sender<Delivery>,
 }
 
@@ -353,21 +394,40 @@ fn disconnected(error: &redis::RedisError) -> bool {
 impl ConsumeLoop {
     async fn run(self, mut reader: MultiplexedConnection) {
         let mut delivered = 0u64;
+        // Often enough that an abandoned message waits little past its reclaim
+        // interval, rarely enough not to cost a round trip on every read.
+        let reclaim_every = (self.inner.reclaim_after / 2).min(RECLAIM_EVERY_UP_TO);
+        let mut reclaim_due = Instant::now();
+        let mut lag_due = Instant::now();
         loop {
             // Messages a consumer took and never acknowledged are invisible to
             // a group read forever. Reclaiming them is what turns "we will
             // redeliver" from a promise into a behaviour.
-            match self.reclaim(&mut reader).await {
-                Ok(0) => {}
+            if Instant::now() >= reclaim_due {
+                match self.reclaim(&mut reader).await {
+                    Ok(0) => reclaim_due = Instant::now() + reclaim_every,
+                    // There may be more: look again straight away.
+                    Ok(sent) => {
+                        delivered += sent;
+                        continue;
+                    }
+                    Err(_) => break,
+                }
+            }
+            if Instant::now() >= lag_due {
+                self.measure_lag(&mut reader).await;
+                lag_due = Instant::now() + MEASURE_LAG_EVERY;
+            }
+            match self.read(&mut reader).await {
+                // A read that came back empty waited out its block: the
+                // consumer is idle, so it may as well look for abandoned work.
+                Ok(0) => reclaim_due = Instant::now(),
                 Ok(sent) => {
                     delivered += sent;
-                    continue;
+                    if (sent as usize) < (self.batch / 8).max(2) {
+                        tokio::time::sleep(COALESCE_FOR).await;
+                    }
                 }
-                Err(_) => break,
-            }
-            self.measure_lag(&mut reader).await;
-            match self.read(&mut reader).await {
-                Ok(sent) => delivered += sent,
                 Err(Stop::Disconnected) => match self.reconnect().await {
                     Some(fresh) => reader = fresh,
                     None => break,
@@ -435,7 +495,7 @@ impl ConsumeLoop {
             .arg(self.inner.reclaim_after.as_millis() as u64)
             .arg("0")
             .arg("COUNT")
-            .arg(READ_BATCH);
+            .arg(self.batch);
         let reply = match self.query::<StreamAutoClaimReply>(conn, &command).await? {
             Ok(reply) => reply,
             Err(error) => {
@@ -476,7 +536,7 @@ impl ConsumeLoop {
             .arg(&self.group)
             .arg("-")
             .arg("+")
-            .arg(READ_BATCH)
+            .arg(self.batch)
             .arg(&self.name);
         let reply = self
             .query::<StreamPendingCountReply>(conn, &command)
@@ -518,7 +578,7 @@ impl ConsumeLoop {
             .arg(&self.group)
             .arg(&self.name)
             .arg("COUNT")
-            .arg(READ_BATCH)
+            .arg(self.batch)
             .arg("BLOCK")
             .arg(BLOCK_FOR.as_millis() as u64)
             .arg("STREAMS")
@@ -565,11 +625,8 @@ impl ConsumeLoop {
             }
         };
         let acker = RedisAck {
-            inner: Arc::clone(&self.inner),
-            key: self.key.clone(),
-            group: self.group.clone(),
+            acks: self.acks.clone(),
             entry: entry.id,
-            subject: self.subject.clone(),
         };
         self.inner.metrics.delivered(&self.subject, &self.group);
         self.tx
@@ -618,29 +675,114 @@ impl ConsumeLoop {
     }
 }
 
-/// Settles one delivery against its consumer group.
-struct RedisAck {
+/// What every delivery of one consumer acknowledges against.
+struct AckTarget {
     inner: Arc<Inner>,
     key: String,
     group: String,
-    entry: String,
     subject: String,
+}
+
+/// One acknowledgement waiting to be sent, and who to tell when it has been:
+/// nobody, when [`RedisConfig::confirm_acks`](super::RedisConfig::confirm_acks)
+/// is off.
+type PendingAck = (
+    String,
+    Option<oneshot::Sender<std::result::Result<(), String>>>,
+);
+
+/// A consumer's acknowledgements, coalesced into multi-id XACKs.
+///
+/// XACK takes any number of ids, so acknowledgements that arrive while one
+/// XACK is in flight go out together in the next, rather than as one command
+/// each. Nothing waits to fill a batch: an ack on an idle consumer is sent at
+/// once, alone. Each [`Acker::ack`] still returns only after the XACK carrying
+/// its id has been answered, so a successful ack means what it always meant
+/// and at-least-once is untouched, unless the provider was told not to wait
+/// (see [`RedisConfig::confirm_acks`](super::RedisConfig::confirm_acks)).
+#[derive(Clone)]
+struct Acks {
+    target: Arc<AckTarget>,
+    tx: mpsc::UnboundedSender<PendingAck>,
+}
+
+impl Acks {
+    /// Starts the sender task, which ends when the consumer loop and every
+    /// delivery it lent have been dropped.
+    fn start(target: Arc<AckTarget>) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel::<PendingAck>();
+        let sender = Arc::clone(&target);
+        tokio::spawn(async move {
+            let mut batch = Vec::new();
+            while rx.recv_many(&mut batch, MAX_ACK_BATCH).await > 0 {
+                let mut command = redis::cmd("XACK");
+                command.arg(&sender.key).arg(&sender.group);
+                for (entry, _) in &batch {
+                    command.arg(entry);
+                }
+                // Acknowledging an acknowledged entry is a no-op, so the whole
+                // XACK is safe to repeat.
+                let sent = sender
+                    .inner
+                    .query::<()>(&command, Replay::Idempotent)
+                    .await
+                    .map_err(|error| error.to_string());
+                if let Err(error) = &sent {
+                    tracing::warn!(subject = %sender.subject, consumer = %sender.group,
+                        count = batch.len(), %error,
+                        "could not acknowledge; the entries stay pending and are redelivered");
+                }
+                for (_, done) in batch.drain(..) {
+                    // The delivery may have been dropped mid-ack, or nobody is
+                    // waiting; either way there is nobody to tell.
+                    if let Some(done) = done {
+                        let _ = done.send(sent.clone());
+                    }
+                }
+            }
+        });
+        Self { target, tx }
+    }
+}
+
+/// Settles one delivery against its consumer group.
+struct RedisAck {
+    acks: Acks,
+    entry: String,
 }
 
 #[async_trait::async_trait]
 impl Acker for RedisAck {
     async fn ack(self: Box<Self>) -> Result<()> {
-        xack(&self.inner, &self.key, &self.group, &self.entry)
-            .await
-            .map_err(|error| {
-                StreamError::Internal(format!(
-                    "redis: cannot acknowledge {} on {:?}: {error}",
-                    self.entry, self.subject
-                ))
-            })?;
-        self.inner
+        let target = &self.acks.target;
+        let failed = |error: String| {
+            StreamError::Internal(format!(
+                "redis: cannot acknowledge {} on {:?}: {error}",
+                self.entry, target.subject
+            ))
+        };
+        let confirm = target.inner.confirm_acks;
+        let (done, answer) = match confirm {
+            true => {
+                let (done, answer) = oneshot::channel();
+                (Some(done), Some(answer))
+            }
+            false => (None, None),
+        };
+        self.acks
+            .tx
+            .send((self.entry.clone(), done))
+            .map_err(|_| failed("the consumer's acknowledgement task has stopped".into()))?;
+        if let Some(answer) = answer {
+            answer
+                .await
+                .map_err(|_| failed("the acknowledgement was dropped unanswered".into()))?
+                .map_err(failed)?;
+        }
+        target
+            .inner
             .metrics
-            .settled(&self.subject, &self.group, "ack");
+            .settled(&target.subject, &target.group, "ack");
         Ok(())
     }
 
@@ -652,9 +794,11 @@ impl Acker for RedisAck {
     /// id and an attempt count of one, and the attempt is the only signal a
     /// consumer has for noticing a redelivery loop it cannot escape.
     async fn nak(self: Box<Self>) -> Result<()> {
-        self.inner
+        let target = &self.acks.target;
+        target
+            .inner
             .metrics
-            .settled(&self.subject, &self.group, "nak");
+            .settled(&target.subject, &target.group, "nak");
         Ok(())
     }
 }

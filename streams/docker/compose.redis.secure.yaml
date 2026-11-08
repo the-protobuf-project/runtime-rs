@@ -9,11 +9,26 @@
 # and `--tls-auth-clients yes` refuses a client that presents no certificate
 # signed by the CA.
 #
-# Durability: AOF with `appendfsync always`, so a write is on disk before Redis
-# answers it, on the named volume `redis-secure-data`. Stream entries, consumer
-# groups, their pending lists, and scheduled keys with their absolute expiry all
-# survive `docker restart`. Keyspace expiry events are on because scheduled
-# delivery is built on them.
+# Durability: an append-only file on the named volume `redis-secure-data`, so
+# stream entries, consumer groups, their pending lists, and scheduled keys with
+# their absolute expiry all survive `docker restart`. How often it is fsynced is
+# chosen by STREAMS_DURABILITY when the container starts:
+#
+#   strict (default)  `appendfsync always`: every write is on disk before Redis
+#                     answers it, so an acknowledged XADD survives even a power
+#                     cut. Each write batch costs an fsync, which caps
+#                     throughput at what the disk (here Docker Desktop's VM
+#                     disk) can sync. The e2e suite runs this way.
+#   prod              `appendfsync everysec`, Redis's own default for AOF: the
+#                     file is fsynced once a second in the background, so a
+#                     process crash or `docker restart` loses nothing (the
+#                     kernel still has the writes) but a host or VM crash can
+#                     lose up to about a second of acknowledged writes. This is
+#                     what the throughput bench's `tls` profile is meant for.
+#
+#   STREAMS_DURABILITY=prod docker compose -p tpp-streams-e2e-redis -f streams/docker/compose.redis.secure.yaml up -d --wait
+#
+# Keyspace expiry events are on because scheduled delivery is built on them.
 #
 # Authentication: ACL users from compose.redis.secure.acl, on top of mTLS. The
 # certificate gets a client onto the socket; the user decides what it may do.
@@ -57,6 +72,21 @@ services:
       - ./tls/out:/certs:ro
       - ./compose.redis.secure.acl:/etc/redis/users.acl:ro
       - redis-secure-data:/data
+    environment:
+      STREAMS_DURABILITY: ${STREAMS_DURABILITY:-strict}
+    # Maps STREAMS_DURABILITY onto --appendfsync and hands everything in
+    # `command` to the image's own entrypoint, which drops to the redis user.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        case "$$STREAMS_DURABILITY" in
+          strict) fsync=always ;;
+          prod) fsync=everysec ;;
+          *) echo "STREAMS_DURABILITY must be strict or prod, not '$$STREAMS_DURABILITY'" >&2; exit 64 ;;
+        esac
+        exec docker-entrypoint.sh "$$@" --appendfsync "$$fsync"
+      - redis-entrypoint
     command:
       - redis-server
       - --port
@@ -75,8 +105,6 @@ services:
       - /data
       - --appendonly
       - "yes"
-      - --appendfsync
-      - always
       - --save
       - ""
       - --notify-keyspace-events

@@ -89,7 +89,11 @@ pub const DEFAULT_SESSION_EXPIRY: Duration = Duration::from_secs(24 * 60 * 60);
 pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Requests a connection can queue ahead of its event loop.
-const REQUEST_CAPACITY: usize = 256;
+///
+/// Deep enough that a few dozen concurrent publishers, or a batch of a few
+/// thousand, queue without ever finding it full: a full channel makes a
+/// publish back off and retry, which costs a millisecond each time.
+const REQUEST_CAPACITY: usize = 8192;
 
 /// How long the publishing connection waits before redialing a lost broker,
 /// so an outage is a retry a second rather than a spin.
@@ -308,6 +312,10 @@ pub(crate) enum Session {
     Durable {
         /// Session expiry interval, in seconds.
         expiry: u32,
+        /// How many unacknowledged messages the broker may have out to this
+        /// consumer at once: the MQTT 5 Receive Maximum, which is the
+        /// consumer's prefetch.
+        prefetch: u16,
     },
 }
 
@@ -323,6 +331,7 @@ pub(crate) async fn dial(
 ) -> Result<(AsyncClient, EventLoop, bool)> {
     let mut options = template.clone();
     options.set_client_id(client_id.to_owned());
+    let mut capacity = REQUEST_CAPACITY;
     match session {
         Session::Clean => {
             options
@@ -330,18 +339,26 @@ pub(crate) async fn dial(
                 .set_session_expiry_interval(None)
                 .set_manual_acks(false);
         }
-        Session::Durable { expiry } => {
+        Session::Durable { expiry, prefetch } => {
             options
                 .set_clean_start(false)
                 .set_session_expiry_interval(Some(expiry))
                 // Acknowledgement belongs to the consumer, after the work.
                 // Acknowledging on receipt would turn at-least-once into
                 // at-most-once behind the caller's back.
-                .set_manual_acks(true);
+                .set_manual_acks(true)
+                // The broker holds back what the consumer has not caught up
+                // with, in the session's queue, instead of pushing it all down
+                // the socket. That bounds the acknowledgements the consumer
+                // can owe at once, and the request channel is sized above it,
+                // so queueing a PUBACK never waits on the event loop, which
+                // may itself be waiting on the consumer to take a message.
+                .set_receive_maximum(Some(prefetch.max(1)));
+            capacity = capacity.max(usize::from(prefetch) + REQUEST_CAPACITY);
         }
     }
     let (host, port) = template.broker_address();
-    let (client, mut events) = AsyncClient::new(options, REQUEST_CAPACITY);
+    let (client, mut events) = AsyncClient::new(options, capacity);
     // The event loop dials on its first poll, bounded by the template's
     // connection timeout, and yields the CONNACK as its first event.
     loop {
@@ -440,6 +457,38 @@ impl PublishLink {
     /// Publishes `body` on `topic` and waits for the broker to take it.
     async fn publish(&self, topic: &str, qos: QoS, body: Bytes) -> Result<()> {
         let deadline = Instant::now() + self.timeout;
+        let settled = self.enqueue(topic, qos, body, deadline).await?;
+        self.settled(settled, deadline).await
+    }
+
+    /// Publishes every body on `topic`, all in flight at once, and waits for
+    /// the broker to take each: one round trip for the batch rather than one
+    /// per message. Outcomes are in `bodies` order; the messages go on the
+    /// wire in that order too, since one caller queues them back to back.
+    async fn publish_all(&self, topic: &str, qos: QoS, bodies: Vec<Bytes>) -> Vec<Result<()>> {
+        let deadline = Instant::now() + self.timeout;
+        let mut pending = Vec::with_capacity(bodies.len());
+        for body in bodies {
+            pending.push(self.enqueue(topic, qos, body, deadline).await);
+        }
+        futures::future::join_all(pending.into_iter().map(|queued| async move {
+            match queued {
+                Ok(settled) => self.settled(settled, deadline).await,
+                Err(error) => Err(error),
+            }
+        }))
+        .await
+    }
+
+    /// Hands `body` to the connection and lines up its waiter, returning what
+    /// will hear the broker's answer.
+    async fn enqueue(
+        &self,
+        topic: &str,
+        qos: QoS,
+        body: Bytes,
+        deadline: Instant,
+    ) -> Result<oneshot::Receiver<Result<()>>> {
         let (tx, rx) = oneshot::channel();
         let mut tx = Some(tx);
         loop {
@@ -456,7 +505,7 @@ impl PublishLink {
                     .is_ok()
                 {
                     waiters.queued.push_back(tx.take().expect("queued once"));
-                    break;
+                    return Ok(rx);
                 }
             }
             // The request channel is full: the connection is behind or
@@ -467,6 +516,10 @@ impl PublishLink {
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
         }
+    }
+
+    /// Waits for the broker's answer to one queued publish.
+    async fn settled(&self, rx: oneshot::Receiver<Result<()>>, deadline: Instant) -> Result<()> {
         match tokio::time::timeout_at(deadline, rx).await {
             Ok(Ok(outcome)) => outcome,
             Ok(Err(_)) => Err(StreamError::Internal(

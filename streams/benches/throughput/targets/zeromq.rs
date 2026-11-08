@@ -13,8 +13,18 @@ pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     if profile != "plain" {
         return Err(unknown_profile("zeromq", profile));
     }
-    let publisher = ZmqProvider::publisher(ZmqConfig { registry: registry.clone(), ..ZmqConfig::new("tcp://127.0.0.1:0") }).await?;
+    let publisher = ZmqProvider::publisher(ZmqConfig {
+        registry: registry.clone(),
+        ..ZmqConfig::new("tcp://127.0.0.1:0")
+    })
+    .await?;
     let endpoint = publisher.endpoint().to_owned();
-    let subscriber = ZmqProvider::subscriber(ZmqConfig { registry, ..ZmqConfig::new(endpoint) })?;
-    Ok(Conn { publisher: Box::new(publisher), subscriber: Some(Box::new(subscriber)) })
+    let subscriber = ZmqProvider::subscriber(ZmqConfig {
+        registry,
+        ..ZmqConfig::new(endpoint)
+    })?;
+    Ok(Conn {
+        publisher: Box::new(publisher),
+        subscriber: Some(Box::new(subscriber)),
+    })
 }

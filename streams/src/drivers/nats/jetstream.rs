@@ -15,7 +15,11 @@ use async_nats::{
         stream,
     },
 };
-use futures::{StreamExt, TryStreamExt, stream::BoxStream};
+use futures::{
+    FutureExt, StreamExt, TryStreamExt,
+    future::{self, Either},
+    stream::{BoxStream, FuturesOrdered},
+};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -302,6 +306,23 @@ impl Publisher for JetStreamManager {
     /// retry safely: the backend recognises the repeat. [`Options::ttl`] is
     /// refused, because JetStream delivers when it is read, not on a timer.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
+        self.check_publish(subject, opts)?;
+        let id = provider::publish_id(opts);
+        self.send(subject, &id, &payload).await?.await?;
+        Ok(id)
+    }
+}
+
+/// A sent publish, resolving once the server has stored it.
+type Stored = futures::future::BoxFuture<'static, Result<()>>;
+
+/// How many publishes of one batch are awaiting their acks at once. The
+/// context's own limit (5,000 across the connection) still applies on top.
+const BATCH_IN_FLIGHT: usize = 1024;
+
+impl JetStreamManager {
+    /// Refuses what no JetStream publish can do, before anything is sent.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<()> {
         check_subject(&self.stream, subject)?;
         check_concrete(&self.stream, subject)?;
         if opts.delay().is_some() {
@@ -309,11 +330,19 @@ impl Publisher for JetStreamManager {
                 "JetStream delivers when it is read, not on a timer".into(),
             ));
         }
+        Ok(())
+    }
 
-        let id = provider::publish_id(opts);
-        let body = provider::pack(&id, &payload);
+    /// Sends one frame under `id`, returning once it has left for the server.
+    /// The future it returns resolves when the server has stored it.
+    ///
+    /// Sending takes one of the context's in-flight permits, which the returned
+    /// future gives back, so it must be awaited (or dropped) for later sends
+    /// to proceed.
+    async fn send(&self, subject: &str, id: &str, payload: &Payload) -> Result<Stored> {
+        let body = provider::pack(id, payload);
         let bytes = body.len();
-        let fail = |error: &dyn std::fmt::Display| {
+        let fail = move |subject: &str, id: &str, error: &dyn std::fmt::Display| {
             warn!(subject, id, %error, "could not publish");
             StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
         };
@@ -322,14 +351,17 @@ impl Publisher for JetStreamManager {
             .context
             .send_publish(
                 subject.to_owned(),
-                PublishMessage::build().payload(body.into()).message_id(&id),
+                PublishMessage::build().payload(body.into()).message_id(id),
             )
             .await
-            .map_err(|error| fail(&error))?;
-        ack.await.map_err(|error| fail(&error))?;
-
-        debug!(subject, id, bytes, "published");
-        Ok(id)
+            .map_err(|error| fail(subject, id, &error))?;
+        let (subject, id) = (subject.to_owned(), id.to_owned());
+        Ok(async move {
+            ack.await.map_err(|error| fail(&subject, &id, &error))?;
+            debug!(subject, id, bytes, "published");
+            Ok(())
+        }
+        .boxed())
     }
 }
 
@@ -623,15 +655,59 @@ impl Acker for JetStreamAck {
 
 #[async_trait::async_trait]
 impl Batch for JetStreamManager {
-    /// Publishes each payload in turn. JetStream acknowledges every message,
-    /// so a large batch is better served by several concurrent calls.
+    /// Sends every payload without waiting, then collects the acks, as
+    /// runtime-go does: a batch costs about one round trip rather than one per
+    /// message.
+    ///
+    /// Frames are sent one after another, in order, so the stream stores them
+    /// in order; only the waits for their acks overlap. Up to
+    /// `BATCH_IN_FLIGHT` wait at once. While a send waits for room under the
+    /// context's own in-flight limit, the acks already outstanding keep being
+    /// collected, so a batch larger than that limit makes progress instead of
+    /// holding every permit and waiting on itself. Each message carries its
+    /// own id as `Nats-Msg-Id`, so a retried batch is collapsed by the
+    /// duplicate window just as a retried single publish is. A message that
+    /// fails is reported by index in [`StreamError::PartialBatch`]; the others
+    /// stand.
     async fn publish_batch(
         &self,
         subject: &str,
         payloads: Vec<Payload>,
         opts: &Options,
     ) -> Result<Vec<String>> {
-        provider::publish_each(self, subject, payloads, opts).await
+        provider::check_batch(opts)?;
+        self.check_publish(subject, opts)?;
+        let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
+        let mut outcomes: Vec<Result<()>> = Vec::with_capacity(ids.len());
+        let mut acks: FuturesOrdered<Stored> = FuturesOrdered::new();
+        for (payload, id) in payloads.iter().zip(&ids) {
+            while acks.len() >= BATCH_IN_FLIGHT {
+                outcomes.extend(acks.next().await);
+            }
+            let mut send = std::pin::pin!(self.send(subject, id, payload));
+            let sent = loop {
+                if acks.is_empty() {
+                    break send.as_mut().await;
+                }
+                match future::select(send.as_mut(), acks.next()).await {
+                    Either::Left((sent, _)) => break sent,
+                    Either::Right((done, _)) => outcomes.extend(done),
+                }
+            };
+            acks.push_back(match sent {
+                Ok(stored) => stored,
+                Err(error) => future::ready(Err(error)).boxed(),
+            });
+        }
+        while let Some(done) = acks.next().await {
+            outcomes.push(done);
+        }
+        let failures = outcomes
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, outcome)| outcome.err().map(|error| (index, error)))
+            .collect();
+        provider::batch_result(subject, ids, failures)
     }
 }
 

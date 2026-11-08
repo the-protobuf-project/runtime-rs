@@ -242,6 +242,31 @@ impl Attached {
 #[async_trait::async_trait]
 impl Publisher for MqttManager {
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
+        let topic = self.publish_topic(subject, opts)?;
+        let id = provider::publish_id(opts);
+        let body = Bytes::from(provider::pack(&id, &payload));
+        let len = body.len();
+        if let Err(error) = self
+            .inner
+            .publisher
+            .publish(&topic, self.inner.config.qos, body)
+            .await
+        {
+            tracing::error!(subject, id, %error, "mqtt: could not publish");
+            return Err(StreamError::internal(
+                &format!("mqtt: cannot publish on {subject:?}"),
+                error,
+            ));
+        }
+        tracing::debug!(subject, id, bytes = len, "mqtt: published");
+        Ok(id)
+    }
+}
+
+impl MqttManager {
+    /// The topic a publish on `subject` goes to, or why nothing can be
+    /// published there with `opts`.
+    fn publish_topic(&self, subject: &str, opts: &Options) -> Result<String> {
         self.check_subject(subject)?;
         if has_wildcard(subject) {
             // A stream may declare a filter, but a message has to land
@@ -263,24 +288,7 @@ impl Publisher for MqttManager {
                  and nothing can be published on it"
             )));
         }
-
-        let id = provider::publish_id(opts);
-        let body = Bytes::from(provider::pack(&id, &payload));
-        let len = body.len();
-        if let Err(error) = self
-            .inner
-            .publisher
-            .publish(&topic, self.inner.config.qos, body)
-            .await
-        {
-            tracing::error!(subject, id, %error, "mqtt: could not publish");
-            return Err(StreamError::internal(
-                &format!("mqtt: cannot publish on {subject:?}"),
-                error,
-            ));
-        }
-        tracing::debug!(subject, id, bytes = len, "mqtt: published");
-        Ok(id)
+        Ok(topic)
     }
 }
 
@@ -365,12 +373,13 @@ impl Durable for MqttManager {
             client_id = format!("{client_id}-{}", provider::new_id());
         }
         let expiry = u32::try_from(self.inner.config.session_expiry.as_secs()).unwrap_or(u32::MAX);
+        let prefetch = u16::try_from(provider::prefetch(opts)).unwrap_or(u16::MAX);
         let attached = self
             .attach(
                 subject,
                 opts.group.as_deref(),
                 &client_id,
-                Session::Durable { expiry },
+                Session::Durable { expiry, prefetch },
             )
             .await?;
         tracing::info!(subject, consumer, group = ?opts.group, client_id, "mqtt: consuming");
@@ -411,18 +420,47 @@ impl Durable for MqttManager {
 
 #[async_trait::async_trait]
 impl Batch for MqttManager {
-    /// Publishes each payload in turn. MQTT has no batch primitive; at QoS 1
-    /// each message is acknowledged on its own.
+    /// Publishes every payload at once and waits for all of them. MQTT has no
+    /// batch primitive and at QoS 1 each message is acknowledged on its own,
+    /// but nothing makes the second wait for the first's PUBACK: the whole
+    /// batch is put in flight on the publishing connection, in order, up to
+    /// the broker's Receive Maximum, and the call returns when every
+    /// acknowledgement is in. A refused entry fails alone, reported in
+    /// [`StreamError::PartialBatch`] by its index, as the contract asks.
     async fn publish_batch(
         &self,
         subject: &str,
         payloads: Vec<Payload>,
         opts: &Options,
     ) -> Result<Vec<String>> {
-        // An undeclared subject fails every entry the same way; say so once,
-        // as publish does, rather than as a batch of identical failures.
-        self.check_subject(subject)?;
-        provider::publish_each(self, subject, payloads, opts).await
+        // An undeclared subject, a wildcard, or a delay fails every entry the
+        // same way; say so once, as publish does, rather than as a batch of
+        // identical failures.
+        provider::check_batch(opts)?;
+        let topic = self.publish_topic(subject, opts)?;
+        let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
+        let bodies = payloads
+            .iter()
+            .zip(&ids)
+            .map(|(payload, id)| Bytes::from(provider::pack(id, payload)))
+            .collect();
+        let outcomes = self
+            .inner
+            .publisher
+            .publish_all(&topic, self.inner.config.qos, bodies)
+            .await;
+        let failures: Vec<(usize, StreamError)> = outcomes
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, outcome)| outcome.err().map(|error| (index, error)))
+            .collect();
+        if let Some((_, error)) = failures.first() {
+            tracing::error!(subject, failed = failures.len(), total = ids.len(), %error,
+                "mqtt: could not publish every message of a batch");
+        } else {
+            tracing::debug!(subject, count = ids.len(), "mqtt: published a batch");
+        }
+        provider::batch_result(subject, ids, failures)
     }
 }
 

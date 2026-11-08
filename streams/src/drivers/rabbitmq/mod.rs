@@ -48,11 +48,11 @@
 //!
 //! Unlike runtime-go, which dials a URL, this provider takes a
 //! [`lapin::Connection`] you built, so TLS, credentials, heartbeats and
-//! reconnection policy stay with the application. It opens channels on it,
-//! one for publishing and declaring and one per subscription, because a
-//! channel is AMQP's unit of prefetch and of consumer cancellation.
-//! [`Streams::close`] closes only the publishing channel; the connection is
-//! never closed here.
+//! reconnection policy stay with the application. It opens channels on it:
+//! [`RabbitConfig::publish_channels`] for publishing and declaring, and one per
+//! subscription, because a channel is AMQP's unit of prefetch and of consumer
+//! cancellation. [`Streams::close`] closes only the publishing channels; the
+//! connection is never closed here.
 //!
 //! # Publishes are confirmed
 //!
@@ -63,6 +63,13 @@
 //! is an error rather than a silent loss. When the broker closes the
 //! publishing channel, for instance because a stream's exchange was deleted
 //! elsewhere, the next publish opens a fresh one instead of failing forever.
+//!
+//! Single publishes are spread round-robin over the publishing channels, so
+//! concurrent callers' confirmations do not queue behind one another in one
+//! broker channel process. A batch stays on one channel, which keeps its
+//! messages in order. Publishes from one caller that awaits each in turn stay
+//! in order whatever channel each takes: the next is not sent until the
+//! previous one is confirmed.
 
 mod manager;
 mod topic;
@@ -71,7 +78,7 @@ use std::{
     collections::BTreeMap,
     sync::{
         Arc, Mutex, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -95,6 +102,10 @@ use topic::safe_name;
 /// failure that makes people think round-robin is broken.
 pub const DEFAULT_PREFETCH: u16 = 32;
 
+/// How many confirm-mode channels single publishes are spread over when
+/// [`RabbitConfig::publish_channels`] is not set.
+pub const DEFAULT_PUBLISH_CHANNELS: usize = 4;
+
 /// Settings for a [`RabbitProvider`].
 ///
 /// It is deliberately not `Debug`: [`Metrics`] is not, and nothing here is
@@ -117,6 +128,14 @@ pub struct RabbitConfig {
     /// fast consumer run ahead.
     pub prefetch: u16,
 
+    /// How many channels, each in confirm mode, single publishes are spread
+    /// over. Zero is taken as one.
+    ///
+    /// A channel is one process on the broker, which handles its publishes
+    /// and confirms in turn; several let concurrent publishers be confirmed
+    /// side by side. A batch always goes through one channel, in order.
+    pub publish_channels: usize,
+
     /// The codecs a subscriber accepts. A frame naming any other is dropped,
     /// or on a durable consumer rejected, rather than delivered as bytes nobody
     /// can read.
@@ -132,6 +151,7 @@ impl Default for RabbitConfig {
         Self {
             prefix: String::new(),
             prefetch: DEFAULT_PREFETCH,
+            publish_channels: DEFAULT_PUBLISH_CHANNELS,
             registry: Registry::new(),
             metrics: Metrics::default(),
         }
@@ -151,6 +171,12 @@ impl RabbitConfig {
         self
     }
 
+    /// Spreads single publishes over `n` confirm-mode channels.
+    pub fn with_publish_channels(mut self, n: usize) -> Self {
+        self.publish_channels = n;
+        self
+    }
+
     /// Accepts frames written by the codecs in `registry`.
     pub fn with_registry(mut self, registry: Registry) -> Self {
         self.registry = registry;
@@ -166,7 +192,7 @@ impl RabbitConfig {
 
 /// [`Streams`] over a caller-owned RabbitMQ connection.
 ///
-/// Cheap to clone: clones share the publishing channel and the declarations.
+/// Cheap to clone: clones share the publishing channels and the declarations.
 #[derive(Clone)]
 pub struct RabbitProvider {
     shared: Arc<Shared>,
@@ -176,11 +202,13 @@ pub struct RabbitProvider {
 pub(crate) struct Shared {
     /// The caller's connection, which consumers open their channels on.
     conn: Arc<Connection>,
-    /// One channel, in confirm mode, for publishing and declaring. A lapin
-    /// channel is safe for concurrent use; the lock only guards replacing it
-    /// after the broker closed it.
-    channel: Mutex<Channel>,
-    /// Set by [`Streams::close`], after which the channel is not reopened.
+    /// Channels in confirm mode for publishing; the first also declares. A
+    /// lapin channel is safe for concurrent use; each lock only guards
+    /// replacing its channel after the broker closed it.
+    channels: Box<[Mutex<Channel>]>,
+    /// Which channel the next single publish takes.
+    next: AtomicUsize,
+    /// Set by [`Streams::close`], after which no channel is reopened.
     closed: AtomicBool,
     config: RabbitConfig,
     /// Streams this process has declared, ordered by id so `list` is too.
@@ -188,18 +216,22 @@ pub(crate) struct Shared {
 }
 
 impl RabbitProvider {
-    /// Builds a provider on `conn`, opening the channel it publishes and
-    /// declares on and putting it in confirm mode.
+    /// Builds a provider on `conn`, opening the channels it publishes and
+    /// declares on and putting them in confirm mode.
     ///
-    /// It fails rather than returning a provider when the channel cannot be
+    /// It fails rather than returning a provider when a channel cannot be
     /// opened, which is worth hearing at startup rather than at the first
     /// publish.
     pub async fn new(conn: Arc<Connection>, config: RabbitConfig) -> Result<Self> {
-        let channel = open_publisher(&conn).await?;
+        let mut channels = Vec::with_capacity(config.publish_channels.max(1));
+        for _ in 0..config.publish_channels.max(1) {
+            channels.push(Mutex::new(open_publisher(&conn).await?));
+        }
         Ok(Self {
             shared: Arc::new(Shared {
                 conn,
-                channel: Mutex::new(channel),
+                channels: channels.into(),
+                next: AtomicUsize::new(0),
                 closed: AtomicBool::new(false),
                 config,
                 declared: RwLock::new(BTreeMap::new()),
@@ -222,8 +254,8 @@ async fn open_publisher(conn: &Connection) -> Result<Channel> {
 }
 
 impl Shared {
-    /// The publishing channel, reopened when the broker closed it while the
-    /// connection stayed up.
+    /// The channel that declares, and that a batch publishes on, reopened when
+    /// the broker closed it while the connection stayed up.
     ///
     /// AMQP answers a channel-level error, such as publishing to an exchange
     /// that no longer exists, by closing the channel. Without reopening, one
@@ -231,7 +263,21 @@ impl Shared {
     /// stream. A dead connection is left to fail: reconnecting is the
     /// caller's.
     pub(crate) async fn channel(&self) -> Result<Channel> {
-        let current = self.current_channel();
+        self.channel_at(0).await
+    }
+
+    /// The next publishing channel in turn, for a single publish.
+    pub(crate) async fn publish_channel(&self) -> Result<Channel> {
+        let n = self.channels.len();
+        if n == 1 {
+            return self.channel_at(0).await;
+        }
+        self.channel_at(self.next.fetch_add(1, Ordering::Relaxed) % n)
+            .await
+    }
+
+    async fn channel_at(&self, index: usize) -> Result<Channel> {
+        let current = self.current_channel(index);
         if current.status().connected()
             || !self.conn.status().connected()
             || self.closed.load(Ordering::Acquire)
@@ -239,7 +285,7 @@ impl Shared {
             return Ok(current);
         }
         let fresh = open_publisher(&self.conn).await?;
-        let mut slot = self.channel.lock().expect("channel lock poisoned");
+        let mut slot = self.channels[index].lock().expect("channel lock poisoned");
         if slot.status().connected() {
             // Another caller reopened it first; theirs wins.
             return Ok(slot.clone());
@@ -249,8 +295,11 @@ impl Shared {
         Ok(fresh)
     }
 
-    fn current_channel(&self) -> Channel {
-        self.channel.lock().expect("channel lock poisoned").clone()
+    fn current_channel(&self, index: usize) -> Channel {
+        self.channels[index]
+            .lock()
+            .expect("channel lock poisoned")
+            .clone()
     }
 
     /// The topic exchange carrying one stream's subjects.
@@ -416,21 +465,28 @@ impl Streams for RabbitProvider {
             .collect())
     }
 
-    /// Closes the publishing channel. The connection is the caller's and stays
-    /// open; subscriptions hold channels of their own and end when dropped.
+    /// Closes the publishing channels. The connection is the caller's and
+    /// stays open; subscriptions hold channels of their own and end when
+    /// dropped.
     async fn close(&self) -> Result<()> {
         self.shared.closed.store(true, Ordering::Release);
-        let channel = self.shared.current_channel();
-        match channel.close(200, "OK".into()).await {
-            Ok(()) => Ok(()),
-            // Already shut, by an earlier close or by the connection going
-            // away, is what closing wanted.
-            Err(_) if !channel.status().connected() => Ok(()),
-            Err(e) => Err(StreamError::internal(
-                "rabbitmq: cannot close the channel",
-                e,
-            )),
+        let mut outcome = Ok(());
+        for index in 0..self.shared.channels.len() {
+            let channel = self.shared.current_channel(index);
+            match channel.close(200, "OK".into()).await {
+                Ok(()) => {}
+                // Already shut, by an earlier close or by the connection going
+                // away, is what closing wanted.
+                Err(_) if !channel.status().connected() => {}
+                Err(e) => {
+                    outcome = outcome.and(Err(StreamError::internal(
+                        "rabbitmq: cannot close the channel",
+                        e,
+                    )));
+                }
+            }
         }
+        outcome
     }
 }
 

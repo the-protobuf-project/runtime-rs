@@ -415,6 +415,46 @@ async fn jetstream_positioned_replays_from_earliest() {
     provider.delete(&stream.id).await.unwrap();
 }
 
+/// A pipelined batch several times its in-flight window, and larger than
+/// async-nats' 5,000 outstanding acks, finishes and is stored in order.
+#[tokio::test]
+async fn jetstream_a_large_batch_lands_in_order() {
+    let provider = jetstream().await;
+    let subject = unique(SUBJECT);
+    let (stream, m) = declare(&provider, &[&subject]).await;
+
+    let payloads = (0..6_000).map(|i| event(&i.to_string())).collect();
+    let ids = tokio::time::timeout(
+        Duration::from_secs(30),
+        as_batch(m.as_ref())
+            .unwrap()
+            .publish_batch(&subject, payloads, &Options::default()),
+    )
+    .await
+    .expect("the batch finished")
+    .unwrap();
+    assert_eq!(ids.len(), 6_000);
+
+    let mut deliveries = as_positioned(m.as_ref())
+        .unwrap()
+        .consume_from(
+            &subject,
+            "in-order",
+            Position::Earliest,
+            &Options::default(),
+        )
+        .await
+        .unwrap();
+    for id in ids {
+        let delivery = next(&mut deliveries).await;
+        assert_eq!(delivery.id(), id);
+        delivery.ack().await.unwrap();
+    }
+
+    drop(deliveries);
+    provider.delete(&stream.id).await.unwrap();
+}
+
 #[tokio::test]
 async fn jetstream_terminates_a_foreign_payload() {
     let nc = client().await;

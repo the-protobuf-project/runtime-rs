@@ -17,6 +17,26 @@
 # e2e-other / e2e-other-secret. Sessions and their queued QoS 1 messages
 # persist to the `mqtt-data` volume, so the restart test can prove a durable
 # consumer's backlog survives the broker going away.
+#
+# STREAMS_DURABILITY picks how often the broker writes that state down:
+#
+#   strict (default)  autosave every second (autosave_interval 1), what the e2e
+#                     suite runs against. A crash, as opposed to a clean stop,
+#                     loses at most the last second of session state. Each
+#                     save rewrites the whole database, so under load with a
+#                     deep backlog the broker spends real time on it.
+#   prod              Mosquitto's own default, autosave_interval 1800: the
+#                     database is written every 30 minutes and on every clean
+#                     shutdown (a `docker restart` is one, so the restart test
+#                     passes either way). A crash loses up to 30 minutes of
+#                     queued messages and session changes; in exchange the
+#                     broker almost never stops to write.
+#
+# Mosquitto has no per-message fsync at all; even strict is a periodic
+# snapshot. Durability across a hard crash is not something it offers.
+#
+#   STREAMS_DURABILITY=prod docker compose -p tpp-streams-e2e-mqtt \
+#       -f streams/docker/compose.mqtt.secure.yaml up -d --wait
 name: tpp-streams-e2e-mqtt
 services:
   mqtt:
@@ -30,13 +50,21 @@ services:
       - ./compose.mqtt.secure.acl:/mosquitto/acl.src:ro
       - ./tls/out:/certs:ro
       - mqtt-data:/mosquitto/data
-    # Writes the password file (hashed by mosquitto_passwd) and the ACLs, owned
-    # by the broker's user as Mosquitto 2.1 wants them, then runs the broker.
+    # Writes the password file (hashed by mosquitto_passwd), the ACLs, and the
+    # configuration with its durability lines, owned by the broker's user as
+    # Mosquitto 2.1 wants them, then runs the broker.
     # It runs again on every restart, so the files are always these.
+    environment:
+      STREAMS_DURABILITY: ${STREAMS_DURABILITY:-strict}
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         set -e
+        case "$$STREAMS_DURABILITY" in
+          strict) autosave=1 ;;
+          prod) autosave=1800 ;;
+          *) echo "STREAMS_DURABILITY is strict or prod, not $$STREAMS_DURABILITY" >&2; exit 1 ;;
+        esac
         rm -rf /mosquitto/auth && mkdir /mosquitto/auth
         mosquitto_passwd -c -b /mosquitto/auth/passwd e2e-app e2e-app-secret
         mosquitto_passwd -b /mosquitto/auth/passwd e2e-other e2e-other-secret
@@ -44,7 +72,10 @@ services:
         chown -R mosquitto:mosquitto /mosquitto/auth /mosquitto/data
         chmod 0700 /mosquitto/auth
         chmod 0600 /mosquitto/auth/passwd /mosquitto/auth/acl
-        exec /usr/sbin/mosquitto -c /mosquitto/config/mosquitto.conf
+        cp /mosquitto/config/mosquitto.conf /mosquitto/auth/mosquitto.conf
+        printf 'autosave_interval %s\nautosave_on_changes false\n' "$$autosave" >> /mosquitto/auth/mosquitto.conf
+        echo "durability $$STREAMS_DURABILITY: autosave_interval $$autosave"
+        exec /usr/sbin/mosquitto -c /mosquitto/auth/mosquitto.conf
     healthcheck:
       test:
         - CMD

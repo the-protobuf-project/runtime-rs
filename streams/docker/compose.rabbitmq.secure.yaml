@@ -14,6 +14,23 @@
 # data directory is a named volume and the hostname and node name are fixed,
 # so durable exchanges, durable queues, and persistent messages are found
 # again after `docker restart tpp-streams-rabbitmq-secure`.
+#
+# Durability is STREAMS_DURABILITY (strict, the default, or prod), as for the
+# other secure brokers. On RabbitMQ the two are the same broker settings, and
+# the container only records which was asked for (label
+# tpp-streams.durability), because RabbitMQ's default already is the strict
+# mode: with publisher confirms, which the driver always uses, a persistent
+# message routed to a durable queue is confirmed only once the queue has
+# written it to disk and fsynced it. The queue store fsyncs in groups, once per
+# batch of pending confirms rather than once per message, so many concurrent
+# publishers share one flush; that is the production behaviour too. There is no
+# supported setting that confirms before the disk write, and none that fsyncs
+# more often, so `prod` cannot be weaker without leaving RabbitMQ's guarantees
+# (for example non-persistent messages or no confirms), which the driver does
+# not do. What bounds durable throughput here is that flush, in Docker
+# Desktop's VM, on the confirm path of every publish.
+#
+#   STREAMS_DURABILITY=prod docker compose -p tpp-streams-e2e-rabbitmq -f streams/docker/compose.rabbitmq.secure.yaml up -d --wait
 services:
   rabbitmq:
     image: rabbitmq:management-alpine
@@ -22,6 +39,8 @@ services:
     # Same reason as compose.rabbitmq.yaml: the cookie writer and reader must
     # be one user.
     user: rabbitmq
+    labels:
+      tpp-streams.durability: ${STREAMS_DURABILITY:-strict}
     environment:
       RABBITMQ_NODENAME: rabbit@rabbitmq
       RABBITMQ_ENABLED_PLUGINS_FILE: /etc/rabbitmq/enabled_plugins.secure

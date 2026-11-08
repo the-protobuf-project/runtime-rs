@@ -10,9 +10,26 @@
 #
 # `nats` (port 14223) then wants credentials: the test-only username and
 # password, or the NKey in compose.nats.secure.nkey, each limited to the e2e
-# subjects. JetStream stores on the `nats-data` volume with
-# sync_interval: always, so acked messages and consumer positions survive
-# `docker restart`.
+# subjects (the password user also gets `bench.>` for benches/throughput's
+# `tls` profile). JetStream stores on the `nats-data` volume.
+#
+# Durability is STREAMS_DURABILITY, read when the container is created:
+#
+#   strict (default)  sync_interval: always (compose.nats.secure.strict.conf).
+#                     Every write is fsynced before its publish ack, so an
+#                     acked message survives the container or the VM being
+#                     killed. The e2e suite runs on this. It costs a disk
+#                     flush per publish ack round, which is what bounds
+#                     JetStream throughput here.
+#   prod              the server default (compose.nats.secure.prod.conf):
+#                     writes reach the page cache before the ack and are
+#                     fsynced every 2 minutes. An acked message survives the
+#                     server process dying and `docker restart`, but a kernel
+#                     crash or power loss can lose the last interval on one
+#                     replica. Production NATS answers that with R3 streams
+#                     (the ack means a quorum has it), not with fsync.
+#
+#   STREAMS_DURABILITY=prod docker compose -p tpp-streams-e2e-nats -f streams/docker/compose.nats.secure.yaml up -d --wait
 #
 # `nats-certmap` (port 14224) uses verify_and_map: the client certificate's
 # subject is the user, with no further credentials.
@@ -28,6 +45,7 @@ services:
     command: ["-c", "/etc/nats/nats.conf"]
     volumes:
       - ./compose.nats.secure.conf:/etc/nats/nats.conf:ro
+      - ./compose.nats.secure.${STREAMS_DURABILITY:-strict}.conf:/etc/nats/durability.conf:ro
       - ./tls/out:/certs:ro
       - nats-data:/data
     healthcheck:

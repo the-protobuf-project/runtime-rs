@@ -654,6 +654,61 @@ async fn an_acknowledged_message_is_not_redelivered() {
     silent(&mut again, Duration::from_secs(2)).await;
 }
 
+/// With `confirm_acks` off an ack returns before its XACK is answered, and
+/// many go out as one multi-id XACK; every one still lands, so the group ends
+/// with nothing pending and a fresh consumer under the name sees nothing again.
+#[tokio::test]
+async fn unconfirmed_acks_still_settle_every_message() {
+    let config = RedisConfig {
+        confirm_acks: false,
+        ..config()
+    };
+    let prefix = config.prefix.clone();
+    let provider = durable_with(config).await;
+    let (stream, m) = bind(&provider, &[SUBJECT]).await;
+    let d = as_durable(m.as_ref()).unwrap();
+    let mut first = d
+        .consume(SUBJECT, "workers", &Options::default().with_prefetch(256))
+        .await
+        .unwrap();
+
+    const TOTAL: usize = 500;
+    as_batch(m.as_ref())
+        .unwrap()
+        .publish_batch(
+            SUBJECT,
+            (0..TOTAL).map(|i| event("u", &i.to_string())).collect(),
+            &Options::default(),
+        )
+        .await
+        .unwrap();
+    let mut seen = HashSet::new();
+    while seen.len() < TOTAL {
+        let delivery = recv_delivery(&mut first, WITHIN).await;
+        assert_eq!(delivery.attempt(), 1);
+        seen.insert(delivery.id().to_owned());
+        delivery.ack().await.unwrap();
+    }
+
+    let key = format!("{prefix}:durable:s:{}:{SUBJECT}", stream.id);
+    eventually("every ack to land", || {
+        let key = key.clone();
+        async move {
+            let reply: redis::Value =
+                command(redis::cmd("XPENDING").arg(&key).arg("workers")).await;
+            matches!(&reply, redis::Value::Array(v) if v.first() == Some(&redis::Value::Int(0)))
+        }
+    })
+    .await;
+    drop(first);
+
+    let mut again = d
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    silent(&mut again, Duration::from_secs(1)).await;
+}
+
 /// A named consumer's position outlives the process reading it.
 #[tokio::test]
 async fn a_consumer_resumes_where_the_name_left_off() {

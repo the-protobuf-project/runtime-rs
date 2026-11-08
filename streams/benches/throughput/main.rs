@@ -126,13 +126,19 @@ impl Args {
         }
         assert!(a.subjects > 0 && a.publishers > 0 && a.consumers > 0 && a.batch > 0);
         assert!(
-            matches!(a.scenario.as_str(), "fanout" | "batch" | "durable" | "group"),
+            matches!(
+                a.scenario.as_str(),
+                "fanout" | "batch" | "durable" | "group"
+            ),
             "--scenario is fanout, batch, durable, or group"
         );
         if a.scenario == "batch" {
             a.message = "int64".into();
         }
-        assert!(matches!(a.message.as_str(), "string" | "int64"), "--message is string or int64");
+        assert!(
+            matches!(a.message.as_str(), "string" | "int64"),
+            "--message is string or int64"
+        );
         a
     }
 
@@ -167,7 +173,10 @@ fn pinned_id(seq: u64) -> String {
 /// sequence and, when the id carries a send time, its end-to-end latency.
 fn read(args: &Args, msg: &Message) -> Option<(u64, Option<Duration>)> {
     let pinned = msg.id().split_once('.').and_then(|(seq, sent)| {
-        Some((seq.parse::<u64>().ok()?, Duration::from_nanos(sent.parse().ok()?)))
+        Some((
+            seq.parse::<u64>().ok()?,
+            Duration::from_nanos(sent.parse().ok()?),
+        ))
     });
     match args.message.as_str() {
         "int64" => {
@@ -208,7 +217,10 @@ struct Shared {
 impl Shared {
     fn error(&self, n: u64, e: impl std::fmt::Display) {
         self.publish_errors.fetch_add(n, Ordering::Relaxed);
-        self.first_error.lock().unwrap().get_or_insert_with(|| e.to_string());
+        self.first_error
+            .lock()
+            .unwrap()
+            .get_or_insert_with(|| e.to_string());
     }
 }
 
@@ -249,9 +261,15 @@ async fn run(args: &Args) -> serde_json::Value {
         .expect("create stream");
     if let Some(sub) = &conn.subscriber {
         // Brokerless backends keep stream declarations on each side.
-        sub.create(stream.clone()).await.expect("declare stream on the subscriber side");
+        sub.create(stream.clone())
+            .await
+            .expect("declare stream on the subscriber side");
     }
-    let publisher: Arc<dyn Manager> = conn.publisher.bind(&stream.id).await.expect("bind publisher");
+    let publisher: Arc<dyn Manager> = conn
+        .publisher
+        .bind(&stream.id)
+        .await
+        .expect("bind publisher");
     let receiver: Arc<dyn Manager> = match &conn.subscriber {
         Some(sub) => sub.bind(&stream.id).await.expect("bind subscriber"),
         None => publisher.clone(),
@@ -265,7 +283,12 @@ async fn run(args: &Args) -> serde_json::Value {
         for _ in 0..args.receivers_per_subject() {
             let slot = Arc::new(Mutex::new(Received::default()));
             let messages = attach(args, receiver.as_ref(), s).await;
-            tasks.push(tokio::spawn(receive(args.clone(), messages, slot.clone(), shared.clone())));
+            tasks.push(tokio::spawn(receive(
+                args.clone(),
+                messages,
+                slot.clone(),
+                shared.clone(),
+            )));
             slots.push(slot);
         }
     }
@@ -286,7 +309,11 @@ async fn run(args: &Args) -> serde_json::Value {
             body.clone(),
         );
         pubs.push(tokio::spawn(async move {
-            let step = if args.scenario == "batch" { args.batch as u64 } else { 1 };
+            let step = if args.scenario == "batch" {
+                args.batch as u64
+            } else {
+                1
+            };
             loop {
                 let first = next.fetch_add(step, Ordering::Relaxed);
                 if first >= args.messages {
@@ -301,18 +328,26 @@ async fn run(args: &Args) -> serde_json::Value {
                 if args.scenario == "batch" {
                     let payloads = (first..last).map(|seq| payload(&args, seq, "")).collect();
                     let result = match as_batch(publisher.as_ref()) {
-                        Ok(b) => b.publish_batch(subject, payloads, &Options::default()).await,
+                        Ok(b) => {
+                            b.publish_batch(subject, payloads, &Options::default())
+                                .await
+                        }
                         Err(e) => Err(e),
                     };
                     match result {
                         Ok(ids) => {
-                            shared.published.fetch_add(ids.len() as u64, Ordering::Relaxed);
+                            shared
+                                .published
+                                .fetch_add(ids.len() as u64, Ordering::Relaxed);
                         }
                         Err(e) => shared.error(last - first, e),
                     }
                 } else {
                     let opts = Options::default().with_id(pinned_id(first));
-                    match publisher.publish(subject, payload(&args, first, &body), &opts).await {
+                    match publisher
+                        .publish(subject, payload(&args, first, &body), &opts)
+                        .await
+                    {
                         Ok(_) => {
                             shared.published.fetch_add(1, Ordering::Relaxed);
                         }
@@ -357,13 +392,27 @@ async fn run(args: &Args) -> serde_json::Value {
         all.undecodable += part.undecodable;
         all.ack_errors += part.ack_errors;
     }
-    let cleanup = conn.publisher.delete(&stream.id).await.err().map(|e| e.to_string());
+    let cleanup = conn
+        .publisher
+        .delete(&stream.id)
+        .await
+        .err()
+        .map(|e| e.to_string());
     let _ = conn.publisher.close().await;
     if let Some(sub) = &conn.subscriber {
         let _ = sub.close().await;
     }
     let first_error = shared.first_error.lock().unwrap().clone();
-    summarize(args, &shared, published, publish_secs, e2e_secs, all, first_error, cleanup)
+    summarize(
+        args,
+        &shared,
+        published,
+        publish_secs,
+        e2e_secs,
+        all,
+        first_error,
+        cleanup,
+    )
 }
 
 /// One received message: lent, for a durable consumer, or handed over.
@@ -378,7 +427,10 @@ async fn attach(args: &Args, m: &dyn Manager, subject: &str) -> BoxStream<'stati
         "durable" => {
             let name = format!("bench-{}", subject.replace('.', "-"));
             let deliveries = match as_positioned(m) {
-                Ok(p) => p.consume_from(subject, &name, Position::Earliest, &opts).await,
+                Ok(p) => {
+                    p.consume_from(subject, &name, Position::Earliest, &opts)
+                        .await
+                }
                 Err(_) => match as_durable(m) {
                     Ok(d) => d.consume(subject, &name, &opts).await,
                     Err(e) => Err(e),
@@ -425,7 +477,8 @@ async fn receive(
                 Some((seq, latency)) => {
                     s.seqs.push(seq);
                     if let Some(l) = latency {
-                        s.latencies_us.push(l.as_micros().min(u128::from(u32::MAX)) as u32);
+                        s.latencies_us
+                            .push(l.as_micros().min(u128::from(u32::MAX)) as u32);
                     }
                 }
                 None => s.undecodable += 1,

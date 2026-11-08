@@ -1,4 +1,9 @@
-//! Kafka. `plain` is docker/compose.kafka.yaml.
+//! Kafka. `plain` is docker/compose.kafka.yaml; `tls` is the mutual-TLS
+//! listener of docker/compose.kafka.secure.yaml, connecting exactly as
+//! tests/kafka_e2e.rs does with its primary (`Mtls`) principal: TLS verified
+//! against docker/tls/out/ca.crt, client certificate presented.
+
+use std::path::PathBuf;
 
 use streams::{
     Registry,
@@ -7,14 +12,39 @@ use streams::{
 
 use super::{Conn, Error, env, unknown_profile};
 
+fn cert(name: &str) -> String {
+    let dir = std::env::var("STREAMS_E2E_TLS_DIR").map_or_else(
+        |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"),
+        PathBuf::from,
+    );
+    dir.join(name).to_string_lossy().into_owned()
+}
+
 pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     let mut client = ClientConfig::new();
     match profile {
         "plain" => {
             client.set("bootstrap.servers", env("KAFKA_ADDR", "127.0.0.1:19092"));
         }
+        "tls" => {
+            client
+                .set(
+                    "bootstrap.servers",
+                    env("KAFKA_E2E_ADDR", "127.0.0.1:19093"),
+                )
+                .set("security.protocol", "ssl")
+                .set("ssl.ca.location", cert("ca.crt"))
+                .set("ssl.endpoint.identification.algorithm", "https")
+                .set("ssl.certificate.location", cert("client.crt"))
+                .set("ssl.key.location", cert("client.key"));
+        }
         other => return Err(unknown_profile("kafka", other)),
     }
-    let config = KafkaConfig { prefix: "bench".into(), partitions: 10, registry, ..KafkaConfig::default() };
+    let config = KafkaConfig {
+        prefix: "bench".into(),
+        partitions: 10,
+        registry,
+        ..KafkaConfig::default()
+    };
     Ok(Conn::one(KafkaProvider::connect(client, config).await?))
 }

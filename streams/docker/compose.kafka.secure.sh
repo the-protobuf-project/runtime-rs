@@ -9,6 +9,15 @@ cat /certs/server.key /certs/server-chain.crt > /tmp/keystore.pem
 chmod 600 /tmp/keystore.pem
 rm -f /tmp/auth-ready
 
+# Durability (see the compose header): strict keeps the per-record flush the
+# compose file sets; prod leaves flushing to Kafka's defaults.
+case "${STREAMS_DURABILITY:-strict}" in
+  strict) ;;
+  prod) unset KAFKA_LOG_FLUSH_INTERVAL_MESSAGES ;;
+  *) echo "STREAMS_DURABILITY must be strict or prod, not ${STREAMS_DURABILITY}" >&2; exit 1 ;;
+esac
+echo "===> durability: ${STREAMS_DURABILITY:-strict}"
+
 /etc/kafka/docker/run &
 broker=$!
 # Pass docker stop/restart on to the broker so it shuts down cleanly.
