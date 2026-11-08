@@ -1,0 +1,23 @@
+# A throwaway MQTT 5 broker for examples/mqtt.rs.
+#
+#   docker compose -f docker/compose.mqtt.yaml up -d --wait
+#   cargo run --features mqtt --example mqtt
+#
+# tests/mqtt.rs does not need it: it starts rumqttd in-process. This is for
+# trying the provider against a second, independent broker implementation.
+# Host port 11883, not 1883, so it can run beside a broker you already have.
+# Nothing is persisted, so a restart discards every durable session.
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: tpp-streams-mqtt
+    ports:
+      - "127.0.0.1:11883:1883"
+    volumes:
+      - ./compose.mqtt.mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    restart: "no"

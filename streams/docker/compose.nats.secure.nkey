@@ -1,0 +1,5 @@
+# TEST-ONLY NKey for tests/nats_e2e.rs. It protects nothing: its public key,
+#   UCWA6YQT4YIBL25LZ7XRBANILNFH62PXDAXGDRRF47SVYJ4WQDSS5C7W
+# is a user of the throwaway broker in compose.nats.secure.yaml, which binds to
+# 127.0.0.1 only. Never reuse it anywhere else. The seed is the line below.
+SUAC3KHH3TNDIQZHHE6WUVPZHEARMBHAWY77HUHHL53QTJAVCRQ7PN6CIA
