@@ -193,12 +193,12 @@ dependencies = [
  "arrow-arith",
  "arrow-array 59.3.2",
  "arrow-buffer 59.3.2",
- "arrow-cast",
+ "arrow-cast 59.3.2",
  "arrow-csv",
  "arrow-data 59.3.2",
  "arrow-ipc 59.3.2",
  "arrow-json",
- "arrow-ord",
+ "arrow-ord 59.3.2",
  "arrow-row",
  "arrow-schema 59.3.2",
  "arrow-select 59.3.2",
@@ -288,10 +288,31 @@ dependencies = [
  "arrow-array 59.3.2",
  "arrow-buffer 59.3.2",
  "arrow-data 59.3.2",
- "arrow-ord",
+ "arrow-ord 59.3.2",
  "arrow-schema 59.3.2",
  "arrow-select 59.3.2",
- "atoi",
+ "atoi 2.0.0",
+ "base64 0.23.1",
+ "chrono",
+ "half",
+ "lexical-core",
+ "num-traits",
+ "ryu",
+]
+
+[[package]]
+name = "arrow-cast"
+version = "60.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "baa83a0752814a1922d5ee75032524ca9bbfb7f60ee35a67ed4ab8b275260aaf"
+dependencies = [
+ "arrow-array 60.1.0",
+ "arrow-buffer 60.1.0",
+ "arrow-data 60.1.0",
+ "arrow-ord 60.1.0",
+ "arrow-schema 60.1.0",
+ "arrow-select 60.1.0",
+ "atoi 3.1.1",
  "base64 0.23.1",
  "chrono",
  "half",
@@ -318,7 +339,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85b1984628b091b8319b3c305fce21d04f9e9b2578bb733b0d0108462ae1d698"
 dependencies = [
  "arrow-array 59.3.2",
- "arrow-cast",
+ "arrow-cast 59.3.2",
  "arrow-schema 59.3.2",
  "chrono",
  "csv",
@@ -360,10 +381,31 @@ checksum = "43f998a8cc9ffdc37731b66c0414dccf4f4f11a03d9136d383ef10f95181cd7d"
 dependencies = [
  "arrow-array 59.3.2",
  "arrow-buffer 59.3.2",
- "arrow-cast",
+ "arrow-cast 59.3.2",
  "arrow-data 59.3.2",
  "arrow-ipc 59.3.2",
  "arrow-schema 59.3.2",
+ "base64 0.23.1",
+ "bytes",
+ "futures",
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
+name = "arrow-flight"
+version = "60.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8709a798bd0825cb6207861aad09093133d64314c25569132dbc7f9f083879a5"
+dependencies = [
+ "arrow-array 60.1.0",
+ "arrow-buffer 60.1.0",
+ "arrow-cast 60.1.0",
+ "arrow-data 60.1.0",
+ "arrow-ipc 60.1.0",
+ "arrow-schema 60.1.0",
  "base64 0.23.1",
  "bytes",
  "futures",
@@ -409,8 +451,8 @@ checksum = "e2bc4d56a0dad84cc51c5812ccff48b642047a1f3be80349cd84318983e79edb"
 dependencies = [
  "arrow-array 59.3.2",
  "arrow-buffer 59.3.2",
- "arrow-cast",
- "arrow-ord",
+ "arrow-cast 59.3.2",
+ "arrow-ord 59.3.2",
  "arrow-schema 59.3.2",
  "arrow-select 59.3.2",
  "chrono",
@@ -437,6 +479,20 @@ dependencies = [
  "arrow-data 59.3.2",
  "arrow-schema 59.3.2",
  "arrow-select 59.3.2",
+]
+
+[[package]]
+name = "arrow-ord"
+version = "60.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4c58f2ae6dd1480fc413f7320a547e39dcc499c23d4f36ca19572b685811e6e4"
+dependencies = [
+ "arrow-array 60.1.0",
+ "arrow-buffer 60.1.0",
+ "arrow-cmp",
+ "arrow-data 60.1.0",
+ "arrow-schema 60.1.0",
+ "arrow-select 60.1.0",
 ]
 
 [[package]]
@@ -559,6 +615,15 @@ name = "atoi"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f28d99ec8bfea296261ca1af174f24225171fea9664ba9003cbebee704810528"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
+name = "atoi"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d12c37257553c19e9aee6cba77814fdc9e07844abfc8b3a2c377cd920ee5a993"
 dependencies = [
  "num-traits",
 ]
@@ -1917,7 +1982,7 @@ checksum = "6bff0ac245172cadcde0919bb5e7f63da6f8cc56a562f491a191727596fe1c1f"
 dependencies = [
  "arrow",
  "arrow-array 59.3.2",
- "arrow-flight",
+ "arrow-flight 59.3.2",
  "arrow-schema 59.3.2",
  "bytes",
  "chrono",
@@ -4418,7 +4483,7 @@ name = "tpp-database"
 version = "0.1.0"
 dependencies = [
  "arrow-array 60.1.0",
- "arrow-flight",
+ "arrow-flight 60.1.0",
  "arrow-ipc 60.1.0",
  "arrow-schema 60.1.0",
  "async-trait",
