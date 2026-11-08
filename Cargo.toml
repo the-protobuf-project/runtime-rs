@@ -5,6 +5,12 @@ members = ["network", "cache", "agents", "grpc", "database", "telemetry", "strea
 # never lands in the CI crate matrix, the release build, or Cargo.lock.
 exclude = ["tools/docgen"]
 
+# rumqttc 0.25.1 pins rustls-webpki 0.102.x, which has five RustSec advisories.
+# Keep its published source with only the dependency floor raised until upstream
+# releases a version that supports the fixed 0.103.x line.
+[patch.crates-io]
+rumqttc = { path = "vendor/rumqttc" }
+
 # Consumed by tools/docgen, which generates README.md in full.
 [workspace.metadata.docgen]
 tagline = """
