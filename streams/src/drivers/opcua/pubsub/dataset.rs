@@ -169,10 +169,18 @@ mod tests {
             DataSet::decode_payload(&Payload::json(&1).unwrap()),
             Err(StreamError::Unsupported(_))
         ));
-        for bytes in [&[][..], &[1, 0, 0, 0], &[0xff, 0xff, 0xff, 0xff], &[0, 0, 0, 0, 9]] {
+        for bytes in [
+            &[][..],
+            &[1, 0, 0, 0],
+            &[0xff, 0xff, 0xff, 0xff],
+            &[0, 0, 0, 0, 9],
+        ] {
             let payload = Payload::from_parts(DATASET_CODEC_NAME, bytes.to_vec());
             assert!(
-                matches!(DataSet::decode_payload(&payload), Err(StreamError::Codec(_))),
+                matches!(
+                    DataSet::decode_payload(&payload),
+                    Err(StreamError::Codec(_))
+                ),
                 "{bytes:?}"
             );
         }

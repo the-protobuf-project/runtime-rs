@@ -11,6 +11,8 @@ mod mqtt;
 mod nats;
 #[cfg(feature = "opcua")]
 mod opcua;
+#[cfg(feature = "opcua")]
+mod opcua_pubsub;
 #[cfg(feature = "rabbitmq")]
 mod rabbitmq;
 #[cfg(feature = "redis")]
@@ -39,7 +41,7 @@ pub type Error = Box<dyn std::error::Error + Send + Sync>;
 
 /// Connects `backend` with `profile`. Backend names:
 /// kafka, nats (core), jetstream, rabbitmq, redis (pub/sub), redis-durable,
-/// mqtt, zeromq.
+/// mqtt, zeromq, opcua, opcua-pubsub.
 pub async fn connect(backend: &str, profile: &str, registry: Registry) -> Result<Conn, Error> {
     let _ = (profile, &registry);
     match backend {
@@ -61,6 +63,8 @@ pub async fn connect(backend: &str, profile: &str, registry: Registry) -> Result
         "zeromq" => zeromq::connect(profile, registry).await,
         #[cfg(feature = "opcua")]
         "opcua" => opcua::connect(profile, registry).await,
+        #[cfg(feature = "opcua")]
+        "opcua-pubsub" => opcua_pubsub::connect(profile, registry).await,
         other => Err(format!("backend {other:?} is unknown or its feature is not enabled").into()),
     }
 }

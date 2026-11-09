@@ -170,12 +170,7 @@ async fn inject(client: &AsyncClient, events: &mut EventLoop, topic: &str, body:
 
 async fn inject_raw(client: &AsyncClient, events: &mut EventLoop, topic: &str, body: &str) {
     client
-        .publish(
-            topic,
-            QoS::AtLeastOnce,
-            false,
-            Bytes::from(body.to_owned()),
-        )
+        .publish(topic, QoS::AtLeastOnce, false, Bytes::from(body.to_owned()))
         .await
         .unwrap();
     loop {
@@ -272,7 +267,10 @@ async fn create_refuses_what_is_not_a_topic_level() {
             })
             .await
             .unwrap_err();
-        assert!(matches!(error, StreamError::Unsupported(_)), "{id} {subject}: {error}");
+        assert!(
+            matches!(error, StreamError::Unsupported(_)),
+            "{id} {subject}: {error}"
+        );
     }
     assert!(streams.list().await.unwrap().is_empty());
 }
@@ -352,7 +350,11 @@ async fn a_writer_publishes_and_delivers_its_whole_data_set() {
     let mut fields = Vec::new();
     for _ in 0..3 {
         let message = next(&mut all).await;
-        assert_eq!(message.id(), id, "the fields of one DataSetMessage share its id");
+        assert_eq!(
+            message.id(),
+            id,
+            "the fields of one DataSetMessage share its id"
+        );
         fields.push((message.subject().to_owned(), value(&message)));
     }
     assert_eq!(
@@ -368,7 +370,11 @@ async fn a_writer_publishes_and_delivers_its_whole_data_set() {
     quiet(&mut one).await;
 
     manager
-        .publish("boiler/Running", OpcUaValue::payload(false), &Options::default())
+        .publish(
+            "boiler/Running",
+            OpcUaValue::payload(false),
+            &Options::default(),
+        )
         .await
         .unwrap();
     let running = next(&mut all).await;
@@ -390,7 +396,11 @@ async fn the_wire_is_part_14_json() {
         .await
         .unwrap();
     manager
-        .publish("boiler/Temperature", OpcUaValue::payload(22.0f64), &Options::default())
+        .publish(
+            "boiler/Temperature",
+            OpcUaValue::payload(22.0f64),
+            &Options::default(),
+        )
         .await
         .unwrap();
 
@@ -398,7 +408,10 @@ async fn the_wire_is_part_14_json() {
     assert_eq!(publish.topic, "opcua/json/data/plant-1/line-a/boiler");
     assert!(!publish.retain);
     assert_eq!(
-        publish.properties.as_ref().and_then(|p| p.content_type.as_deref()),
+        publish
+            .properties
+            .as_ref()
+            .and_then(|p| p.content_type.as_deref()),
         Some("application/json")
     );
     let json: Value = serde_json::from_slice(&publish.payload).unwrap();
@@ -446,7 +459,11 @@ async fn a_batch_is_one_network_message() {
 
     let publish = raw_next(&mut events).await;
     let network = NetworkMessage::from_json(&publish.payload).unwrap();
-    assert_eq!(network.messages.len(), 5, "one NetworkMessage for the batch");
+    assert_eq!(
+        network.messages.len(),
+        5,
+        "one NetworkMessage for the batch"
+    );
     let message_id = network.message_id.clone().unwrap();
     for (n, (message, id)) in network.messages.iter().zip(&ids).enumerate() {
         assert_eq!(message.sequence_number, Some(n as u32 + 1));
@@ -543,9 +560,15 @@ async fn refusals() {
             .publish(subject, OpcUaValue::payload(1i32), &opts)
             .await
             .unwrap_err();
-        assert!(matches!(error, StreamError::UnknownSubject { .. }), "{subject}: {error}");
+        assert!(
+            matches!(error, StreamError::UnknownSubject { .. }),
+            "{subject}: {error}"
+        );
         let error = manager.subscribe(subject, &opts).await.err().unwrap();
-        assert!(matches!(error, StreamError::UnknownSubject { .. }), "{subject}: {error}");
+        assert!(
+            matches!(error, StreamError::UnknownSubject { .. }),
+            "{subject}: {error}"
+        );
     }
 
     // A field takes an OPC UA value, a writer a DataSet.
@@ -554,7 +577,10 @@ async fn refusals() {
         ("boiler", OpcUaValue::payload(1i32)),
     ] {
         let error = manager.publish(subject, payload, &opts).await.unwrap_err();
-        assert!(matches!(error, StreamError::Unsupported(_)), "{subject}: {error}");
+        assert!(
+            matches!(error, StreamError::Unsupported(_)),
+            "{subject}: {error}"
+        );
     }
 
     let error = manager
@@ -591,7 +617,10 @@ async fn refusals() {
         .publish_metadata("line-a", "nobody", Default::default())
         .await
         .unwrap_err();
-    assert!(matches!(error, StreamError::UnknownSubject { .. }), "{error}");
+    assert!(
+        matches!(error, StreamError::UnknownSubject { .. }),
+        "{error}"
+    );
 
     // A closed provider publishes nothing.
     streams.close().await.unwrap();
@@ -720,7 +749,11 @@ async fn a_group_shares_the_writer() {
     }
     assert!(a > 0 && b > 0, "the broker split the writer: {a} and {b}");
     quiet(&mut first).await;
-    assert_eq!(streams.sequence_gaps(), 0, "a group member does not track gaps");
+    assert_eq!(
+        streams.sequence_gaps(),
+        0,
+        "a group member does not track gaps"
+    );
 }
 
 #[tokio::test]

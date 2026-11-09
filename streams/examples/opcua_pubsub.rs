@@ -21,8 +21,7 @@ use streams::{
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let addr =
-        std::env::var("OPCUA_PUBSUB_MQTT_ADDR").unwrap_or_else(|_| "127.0.0.1:11885".into());
+    let addr = std::env::var("OPCUA_PUBSUB_MQTT_ADDR").unwrap_or_else(|_| "127.0.0.1:11885".into());
     let (host, port) = addr.rsplit_once(':').ok_or("host:port")?;
     let mut options = MqttOptions::new("example", host, port.parse()?);
     options.set_max_packet_size(Some(1 << 20));

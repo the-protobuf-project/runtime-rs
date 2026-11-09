@@ -366,7 +366,12 @@ impl PubSubProvider {
         self.inner
             .links
             .link()
-            .publish(&topic, self.inner.config.qos, true, message.to_json()?.into())
+            .publish(
+                &topic,
+                self.inner.config.qos,
+                true,
+                message.to_json()?.into(),
+            )
             .await?;
         lock(&self.inner.versions).insert((group.group, writer.to_owned()), version.clone());
         tracing::info!(stream, writer, topic, "opcua pubsub: metadata published");
@@ -396,10 +401,16 @@ impl PubSubProvider {
                     }
                     Event::Incoming(Incoming::SubAck(ack))
                         if !ack.return_codes.iter().all(|c| {
-                            matches!(c, rumqttc::v5::mqttbytes::v5::SubscribeReasonCode::Success(_))
+                            matches!(
+                                c,
+                                rumqttc::v5::mqttbytes::v5::SubscribeReasonCode::Success(_)
+                            )
                         }) =>
                     {
-                        return Err(failed(&format_args!("broker reason {:?}", ack.return_codes)));
+                        return Err(failed(&format_args!(
+                            "broker reason {:?}",
+                            ack.return_codes
+                        )));
                     }
                     _ => {}
                 }
@@ -407,10 +418,8 @@ impl PubSubProvider {
         })
         .await;
         let _ = client.disconnect().await;
-        let _ = tokio::time::timeout(link::LINGER, async {
-            while events.poll().await.is_ok() {}
-        })
-        .await;
+        let _ = tokio::time::timeout(link::LINGER, async { while events.poll().await.is_ok() {} })
+            .await;
         read.unwrap_or_else(|_| {
             Err(StreamError::NotFound(format!(
                 "opcua pubsub: no metadata is retained on {topic:?}"
@@ -490,7 +499,11 @@ impl Inner {
         first
     }
 
-    pub(crate) fn version(&self, group: &str, writer: &str) -> Option<ConfigurationVersionDataType> {
+    pub(crate) fn version(
+        &self,
+        group: &str,
+        writer: &str,
+    ) -> Option<ConfigurationVersionDataType> {
         lock(&self.versions)
             .get(&(group.to_owned(), writer.to_owned()))
             .cloned()

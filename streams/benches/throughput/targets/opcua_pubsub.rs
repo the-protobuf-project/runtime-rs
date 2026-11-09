@@ -147,8 +147,8 @@ fn tls() -> std::result::Result<Arc<ClientConfig>, Error> {
     for cert in CertificateDer::pem_file_iter(dir.join("ca.crt"))? {
         roots.add(cert?)?;
     }
-    let chain =
-        CertificateDer::pem_file_iter(dir.join("client.crt"))?.collect::<std::result::Result<Vec<_>, _>>()?;
+    let chain = CertificateDer::pem_file_iter(dir.join("client.crt"))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
     let key = PrivateKeyDer::from_pem_file(dir.join("client.key"))?;
     let config =
         ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))

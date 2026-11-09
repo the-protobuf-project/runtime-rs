@@ -31,8 +31,7 @@ const WRITER: &str = "simulation";
 const WITHIN: Duration = Duration::from_secs(60);
 
 async fn connect() -> PubSubProvider {
-    let addr =
-        std::env::var("OPCUA_PUBSUB_MQTT_ADDR").unwrap_or_else(|_| "127.0.0.1:11885".into());
+    let addr = std::env::var("OPCUA_PUBSUB_MQTT_ADDR").unwrap_or_else(|_| "127.0.0.1:11885".into());
     let (host, port) = addr
         .rsplit_once(':')
         .expect("OPCUA_PUBSUB_MQTT_ADDR is host:port");
@@ -81,14 +80,20 @@ async fn reads_opc_publisher_data_sets() {
         .subscribe(&format!("{WRITER}/StepUp"), &Options::default())
         .await
         .unwrap();
-    let mut all = manager.subscribe(WRITER, &Options::default()).await.unwrap();
+    let mut all = manager
+        .subscribe(WRITER, &Options::default())
+        .await
+        .unwrap();
 
     // StepUp counts up on the PLC; OPC Publisher reports each new value.
     let first = next(&mut step_up).await;
     assert_eq!(first.subject(), "simulation/StepUp");
     assert_eq!(first.codec(), CODEC_NAME);
     let value = OpcUaValue::data_value(&first).unwrap();
-    assert!(value.source_timestamp.is_some(), "the PLC's timestamp travels");
+    assert!(
+        value.source_timestamp.is_some(),
+        "the PLC's timestamp travels"
+    );
     assert!(value.server_timestamp.is_some());
     let mut last = as_u32(&first);
     for _ in 0..4 {
@@ -101,7 +106,11 @@ async fn reads_opc_publisher_data_sets() {
     let mut seen = std::collections::BTreeSet::new();
     while seen.len() < 2 {
         let message = next(&mut all).await;
-        let field = message.subject().strip_prefix("simulation/").unwrap().to_owned();
+        let field = message
+            .subject()
+            .strip_prefix("simulation/")
+            .unwrap()
+            .to_owned();
         let value = OpcUaValue::data_value(&message).unwrap().value;
         match field.as_str() {
             "StepUp" => assert!(matches!(value, Some(Variant::UInt32(_))), "{value:?}"),

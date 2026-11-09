@@ -14,6 +14,9 @@ broker-free logic.
 | `opcua.rs` | nothing: an in-process async-opcua server, restarted in place for the reconnect test | `cargo test -p tpp-streams --features opcua` |
 | `opcua_live.rs` | opc-plc from `compose.opcua.yaml` on 14840 (SecurityPolicy None, anonymous); restart test needs `STREAMS_E2E_RESTART=1` | `--features opcua,live-tests` |
 | `opcua_e2e.rs` | opc-plc from `compose.opcua.secure.yaml` on 14841 (Basic256Sha256 SignAndEncrypt, username/password, trusted client certificate, pinned server certificate; certificates from `compose.opcua.secure.sh`); proves None, wrong credentials, anonymous, and an untrusted certificate are refused; restart test needs `STREAMS_E2E_RESTART=1` | `--features opcua,tls,live-tests` |
+| `opcua_pubsub.rs` | nothing: an in-process `rumqttd` broker, plus a raw MQTT client that reads the wire and plays another Part 14 publisher | `cargo test -p tpp-streams --features opcua` |
+| `opcua_pubsub_live.rs` | OPC Publisher, opc-plc and Mosquitto from `compose.opcua.pubsub.yaml` on 11885: reads a third-party publisher's NetworkMessages and retained metadata | `--features opcua,live-tests` |
+| `opcua_pubsub_e2e.rs` | Mosquitto from `compose.mqtt.secure.yaml` on 18884 (mTLS plus `e2e-app`'s password, under its ACLs, so the Part 14 prefix is `e2e-app/<run>/opcua`); proves the ACLs and a wrong password refuse | `--features opcua,tls,live-tests` |
 | `redis_live.rs` | Redis on 16380 (`REDIS_ADDR`) | `--features redis,live-tests` |
 | `redis_e2e.rs` | mTLS + ACL Redis on 16381 (`compose.redis.secure.yaml`), providers as user `streams`; restart test needs `STREAMS_E2E_RESTART=1` | `--features redis,tls,live-tests` |
 | `nats_live.rs` | NATS with JetStream on 14222 | `--features nats,live-tests` |

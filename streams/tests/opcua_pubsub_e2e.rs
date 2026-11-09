@@ -44,7 +44,9 @@ fn tls() -> Arc<ClientConfig> {
     let dir = tls_dir();
     let mut roots = RootCertStore::empty();
     for cert in CertificateDer::pem_file_iter(dir.join("ca.crt")).expect("read ca.crt") {
-        roots.add(cert.expect("parse ca.crt")).expect("trust ca.crt");
+        roots
+            .add(cert.expect("parse ca.crt"))
+            .expect("trust ca.crt");
     }
     let chain = CertificateDer::pem_file_iter(dir.join("client.crt"))
         .expect("read client.crt")
@@ -62,8 +64,7 @@ fn tls() -> Arc<ClientConfig> {
 }
 
 fn options((user, password): (&str, &str)) -> MqttOptions {
-    let addr =
-        std::env::var("MQTT_E2E_PASSWORD_ADDR").unwrap_or_else(|_| "127.0.0.1:18884".into());
+    let addr = std::env::var("MQTT_E2E_PASSWORD_ADDR").unwrap_or_else(|_| "127.0.0.1:18884".into());
     let (host, port) = addr.rsplit_once(':').expect("host:port");
     let mut options = MqttOptions::new("template", host, port.parse().expect("a port"));
     options.set_connection_timeout(5);
@@ -123,7 +124,10 @@ async fn pubsub_round_trips_over_mutual_tls_and_a_password() {
     let prefix = prefix(APP.0);
     let streams = connect(APP, &prefix).await;
     let manager = declare(&streams, &["boiler"]).await;
-    let mut all = manager.subscribe("boiler", &Options::default()).await.unwrap();
+    let mut all = manager
+        .subscribe("boiler", &Options::default())
+        .await
+        .unwrap();
 
     let id = manager
         .publish(
@@ -229,7 +233,9 @@ async fn the_acls_hold() {
         .unwrap();
     assert_eq!(value(&next(&mut own).await), Variant::from(7i32));
     assert!(
-        timeout(Duration::from_millis(500), stolen.next()).await.is_err(),
+        timeout(Duration::from_millis(500), stolen.next())
+            .await
+            .is_err(),
         "the ACL kept e2e-other out"
     );
     app.close().await.unwrap();

@@ -95,7 +95,10 @@ impl PubSubManager {
     /// The fields a payload publishes: one field's value, or a whole DataSet.
     fn fields(field: Option<&str>, payload: &Payload) -> Result<Vec<(String, DataValue)>> {
         match field {
-            Some(field) => Ok(vec![(field.to_owned(), OpcUaValue::decode_payload(payload)?)]),
+            Some(field) => Ok(vec![(
+                field.to_owned(),
+                OpcUaValue::decode_payload(payload)?,
+            )]),
             None => Ok(DataSet::decode_payload(payload)?.fields),
         }
     }
@@ -200,7 +203,13 @@ impl Publisher for PubSubManager {
             tracing::error!(subject, id, %error, "opcua pubsub: could not publish");
             return Err(error);
         }
-        tracing::debug!(subject, id, sequence = first, bytes = len, "opcua pubsub: published");
+        tracing::debug!(
+            subject,
+            id,
+            sequence = first,
+            bytes = len,
+            "opcua pubsub: published"
+        );
         Ok(id)
     }
 }
@@ -280,7 +289,11 @@ impl Batch for PubSubManager {
             tracing::error!(subject, failed = failures.len(), total = ids.len(), %error,
                 "opcua pubsub: could not publish every message of a batch");
         } else {
-            tracing::debug!(subject, count = ids.len(), "opcua pubsub: published a batch");
+            tracing::debug!(
+                subject,
+                count = ids.len(),
+                "opcua pubsub: published a batch"
+            );
         }
         provider::batch_result(subject, ids, failures)
     }

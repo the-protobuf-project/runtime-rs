@@ -21,7 +21,7 @@ cargo bench -p tpp-streams --features redis,protobuf,live-tests,tls \
 
 | Flag | Meaning |
 | --- | --- |
-| `--backend` | `kafka`, `nats`, `jetstream`, `rabbitmq`, `redis`, `redis-durable`, `mqtt`, `zeromq` |
+| `--backend` | `kafka`, `nats`, `jetstream`, `rabbitmq`, `redis`, `redis-durable`, `mqtt`, `zeromq`, `opcua-pubsub` (OPC UA PubSub on the `mqtt` brokers; run with `--message opcua --subject-prefix pubsub.`) |
 | `--profile` | `plain`, or `tls` for the secure broker (mutual TLS and the backend's authentication) |
 | `--scenario` | `fanout`, `batch`, `durable` or `group` |
 | `--rate` | target messages a second across all publishers; `0` runs unpaced |

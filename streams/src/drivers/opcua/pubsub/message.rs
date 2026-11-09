@@ -334,10 +334,9 @@ impl MetaDataMessage {
             }
             reader.end_object()?;
             if kind.as_deref() != Some(MESSAGE_TYPE_METADATA) {
-                return Err(format!(
-                    "the MessageType is {kind:?}, not {MESSAGE_TYPE_METADATA:?}"
-                )
-                .into());
+                return Err(
+                    format!("the MessageType is {kind:?}, not {MESSAGE_TYPE_METADATA:?}").into(),
+                );
             }
             out.meta_data = meta.ok_or("the message carries no MetaData")?;
             Ok(out)
@@ -473,10 +472,9 @@ fn read_network(reader: &mut Reader<'_>) -> Outcome<NetworkMessage> {
                     lone.message_type = kind.clone();
                 }
                 Some(other) => {
-                    return Err(format!(
-                        "this is a {other:?} message, not {MESSAGE_TYPE_DATA:?}"
-                    )
-                    .into());
+                    return Err(
+                        format!("this is a {other:?} message, not {MESSAGE_TYPE_DATA:?}").into(),
+                    );
                 }
             }
             if network.messages.is_empty() && lone_fields {
@@ -576,9 +574,9 @@ pub(crate) fn field_value(raw: &[u8]) -> Outcome<DataValue> {
         return Ok(from_bytes::<DataValue>(raw, &context)?);
     }
     if raw.starts_with(br#"{"Type":"#) {
-        return Ok(DataValue::value_only(from_bytes::<
-            opcua::types::Variant,
-        >(raw, &context)?));
+        return Ok(DataValue::value_only(from_bytes::<opcua::types::Variant>(
+            raw, &context,
+        )?));
     }
     let normal = normalize(serde_json::from_slice(raw)?)?;
     Ok(from_bytes::<DataValue>(
@@ -747,7 +745,10 @@ mod tests {
         assert_eq!(json["MessageId"], "01JMSG");
         assert_eq!(json["PublisherId"], "plant-1");
         assert_eq!(json["WriterGroupName"], "line-a");
-        assert!(json.get("DataSetClassId").is_none(), "absent fields are omitted");
+        assert!(
+            json.get("DataSetClassId").is_none(),
+            "absent fields are omitted"
+        );
         let first = &json["Messages"][0];
         assert_eq!(first["DataSetWriterId"], 7);
         assert_eq!(first["DataSetWriterName"], "boiler");
@@ -779,7 +780,10 @@ mod tests {
             // 1.05, the Variant inline.
             (r#"{"UaType":7,"Value":12}"#, Variant::from(12u32)),
             // A 1.04 non-reversible DataValue.
-            (r#"{"Value":21,"SourceTimestamp":"2026-01-01T00:00:00Z"}"#, Variant::from(21i64)),
+            (
+                r#"{"Value":21,"SourceTimestamp":"2026-01-01T00:00:00Z"}"#,
+                Variant::from(21i64),
+            ),
             // Plain values, typed by inference.
             ("3.25", Variant::from(3.25f64)),
             (r#""on""#, Variant::from("on")),
@@ -797,7 +801,8 @@ mod tests {
 
     #[test]
     fn reads_a_message_without_its_header() {
-        let lone = br#"{"DataSetWriterId":3,"SequenceNumber":9,"Payload":{"a":{"Type":6,"Body":1}}}"#;
+        let lone =
+            br#"{"DataSetWriterId":3,"SequenceNumber":9,"Payload":{"a":{"Type":6,"Body":1}}}"#;
         let message = NetworkMessage::from_json(lone).unwrap();
         assert_eq!(message.messages.len(), 1);
         assert_eq!(message.messages[0].sequence_number, Some(9));

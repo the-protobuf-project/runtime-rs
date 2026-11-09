@@ -79,3 +79,21 @@ has been silent past twice its keep-alive; and a Publish response from the
 OPC Foundation's .NET stack holding more than about 1,800 notifications drops
 the connection as `BadDecodingError`, so `OpcUaConfig::max_notifications_per_publish`
 defaults to 1000.
+
+### PubSub over MQTT
+
+`opcua::pubsub` is OPC UA Part 14 over an MQTT broker, JSON mapping only (no
+UADP): `PubSubProvider::connect(MqttOptions, PubSubConfig)` dials with the MQTT
+driver's handshake. A stream is a WriterGroup (`<group>` on this PublisherId,
+or `<publisher>/<group>` to read another's), a subject is a DataSetWriter
+(`<writer>`, payload a `DataSet`) or one of its fields (`<writer>/<field>`,
+payload `OpcUaValue`). `publish` is one `ua-data` NetworkMessage on
+`opcua/json/data/<PublisherId>/<WriterGroup>/<DataSetWriter>` at QoS 1, after
+the PUBACK; `Batch` puts several DataSetMessages in one NetworkMessage;
+`subscribe` delivers each field as an `OpcUaValue` message, so subscribers
+decode exactly as on client/server. Sequence numbers are tracked per writer and
+gaps logged and counted. `publish_metadata` retains `ua-metadata` on
+`opcua/json/metadata/...`. Groups are MQTT shared subscriptions; `Durable` is
+refused (one MQTT ack would settle a whole NetworkMessage of fields), as are
+`Positioned`, TTL, and publishing under another PublisherId. Verified against
+Microsoft OPC Publisher (`docker/compose.opcua.pubsub.yaml`).
