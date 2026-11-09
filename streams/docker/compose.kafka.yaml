@@ -4,21 +4,26 @@
 #   cargo test --features kafka,live-tests --test kafka_live
 #
 # Host port 19092, not 9092, so it can run beside a Kafka you already have.
-# Two listeners because a client is told to reconnect at the advertised
+# Several listeners because a client is told to reconnect at the advertised
 # address: the host one advertises 127.0.0.1:19092, which means nothing inside
-# the container, so the healthcheck uses an internal one of its own.
+# a container, so the healthcheck uses an internal one of its own. FWD, on
+# 19095, advertises host.docker.internal for Kafka's own perf tools run from
+# another container: they then cross Docker Desktop's port forward exactly as
+# a client on the Mac does, which is what benches/native-baseline.sh compares
+# against.
 services:
   kafka:
     image: apache/kafka:3.9.1
     container_name: tpp-streams-kafka
     ports:
       - "127.0.0.1:19092:9092"
+      - "127.0.0.1:19095:9095"
     environment:
       KAFKA_NODE_ID: 1
       KAFKA_PROCESS_ROLES: broker,controller
-      KAFKA_LISTENERS: HOST://:9092,INTERNAL://:29092,CONTROLLER://:9093
-      KAFKA_ADVERTISED_LISTENERS: HOST://127.0.0.1:19092,INTERNAL://localhost:29092
-      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: HOST:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_LISTENERS: HOST://:9092,INTERNAL://:29092,CONTROLLER://:9093,FWD://:9095
+      KAFKA_ADVERTISED_LISTENERS: HOST://127.0.0.1:19092,INTERNAL://localhost:29092,FWD://host.docker.internal:19095
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: HOST:PLAINTEXT,INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,FWD:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
       KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093

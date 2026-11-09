@@ -1,6 +1,6 @@
 //! Values that cross the stream contract: stream metadata and delivered messages.
 
-use std::{fmt, ops::Deref};
+use std::{fmt, ops::Deref, sync::Arc};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -43,8 +43,11 @@ pub struct Stream {
 #[derive(Clone, PartialEq, Eq)]
 pub struct Message {
     id: String,
-    subject: String,
-    codec: String,
+    // Shared rather than owned: every message on a subscription carries the
+    // same subject and codec name, and copying them was two allocations per
+    // message on the receive path.
+    subject: Arc<str>,
+    codec: Arc<str>,
     data: Bytes,
 }
 
@@ -54,8 +57,8 @@ impl Message {
     /// directly.
     pub fn new(
         id: impl Into<String>,
-        subject: impl Into<String>,
-        codec: impl Into<String>,
+        subject: impl Into<Arc<str>>,
+        codec: impl Into<Arc<str>>,
         data: impl Into<Bytes>,
     ) -> Self {
         Self {
@@ -92,7 +95,7 @@ impl Message {
     /// JSON decoder fails with [`StreamError::Unsupported`] naming both, rather
     /// than with a parse error that hides why.
     pub fn decode<T, C: Codec<T> + ?Sized>(&self, codec: &C) -> Result<T> {
-        if codec.name() != self.codec {
+        if codec.name() != &*self.codec {
             return Err(StreamError::Unsupported(format!(
                 "message {} was encoded with the {:?} codec and cannot be decoded as {:?}",
                 self.id,

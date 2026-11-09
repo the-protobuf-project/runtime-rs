@@ -85,7 +85,8 @@ impl MqttManager {
             early: Vec::new(),
             filter,
             prefix: self.topic(""),
-            subject: subject.to_owned(),
+            subject: Arc::from(subject),
+            exact: !has_wildcard(subject),
             durable: matches!(session, Session::Durable { .. }),
         };
 
@@ -148,19 +149,26 @@ struct Attached {
     /// The topic prefix of this stream, stripped to recover a message's subject.
     prefix: String,
     /// The subject subscribed to, used when a topic cannot be read back.
-    subject: String,
+    subject: Arc<str>,
+    /// The subject has no wildcard, so every publish arrives on it and the
+    /// one shared copy above is every message's subject.
+    exact: bool,
     durable: bool,
 }
 
 impl Attached {
     /// The subject a publish arrived on: its topic below the stream's prefix,
-    /// so a subscription to `user/+` reports `user/created`.
-    fn subject_of(prefix: &str, fallback: &str, publish: &Publish) -> String {
+    /// so a subscription to `user/+` reports `user/created`. A subscription
+    /// to one exact subject shares that subject with every message rather
+    /// than allocating it again for each.
+    fn subject_of(&self, publish: &Publish) -> Arc<str> {
+        if self.exact {
+            return self.subject.clone();
+        }
         std::str::from_utf8(&publish.topic)
             .ok()
-            .and_then(|topic| topic.strip_prefix(prefix))
-            .unwrap_or(fallback)
-            .to_owned()
+            .and_then(|topic| topic.strip_prefix(self.prefix.as_str()))
+            .map_or_else(|| self.subject.clone(), Arc::from)
     }
 
     /// Routes this connection's publishes into `tx`, converted by `convert`,
@@ -174,7 +182,7 @@ impl Attached {
     fn route<T, F>(mut self, tx: mpsc::Sender<T>, mut convert: F)
     where
         T: Send + 'static,
-        F: FnMut(&AsyncClient, String, Publish) -> Option<T> + Send + 'static,
+        F: FnMut(&AsyncClient, Arc<str>, Publish) -> Option<T> + Send + 'static,
     {
         let mut events = self
             .events
@@ -184,7 +192,7 @@ impl Attached {
             let early = std::mem::take(&mut self.early);
             'routing: {
                 for publish in early {
-                    let subject = Self::subject_of(&self.prefix, &self.subject, &publish);
+                    let subject = self.subject_of(&publish);
                     if let Some(item) = convert(&self.client, subject, publish)
                         && tx.send(item).await.is_err()
                     {
@@ -196,7 +204,7 @@ impl Attached {
                         _ = tx.closed() => break,
                         event = events.poll() => match event {
                             Ok(Event::Incoming(Incoming::Publish(publish))) => {
-                                let subject = Self::subject_of(&self.prefix, &self.subject, &publish);
+                                let subject = self.subject_of(&publish);
                                 if let Some(item) = convert(&self.client, subject, publish)
                                     && tx.send(item).await.is_err()
                                 {
@@ -249,6 +257,7 @@ impl Publisher for MqttManager {
         if let Err(error) = self
             .inner
             .publisher
+            .link()
             .publish(&topic, self.inner.config.qos, body)
             .await
         {
@@ -310,13 +319,13 @@ impl Subscriber for MqttManager {
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();
         attached.route(tx, move |_, subject, publish| {
-            match provider::unpack(&registry, &subject, publish.payload) {
+            match provider::unpack_shared(&registry, &subject, publish.payload) {
                 Ok(message) => Some(message),
                 Err(error) => {
                     // One bad message is not a reason to end a healthy
                     // subscription. A clean session acknowledges on receipt, so
                     // it is not coming back either.
-                    tracing::warn!(subject, %error, "mqtt: dropping a malformed message");
+                    tracing::warn!(%subject, %error, "mqtt: dropping a malformed message");
                     None
                 }
             }
@@ -390,7 +399,7 @@ impl Durable for MqttManager {
         let declared = subject.to_owned();
         let consumer = consumer.to_owned();
         attached.route(tx, move |client, subject, publish| {
-            match provider::unpack(&registry, &subject, publish.payload.clone()) {
+            match provider::unpack_shared(&registry, &subject, publish.payload.clone()) {
                 Ok(message) => {
                     metrics.delivered(&declared, &consumer);
                     Some(Delivery::new(
@@ -408,7 +417,7 @@ impl Durable for MqttManager {
                 Err(error) => {
                     // It must be acknowledged, or the session would be handed
                     // it again forever.
-                    tracing::warn!(subject, %error, "mqtt: acknowledging a malformed message");
+                    tracing::warn!(%subject, %error, "mqtt: acknowledging a malformed message");
                     let _ = client.try_ack(&publish);
                     None
                 }
@@ -447,6 +456,7 @@ impl Batch for MqttManager {
         let outcomes = self
             .inner
             .publisher
+            .link()
             .publish_all(&topic, self.inner.config.qos, bodies)
             .await;
         let failures: Vec<(usize, StreamError)> = outcomes

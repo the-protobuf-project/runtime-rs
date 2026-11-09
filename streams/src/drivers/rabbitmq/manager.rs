@@ -331,9 +331,10 @@ impl Subscriber for RabbitManager {
 
         let registry = self.shared.config.registry.clone();
         let wanted = subject.to_owned();
+        let mut last = LastSubject::default();
         let messages = consumer.filter_map(move |delivery| {
             let message = match delivery {
-                Ok(d) => provider::unpack(&registry, d.routing_key.as_str(), d.data)
+                Ok(d) => provider::unpack_shared(&registry, last.of(d.routing_key.as_str()), d.data)
                     .inspect_err(|e| {
                         tracing::warn!(subject = %wanted, error = %e, "rabbitmq: dropping a malformed message");
                     })
@@ -384,48 +385,58 @@ impl Durable for RabbitManager {
 
         let registry = self.shared.config.registry.clone();
         let metrics = self.shared.config.metrics.clone();
-        let subject = subject.to_owned();
-        let consumer = consumer.to_owned();
+        // Shared by every delivery and its acker, so a message costs no copies
+        // of these names.
+        let subject: Arc<str> = subject.into();
+        let consumer: Arc<str> = consumer.into();
+        let mut last = LastSubject::default();
         let deliveries = amqp.filter_map(move |delivery| {
-            let registry = registry.clone();
-            let metrics = metrics.clone();
-            let subject = subject.clone();
-            let consumer = consumer.clone();
+            // Decoding happens here, synchronously; only rejecting a malformed
+            // message needs to await.
+            let outcome = match delivery {
+                Ok(d) => {
+                    let attempt = attempt(&d);
+                    let AmqpDelivery {
+                        routing_key,
+                        data,
+                        acker,
+                        ..
+                    } = d;
+                    match provider::unpack_shared(&registry, last.of(routing_key.as_str()), data) {
+                        Ok(message) => {
+                            metrics.delivered(&subject, &consumer);
+                            let acker = AmqpAck {
+                                acker,
+                                metrics: metrics.clone(),
+                                subject: subject.clone(),
+                                consumer: consumer.clone(),
+                            };
+                            Ok(Delivery::new(message, attempt, Box::new(acker)))
+                        }
+                        Err(e) => {
+                            tracing::warn!(%subject, error = %e, "rabbitmq: rejecting a malformed message");
+                            Err(Some(acker))
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%subject, %consumer, error = %e, "rabbitmq: consumer failed");
+                    Err(None)
+                }
+            };
             async move {
-                let d = match delivery {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(%subject, %consumer, error = %e, "rabbitmq: consumer failed");
-                        return None;
-                    }
-                };
-                let attempt = attempt(&d);
-                let AmqpDelivery {
-                    routing_key,
-                    data,
-                    acker,
-                    ..
-                } = d;
-                match provider::unpack(&registry, routing_key.as_str(), data) {
-                    Ok(message) => {
-                        metrics.delivered(&subject, &consumer);
-                        let acker = AmqpAck {
-                            acker,
-                            metrics,
-                            subject,
-                            consumer,
-                        };
-                        Some(Delivery::new(message, attempt, Box::new(acker)))
-                    }
-                    Err(e) => {
-                        // Nothing will ever decode this, so no handler will ever
-                        // acknowledge it. Reject it without requeueing, the one
-                        // case where discarding is right: requeueing would hand
-                        // the same undecodable bytes to the next consumer forever.
-                        tracing::warn!(%subject, error = %e, "rabbitmq: rejecting a malformed message");
+                match outcome {
+                    Ok(delivery) => Some(delivery),
+                    Err(Some(acker)) => {
+                        // Nothing will ever decode this, so no handler will
+                        // ever acknowledge it. Reject it without requeueing,
+                        // the one case where discarding is right: requeueing
+                        // would hand the same undecodable bytes to the next
+                        // consumer forever.
                         let _ = acker.reject(BasicRejectOptions { requeue: false }).await;
                         None
                     }
+                    Err(None) => None,
                 }
             }
         });
@@ -514,13 +525,27 @@ fn delivery_count(value: &AMQPValue) -> Option<u64> {
     }
 }
 
+/// The last routing key a consumer saw, shared, so a run of deliveries on one
+/// subject points at one copy of it rather than each allocating its own.
+#[derive(Default)]
+struct LastSubject(Option<Arc<str>>);
+
+impl LastSubject {
+    fn of(&mut self, subject: &str) -> &Arc<str> {
+        if self.0.as_deref() != Some(subject) {
+            self.0 = Some(Arc::from(subject));
+        }
+        self.0.as_ref().expect("just set")
+    }
+}
+
 /// Settles one delivery. RabbitMQ has a true negative acknowledgement, so nak
 /// requeues immediately rather than waiting out a visibility timeout.
 struct AmqpAck {
     acker: lapin::Acker,
     metrics: Metrics,
-    subject: String,
-    consumer: String,
+    subject: Arc<str>,
+    consumer: Arc<str>,
 }
 
 impl AmqpAck {
@@ -590,6 +615,15 @@ mod tests {
             attempt(&delivery(true, Some(AMQPValue::LongString("x".into())))),
             2
         );
+    }
+
+    #[test]
+    fn last_subject_is_shared_until_it_changes() {
+        let mut last = LastSubject::default();
+        let a = last.of("user.created").clone();
+        assert!(Arc::ptr_eq(&a, last.of("user.created")));
+        assert_eq!(&**last.of("user.deleted"), "user.deleted");
+        assert!(!Arc::ptr_eq(&a, last.of("user.created")));
     }
 
     #[test]

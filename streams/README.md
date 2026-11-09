@@ -1,7 +1,7 @@
 # tpp-streams
 
 Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis,
-MQTT, and ZeroMQ. A Rust port of [`runtime-go/streams`](https://github.com/the-protobuf-project/runtime-go/tree/main/streams),
+MQTT, ZeroMQ, and OPC UA. A Rust port of [`runtime-go/streams`](https://github.com/the-protobuf-project/runtime-go/tree/main/streams),
 built around async traits, explicit capabilities, and caller-owned clients.
 
 ## Install
@@ -58,16 +58,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
    `as_batch`. A backend that lacks one says so with `StreamError::Unsupported`
    rather than silently giving weaker delivery.
 
-| Capability | Kafka | NATS | RabbitMQ | Redis | MQTT | ZeroMQ |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: |
-| Publish / Subscribe | Yes | Yes | Yes | Yes | Yes | Yes |
-| Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No |
-| Positioned replay | Yes | JetStream | No | Streams | No | No |
-| Batch | Native | Each | Each | Pipelined | Each | Each |
+| Capability | Kafka | NATS | RabbitMQ | Redis | MQTT | ZeroMQ | OPC UA |
+| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| Publish / Subscribe | Yes | Yes | Yes | Yes | Yes | Yes | Write / monitored item |
+| Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No | No |
+| Positioned replay | Yes | JetStream | No | Streams | No | No | No |
+| Batch | Native | Pipelined (JetStream) | Pipelined | Pipelined | Pipelined | Each | One Write |
 
-Payloads are framed byte-for-byte as runtime-go frames them, and every driver
-keeps Go's topic, key, and metadata layout, so Go and Rust services can share
-one broker.
+Payloads are framed byte-for-byte as runtime-go frames them, and every broker
+driver keeps Go's topic, key, and metadata layout, so Go and Rust services can
+share one broker. OPC UA is the exception, and Rust only: its values travel as
+native typed OPC UA `DataValue`s, so PLCs, SCADA, and other OPC UA tools can
+read them.
 
 See [source and middleware](src/README.md), [drivers](src/drivers/README.md),
 [examples](examples/README.md), [Docker](docker/README.md), and [tests](tests/README.md).

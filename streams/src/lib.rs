@@ -1,5 +1,5 @@
 //! Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ,
-//! Redis, MQTT, and ZeroMQ.
+//! Redis, MQTT, ZeroMQ, and OPC UA.
 //!
 //! A Rust port of runtime-go's `streams` module. Providers live under
 //! [`drivers`], one Cargo feature each, and take a client you own, so nothing
@@ -42,12 +42,12 @@
 //! and [`as_batch`], which fail with [`StreamError::Unsupported`] naming the
 //! gap rather than silently downgrading delivery.
 //!
-//! | Capability | Kafka | NATS | RabbitMQ | Redis | MQTT | ZeroMQ |
-//! | --- | :---: | :---: | :---: | :---: | :---: | :---: |
-//! | Publish / Subscribe | Yes | Yes | Yes | Yes | Yes | Yes |
-//! | Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No |
-//! | Positioned replay | Yes | JetStream | No | Streams | No | No |
-//! | Batch | Native | Each | Each | Pipelined | Each | Each |
+//! | Capability | Kafka | NATS | RabbitMQ | Redis | MQTT | ZeroMQ | OPC UA |
+//! | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+//! | Publish / Subscribe | Yes | Yes | Yes | Yes | Yes | Yes | Write / monitored item |
+//! | Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No | No |
+//! | Positioned replay | Yes | JetStream | No | Streams | No | No | No |
+//! | Batch | Native | Pipelined (JetStream) | Pipelined | Pipelined | Pipelined | Each | One Write |
 //!
 //! # Lifetime is the stream's
 //!

@@ -21,7 +21,7 @@ A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go),
 | [`database`](database) | `tpp-database` | `runtime-go/database` | runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends |
 | [`grpc`](grpc) | `tpp-grpc` | `runtime-go/grpc` | One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS |
 | [`network`](network) | `tpp-network` | `runtime-go/network` | Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions |
-| [`streams`](streams) | `tpp-streams` | `runtime-go/streams` | Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, and ZeroMQ |
+| [`streams`](streams) | `tpp-streams` | `runtime-go/streams` | Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, ZeroMQ, and OPC UA |
 | [`telemetry`](telemetry) | `tpp-telemetry` | `runtime-go/telemetry` | Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers |
 
 ## Installation
@@ -32,7 +32,7 @@ cargo add tpp-cache      # Cache drivers and read-through/write-through strategi
 cargo add tpp-database   # runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends
 cargo add tpp-grpc       # One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS
 cargo add tpp-network    # Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions
-cargo add tpp-streams    # Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, and ZeroMQ
+cargo add tpp-streams    # Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, ZeroMQ, and OPC UA
 cargo add tpp-telemetry  # Shared runtime metrics, correlated logs and cancellation-safe tracing over caller-owned providers
 ```
 

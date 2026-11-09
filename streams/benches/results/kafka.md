@@ -93,4 +93,39 @@ Before the changes, at the default 32 publishers, plain fanout ran at 4.0k/s, wi
 
 ## Proposed, not done
 
-- Shard publishes across several producer instances. Each instance has its own connection and its own 5 in-flight requests. One batch would stay on one producer, to keep its order.
+- ~~Shard publishes across several producer instances.~~ Done in round 5 (`KafkaConfig::producers`).
+
+## Round 5: against the official tool
+
+Baseline: `benches/native-baseline.sh kafka`, i.e. `kafka-producer-perf-test` (acks=all, idempotent, linger 1 ms, batch.size 64 KB, one producer) and `kafka-consumer-perf-test` (one consumer), both through `host.docker.internal:19095`, so they cross Docker Desktop's port forward as the driver does. 256-byte records, 1M per run, plaintext. Measured interleaved with the driver on one broker, five rounds (`--consumers 0` publish-only runs, to match the producer tool, which reads nothing back). Another agent's brokers shared the VM, so single runs swung by up to 2×; the table gives medians and the ratio of medians.
+
+| | official tool | before (round 4 driver, same minutes) | after | ratio |
+|---|---|---|---|---|
+| Publish, pipelined (`batch --message string --batch 500 --publishers 64 --consumers 0`) | 588k msg/s (415–662k) | 114k | **598k** (507–771k) | **102%** |
+| Publish, single awaited (`fanout --publishers 16384 --consumers 0`) | 588k | 98k (512 publishers) | **301k** (245–408k) | 51% |
+| Consume (`durable --drain 1 --consumers 1`, reading a full log back and acking each) | 398k msg/s (111–671k) | – | **587k** (507–713k) | 148% |
+
+With receivers attached at the same time (single runs, after the rounds above): `batch --message string` 421k published / 419k delivered; `batch` (Int64Value) 746k / 692k; `fanout` 16384 publishers 260k; `durable` 229k; `group --consumers 2` 293k; all `ok`, nothing lost or duplicated.
+
+### What changed and why
+
+1. **Publishes are spread over several producers (`KafkaConfig::producers`, default 8).** Profiling showed nothing busy: the bench process at ~80–100% of one core spread over 30 threads, the broker at 70–150%, every librdkafka thread mostly in `poll`. The limit was one producer's connection. librdkafka puts one partition in each ProduceRequest (`rd_kafka_ProduceRequest` takes one toppar) and the broker serves one request per connection at a time, so a single producer topped out near 100k msg/s however much was queued: raising `max.in.flight` to 100 (idempotence off, as a diagnostic only) gave the same 88k, while the Java producer packs every partition into one request. Each extra producer is another connection the broker serves in parallel. Measured, pipelined publish: 1 producer 59–114k, 4 → 300–620k, 8 → 430–760k, 16 → 530–630k; single publishes at 16384 publishers: 4 → 170–280k, 8 → 220–460k, 16 → 180–320k. 8 is the default.
+   - Nothing gets weaker. Every producer is built from the same config (acks=all, idempotence). A publish with a partition key always goes through the same producer (hashed with a per-process `RandomState`), so records sharing a key reach their partition in publish order, just as with one producer. A batch goes through one producer whole. Publishes with no key take turns. Metadata writes are keyed by stream id. `close` flushes every producer.
+   - Cost: 8 connections and about 24 librdkafka threads per provider. A caller who wants one sets `producers: 1`.
+2. **Receive paths use `provider::unpack_shared`**. A subscription and a durable consumer hold their subject (and consumer name) as one `Arc<str>`, so a delivery and its acker no longer copy two strings each.
+3. **The publish path no longer clones the topic name** on every publish.
+4. **A subscribe right after `create` waits out leader election.** On a busy broker, fetching watermarks for a just-created topic failed with `NotLeaderForPartition`. That error, `LeaderNotAvailable` and `UnknownTopicOrPartition` are now retried every 100 ms within `DIAL_TIMEOUT`.
+
+Producer settings were left as they were. `linger.ms` 5 instead of 1 was within the noise for pipelined publishes, and round 4 measured it as worse for latency-bound single publishes.
+
+### Harness changes (generic)
+
+- `--message string` now works for `batch`: the body is `--payload` bytes ending in the sequence number, so batches can be measured at the baseline's 256 bytes. Without the flag, `batch` still sends Int64Value.
+- `--drain 1` (`durable` only): publish everything, then attach consumers from the earliest offset, and time the reading alone. This is the counterpart of `kafka-consumer-perf-test`. Its latencies include the wait and mean nothing.
+- `KAFKA_PRODUCERS` in `targets/kafka.rs` overrides the default spread.
+
+### What still limits it
+
+- **Single awaited publishes reach about half the tool.** Each one is its own record awaiting its own ack, so throughput is concurrency ÷ latency: 512 publishers give ~100k, and 16384 give ~300k at a p50 of 40–90 ms. The broker then sees many small one-partition requests. The tool keeps ~40k records in flight with no per-record wait. That is what `publish_batch` does, and it matches the tool. To go further for single publishes, librdkafka would have to send multi-partition requests, which it does not.
+- **Consume**: 10 consumers (one per subject topic) against the tool's one consumer, so the 148% partly reflects more parallel fetches. Each tail subscription alone tops out near 180k/s (`--subjects 1`: one `StreamConsumer` behind one channel).
+- **Noise**: the native tool itself ranged 415–662k produce and 111–671k consume across five rounds on the same broker.

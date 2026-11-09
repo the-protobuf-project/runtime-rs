@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, and ZeroMQ"
+description = "Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, ZeroMQ, and OPC UA"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
 keywords = ["streams", "messaging", "kafka", "nats", "pubsub"]
 categories = ["asynchronous", "network-programming"]
@@ -26,6 +26,10 @@ rabbitmq = ["dep:lapin"]
 redis = ["dep:redis"]
 mqtt = ["dep:rumqttc"]
 zeromq = ["dep:zeromq"]
+# OPC UA client/server (a stream's subjects are node ids) and OPC UA PubSub over MQTT. Values
+# travel as native typed OPC UA Variants, not in runtime-go's frame, so PLCs, SCADA and other
+# OPC UA tools can read them.
+opcua = ["dep:async-opcua", "mqtt"]
 # The protobuf codec, for payloads that are prost messages rather than serde values.
 protobuf = ["dep:prost"]
 # TLS for the backends whose client keeps it behind a feature. NATS, RabbitMQ, and MQTT carry
@@ -58,9 +62,14 @@ async-nats = { version = "0.52", optional = true }
 lapin = { version = "4.12", optional = true, default-features = false, features = ["default-runtime", "rustls--ring", "rustls-native-certs"] }
 redis = { version = "1.8", optional = true, features = ["tokio-comp", "connection-manager", "streams"] }
 rumqttc = { version = "0.25", optional = true, default-features = false, features = ["use-rustls-no-provider"] }
+# OPC UA. No Rust OPC UA crate has 1,000 stars; async-opcua is the maintained successor of
+# locka99/opcua, pure Rust with RustCrypto, so it adds no C build and no aws-lc.
+async-opcua = { version = "0.19", optional = true, features = ["client", "json"] }
 zeromq = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime", "all-transport"] }
 
 [dev-dependencies]
+# The OPC UA server, so tests/opcua.rs runs against a real server inside the test process.
+async-opcua = { version = "0.19", features = ["server", "client", "json"] }
 tokio = { workspace = true, features = ["test-util"] }
 tokio-test = { workspace = true }
 # An in-process MQTT broker, so tests/mqtt.rs runs in plain `cargo test`.
@@ -137,6 +146,26 @@ required-features = ["live-tests", "tls", "nats"]
 [[test]]
 name = "rabbitmq_e2e"
 required-features = ["live-tests", "tls", "rabbitmq"]
+
+[[test]]
+name = "opcua"
+required-features = ["opcua"]
+
+[[test]]
+name = "opcua_live"
+required-features = ["live-tests", "opcua"]
+
+[[test]]
+name = "opcua_e2e"
+required-features = ["live-tests", "tls", "opcua"]
+
+[[example]]
+name = "opcua"
+required-features = ["opcua"]
+
+[[example]]
+name = "opcua_native"
+required-features = ["opcua"]
 
 # Throughput and latency across every backend; see benches/README.md.
 [[bench]]

@@ -25,7 +25,9 @@ cargo bench -p tpp-streams --features redis,protobuf,live-tests,tls \
 | `--profile` | `plain`, or `tls` for the secure broker (mutual TLS and the backend's authentication) |
 | `--scenario` | `fanout`, `batch`, `durable` or `group` |
 | `--rate` | target messages a second across all publishers; `0` runs unpaced |
-| `--messages`, `--subjects`, `--publishers`, `--consumers`, `--batch`, `--payload` | run shape |
+| `--messages`, `--subjects`, `--publishers`, `--consumers`, `--batch`, `--payload` | run shape; `--consumers 0` publishes only |
+| `--message` | `string` (256-byte `StringValue`, the default) or `int64`; `batch` defaults to `int64`, and `--message string` makes it send full-size bodies that end in the sequence |
+| `--drain 1` | `durable` only: publish everything, then attach the consumers from the earliest offset, so `delivered_rate` is reading the log back alone (latencies then include the wait) |
 
 Each run prints a JSON summary and appends it to `target/bench-results.jsonl`.
 A run is `ok` when nothing was lost, undecodable or unacknowledged (and, for

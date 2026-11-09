@@ -12,6 +12,7 @@
 //!
 //! `MQTT_HOST`/`MQTT_PORT` (plain), `MQTT_TLS_ADDR` (default `127.0.0.1:18884`),
 //! and `STREAMS_E2E_TLS_DIR` (default `docker/tls/out`) point it elsewhere.
+//! `MQTT_PUBLISH_CONNECTIONS` overrides the provider's publishing connections.
 
 use std::{path::PathBuf, sync::Arc};
 
@@ -50,12 +51,15 @@ pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
         }
         other => return Err(unknown_profile("mqtt", other)),
     };
-    let config = MqttConfig {
+    let mut config = MqttConfig {
         prefix,
         qos: QoS::AtLeastOnce,
         registry,
         ..MqttConfig::default()
     };
+    if let Ok(n) = std::env::var("MQTT_PUBLISH_CONNECTIONS") {
+        config.publish_connections = n.parse()?;
+    }
     Ok(Conn::one(MqttProvider::connect(options, config).await?))
 }
 

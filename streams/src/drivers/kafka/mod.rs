@@ -57,7 +57,14 @@
 mod manager;
 mod stream;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    hash::{BuildHasher, RandomState},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use rdkafka::{
     ClientConfig,
@@ -107,6 +114,23 @@ pub struct KafkaConfig {
 
     /// Delivery instruments for durable consumers; the default records nothing.
     pub metrics: Metrics,
+
+    /// How many producers publishes are spread over. Defaults to 8; 0 is
+    /// taken as 1.
+    ///
+    /// librdkafka sends one partition per produce request, and an idempotent
+    /// producer keeps at most five requests in flight per broker, so one
+    /// producer moves at most five partition batches per round trip however
+    /// many records are waiting. Each producer is a connection of its own with
+    /// its own five, which is what lets publishes keep the network full.
+    /// Every one is built from the same config, durable as described on
+    /// [`KafkaProvider`].
+    ///
+    /// Spreading changes no ordering a caller could rely on: records sharing a
+    /// partition key always go through the same producer, so they reach their
+    /// partition in the order they were published, as with one producer, and
+    /// a batch goes through a single producer whole.
+    pub producers: usize,
 }
 
 impl Default for KafkaConfig {
@@ -117,14 +141,15 @@ impl Default for KafkaConfig {
             replication_factor: 1,
             registry: Registry::new(),
             metrics: Metrics::default(),
+            producers: 8,
         }
     }
 }
 
 /// [`Streams`](crate::Streams) backed by Kafka.
 ///
-/// Cloning is cheap and shares the producer. [`Streams::close`](crate::Streams::close)
-/// flushes what the producer still holds; consumers end when their
+/// Cloning is cheap and shares the producers. [`Streams::close`](crate::Streams::close)
+/// flushes what the producers still hold; consumers end when their
 /// subscription is dropped.
 #[derive(Clone)]
 pub struct KafkaProvider {
@@ -135,7 +160,12 @@ pub struct KafkaProvider {
 pub(crate) struct Inner {
     /// The caller's config, cloned into every consumer built here.
     client: ClientConfig,
-    producer: FutureProducer,
+    /// At least one; see [`KafkaConfig::producers`].
+    producers: Vec<FutureProducer>,
+    /// Picks the producer for a publish with no partition key.
+    turn: AtomicUsize,
+    /// Picks the producer for a partition key, the same one every time.
+    keys: RandomState,
     admin: AdminClient<DefaultClientContext>,
     config: KafkaConfig,
 }
@@ -149,7 +179,7 @@ impl KafkaProvider {
     /// topic if no process has yet.
     pub async fn connect(client: ClientConfig, config: KafkaConfig) -> Result<Self> {
         let provider = Self::build(client, config)?;
-        let producer = provider.inner.producer.clone();
+        let producer = provider.inner.producers[0].clone();
         let servers = provider.inner.servers();
         blocking(move || producer.client().fetch_metadata(None, DIAL_TIMEOUT))
             .await?
@@ -168,8 +198,10 @@ impl KafkaProvider {
                 "kafka: no seed brokers given; set bootstrap.servers on the client config".into(),
             ));
         }
-        let producer = producer_config(&client)
-            .create::<FutureProducer>()
+        let producer_config = producer_config(&client);
+        let producers = (0..config.producers.max(1))
+            .map(|_| producer_config.create::<FutureProducer>())
+            .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|error| StreamError::internal("kafka: cannot build the producer", error))?;
         let admin = client
             .create::<AdminClient<DefaultClientContext>>()
@@ -179,7 +211,9 @@ impl KafkaProvider {
         Ok(Self {
             inner: Arc::new(Inner {
                 client,
-                producer,
+                producers,
+                turn: AtomicUsize::new(0),
+                keys: RandomState::new(),
                 admin,
                 config,
             }),
@@ -194,6 +228,17 @@ impl Inner {
             .get("bootstrap.servers")
             .unwrap_or_default()
             .to_owned()
+    }
+
+    /// The producer for a publish: always the same one for a partition key,
+    /// so records sharing a key keep their order, and otherwise each in turn.
+    fn producer(&self, key: Option<&str>) -> &FutureProducer {
+        let n = self.producers.len();
+        let at = match key {
+            Some(key) => self.keys.hash_one(key) as usize,
+            None => self.turn.fetch_add(1, Ordering::Relaxed),
+        };
+        &self.producers[at % n]
     }
 
     /// Where stream declarations live.
@@ -349,5 +394,41 @@ mod tests {
         let config = KafkaConfig::default();
         assert_eq!((config.partitions, config.replication_factor), (1, 1));
         assert!(config.prefix.is_empty());
+        assert_eq!(config.producers, 8);
+    }
+
+    #[test]
+    fn a_key_always_takes_the_same_producer_and_none_takes_turns() {
+        let mut client = ClientConfig::new();
+        client.set("bootstrap.servers", "127.0.0.1:1");
+        let provider = KafkaProvider::build(client, KafkaConfig::default()).unwrap();
+        let inner = &provider.inner;
+        assert_eq!(inner.producers.len(), 8);
+        let at = |producer: &FutureProducer| {
+            inner
+                .producers
+                .iter()
+                .position(|p| std::ptr::eq(p, producer))
+                .unwrap()
+        };
+        let keyed = at(inner.producer(Some("order-7")));
+        for _ in 0..20 {
+            assert_eq!(at(inner.producer(Some("order-7"))), keyed);
+        }
+        let turns: std::collections::HashSet<usize> =
+            (0..8).map(|_| at(inner.producer(None))).collect();
+        assert_eq!(turns.len(), 8);
+    }
+
+    #[test]
+    fn zero_producers_is_one() {
+        let mut client = ClientConfig::new();
+        client.set("bootstrap.servers", "127.0.0.1:1");
+        let config = KafkaConfig {
+            producers: 0,
+            ..KafkaConfig::default()
+        };
+        let provider = KafkaProvider::build(client, config).unwrap();
+        assert_eq!(provider.inner.producers.len(), 1);
     }
 }

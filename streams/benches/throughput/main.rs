@@ -18,6 +18,14 @@
 //! Go publisher using `protobuf.Codec` sends. Every message is decoded with the
 //! protobuf codec on receipt, so decode cost is part of what is measured.
 //!
+//! `--message opcua` (feature `opcua`) is for the OPC UA provider, whose
+//! payload is a typed OPC UA value rather than a protobuf message and which
+//! carries no message id: each message is a DataValue holding the sequence as
+//! an Int64 and the send time as its source timestamp, which OPC UA keeps
+//! end to end, so latency needs no pinned id. Subjects are node ids: the
+//! `bench.sNN` names behind `--subject-prefix`, which defaults to opc-plc's
+//! namespace (`nsu=http://microsoft.com/Opc/OpcPlc/;s=`) in that mode.
+//!
 //! Single publishes pin the message id to `<seq>.<nanos since start>`, which
 //! carries the sequence and send time without changing the payload. A batch
 //! cannot pin ids, so `batch` publishes Int64Value and reads the sequence back
@@ -33,6 +41,14 @@
 //!   every message acked after it is read; every sequence must arrive.
 //! - `group`: `--consumers` plain subscribers per subject in one group; every
 //!   message must arrive once across the group.
+//!
+//! `--drain 1` (`durable` only) publishes everything first and then attaches
+//! the consumers from the earliest offset, so `delivered_rate` is the rate of
+//! reading a full log back alone, to set beside a broker tool's consume
+//! benchmark. Its latencies include the wait, and mean nothing.
+//!
+//! `--consumers 0` attaches no receiver at all: a publish-only run, to set
+//! beside a broker tool's publish benchmark, which reads nothing back.
 //!
 //! Each run prints one JSON object and appends it to
 //! `target/bench-results.jsonl` at the workspace root.
@@ -72,9 +88,11 @@ struct Args {
     batch: usize,
     payload: usize,
     message: String,
+    subject_prefix: String,
     rate: u64,
     timeout: Duration,
     label: String,
+    drain: bool,
 }
 
 impl Args {
@@ -89,10 +107,12 @@ impl Args {
             consumers: 1,
             batch: 100,
             payload: 256,
-            message: "string".into(),
+            message: String::new(),
+            subject_prefix: String::new(),
             rate: 0,
             timeout: Duration::from_secs(300),
             label: String::new(),
+            drain: false,
         };
         let mut it = std::env::args().skip(1);
         while let Some(key) = it.next() {
@@ -118,13 +138,15 @@ impl Args {
                 "--batch" => a.batch = n() as usize,
                 "--payload" => a.payload = n() as usize,
                 "--message" => a.message = value.clone(),
+                "--subject-prefix" => a.subject_prefix = value.clone(),
                 "--rate" => a.rate = n(),
                 "--timeout" => a.timeout = Duration::from_secs(n()),
                 "--label" => a.label = value.clone(),
+                "--drain" => a.drain = n() != 0,
                 other => panic!("unknown argument {other}"),
             }
         }
-        assert!(a.subjects > 0 && a.publishers > 0 && a.consumers > 0 && a.batch > 0);
+        assert!(a.subjects > 0 && a.publishers > 0 && a.batch > 0);
         assert!(
             matches!(
                 a.scenario.as_str(),
@@ -132,21 +154,38 @@ impl Args {
             ),
             "--scenario is fanout, batch, durable, or group"
         );
-        if a.scenario == "batch" {
-            a.message = "int64".into();
+        assert!(
+            !a.drain || a.scenario == "durable",
+            "--drain reads a published log back, so it needs --scenario durable"
+        );
+        // A batch cannot pin ids, so by default it sends Int64Value and reads
+        // the sequence from it; `--message string` sends a full-size
+        // StringValue instead, whose body ends with the sequence.
+        if a.message.is_empty() {
+            a.message = if a.scenario == "batch" {
+                "int64"
+            } else {
+                "string"
+            }
+            .into();
+        }
+        if a.message == "opcua" && a.subject_prefix.is_empty() {
+            a.subject_prefix = "nsu=http://microsoft.com/Opc/OpcPlc/;s=".into();
         }
         assert!(
-            matches!(a.message.as_str(), "string" | "int64"),
-            "--message is string or int64"
+            matches!(a.message.as_str(), "string" | "int64")
+                || (cfg!(feature = "opcua") && a.message == "opcua"),
+            "--message is string, int64, or (with the opcua feature) opcua"
         );
         a
     }
 
-    /// Receivers per subject.
+    /// Receivers per subject. `--consumers 0` attaches none, for a
+    /// publish-only run to set beside a broker tool that only publishes.
     fn receivers_per_subject(&self) -> usize {
         match self.scenario.as_str() {
             "durable" | "group" => self.consumers,
-            _ => 1,
+            _ => self.consumers.min(1),
         }
     }
 }
@@ -157,9 +196,18 @@ fn registry() -> Registry {
 }
 
 /// Encodes message `seq` as one of runtime-go's codec test messages.
+///
+/// `body` empty means the id cannot carry the sequence (a batch), so a
+/// StringValue body is `--payload` bytes ending in the sequence instead.
 fn payload(args: &Args, seq: u64, body: &str) -> Payload {
     match args.message.as_str() {
+        #[cfg(feature = "opcua")]
+        "opcua" => opcua_payload(seq),
         "int64" => Payload::encode(&Protobuf, &(seq as i64)).expect("encode Int64Value"),
+        _ if body.is_empty() => {
+            let body = format!("{seq:x>width$}", width = args.payload);
+            Payload::encode(&Protobuf, &body).expect("encode StringValue")
+        }
         _ => Payload::encode(&Protobuf, &body.to_owned()).expect("encode StringValue"),
     }
 }
@@ -179,6 +227,8 @@ fn read(args: &Args, msg: &Message) -> Option<(u64, Option<Duration>)> {
         ))
     });
     match args.message.as_str() {
+        #[cfg(feature = "opcua")]
+        "opcua" => opcua_read(msg),
         "int64" => {
             let seq = u64::try_from(msg.decode::<i64, _>(&Protobuf).ok()?).ok()?;
             match pinned {
@@ -189,10 +239,44 @@ fn read(args: &Args, msg: &Message) -> Option<(u64, Option<Duration>)> {
         }
         _ => {
             let body: String = msg.decode(&Protobuf).ok()?;
-            let (seq, sent) = pinned?;
-            (body.len() == args.payload).then(|| (seq, Some(START.elapsed().saturating_sub(sent))))
+            if body.len() != args.payload {
+                return None;
+            }
+            match pinned {
+                Some((seq, sent)) => Some((seq, Some(START.elapsed().saturating_sub(sent)))),
+                // A batch: the sequence is the end of the body.
+                None => Some((body.trim_start_matches('x').parse().ok()?, None)),
+            }
         }
     }
+}
+
+/// An OPC UA DataValue: the sequence as an Int64, sent now.
+#[cfg(feature = "opcua")]
+fn opcua_payload(seq: u64) -> Payload {
+    use streams::drivers::opcua::{DataValue, OpcUaValue};
+    // A source timestamp only: servers may refuse a written server timestamp.
+    OpcUaValue::payload_of(&DataValue {
+        value: Some((seq as i64).into()),
+        source_timestamp: Some(opcua::types::DateTime::now()),
+        ..DataValue::default()
+    })
+}
+
+/// The sequence and, from the source timestamp, the latency of an OPC UA
+/// DataValue the bench wrote.
+#[cfg(feature = "opcua")]
+fn opcua_read(msg: &Message) -> Option<(u64, Option<Duration>)> {
+    use streams::drivers::opcua::{OpcUaValue, Variant};
+    let value = OpcUaValue::data_value(msg).ok()?;
+    let Some(Variant::Int64(seq)) = value.value else {
+        return None;
+    };
+    let sent = value.source_timestamp?.as_chrono();
+    let latency = (opcua::types::DateTime::now().as_chrono() - sent)
+        .to_std()
+        .ok();
+    Some((u64::try_from(seq).ok()?, latency))
 }
 
 /// What one receiver saw. Kept behind a mutex the run holds, so the results
@@ -248,7 +332,9 @@ async fn run(args: &Args) -> serde_json::Value {
     let conn = targets::connect(&args.backend, &args.profile, registry())
         .await
         .unwrap_or_else(|e| panic!("connect {}/{}: {e}", args.backend, args.profile));
-    let subjects: Vec<String> = (0..args.subjects).map(subject).collect();
+    let subjects: Vec<String> = (0..args.subjects)
+        .map(|i| format!("{}{}", args.subject_prefix, subject(i)))
+        .collect();
     let stream = conn
         .publisher
         .create(Stream {
@@ -275,24 +361,13 @@ async fn run(args: &Args) -> serde_json::Value {
         None => publisher.clone(),
     };
 
-    // Attach every receiver before anything is published.
+    // Attach every receiver before anything is published, unless draining.
     let shared = Arc::new(Shared::default());
-    let mut slots = Vec::new();
-    let mut tasks = Vec::new();
-    for s in &subjects {
-        for _ in 0..args.receivers_per_subject() {
-            let slot = Arc::new(Mutex::new(Received::default()));
-            let messages = attach(args, receiver.as_ref(), s).await;
-            tasks.push(tokio::spawn(receive(
-                args.clone(),
-                messages,
-                slot.clone(),
-                shared.clone(),
-            )));
-            slots.push(slot);
-        }
+    let (mut slots, mut tasks) = (Vec::new(), Vec::new());
+    if !args.drain {
+        (slots, tasks) = attach_all(args, receiver.as_ref(), &subjects, &shared).await;
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Publish.
     let body = "x".repeat(args.payload);
@@ -364,9 +439,21 @@ async fn run(args: &Args) -> serde_json::Value {
     let published = shared.published.load(Ordering::Relaxed);
 
     // Wait until everything published has arrived, or nothing has for 5s.
-    let deadline = pub_start + args.timeout;
+    // Draining: everything is in the log now; time reading it back alone.
+    let recv_start = if args.drain {
+        let start = Instant::now();
+        (slots, tasks) = attach_all(args, receiver.as_ref(), &subjects, &shared).await;
+        start
+    } else {
+        pub_start
+    };
+    let deadline = recv_start + args.timeout;
     let (mut last_count, mut quiet_since) = (0, Instant::now());
+    let receiving = args.receivers_per_subject() > 0;
     loop {
+        if !receiving {
+            break;
+        }
         let got = shared.received.load(Ordering::Relaxed);
         if got >= published || Instant::now() > deadline {
             break;
@@ -378,7 +465,7 @@ async fn run(args: &Args) -> serde_json::Value {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let e2e_secs = pub_start.elapsed().as_secs_f64();
+    let e2e_secs = recv_start.elapsed().as_secs_f64();
 
     for t in tasks {
         t.abort();
@@ -413,6 +500,30 @@ async fn run(args: &Args) -> serde_json::Value {
         first_error,
         cleanup,
     )
+}
+
+/// Attaches every receiver of the run, each read by a task of its own.
+async fn attach_all(
+    args: &Args,
+    receiver: &dyn Manager,
+    subjects: &[String],
+    shared: &Arc<Shared>,
+) -> (Vec<Arc<Mutex<Received>>>, Vec<tokio::task::JoinHandle<()>>) {
+    let (mut slots, mut tasks) = (Vec::new(), Vec::new());
+    for s in subjects {
+        for _ in 0..args.receivers_per_subject() {
+            let slot = Arc::new(Mutex::new(Received::default()));
+            let messages = attach(args, receiver, s).await;
+            tasks.push(tokio::spawn(receive(
+                args.clone(),
+                messages,
+                slot.clone(),
+                shared.clone(),
+            )));
+            slots.push(slot);
+        }
+    }
+    (slots, tasks)
 }
 
 /// One received message: lent, for a durable consumer, or handed over.
@@ -504,7 +615,12 @@ fn summarize(
 ) -> serde_json::Value {
     let delivered = all.seqs.len() as u64;
     let unique = all.seqs.iter().collect::<HashSet<_>>().len() as u64;
-    let lost = published.saturating_sub(unique);
+    // A publish-only run has nothing to lose.
+    let lost = if args.receivers_per_subject() > 0 {
+        published.saturating_sub(unique)
+    } else {
+        0
+    };
     let publish_errors = shared.publish_errors.load(Ordering::Relaxed);
     all.latencies_us.sort_unstable();
     let pct = |p: f64| -> Option<f64> {
@@ -521,8 +637,8 @@ fn summarize(
         "backend": args.backend,
         "profile": args.profile,
         "scenario": args.scenario,
-        "message": if args.message == "int64" { "google.protobuf.Int64Value" } else { "google.protobuf.StringValue" },
-        "payload_bytes": if args.message == "int64" { 0 } else { args.payload },
+        "message": match args.message.as_str() { "int64" => "google.protobuf.Int64Value", "opcua" => "opcua.DataValue(Int64)", _ => "google.protobuf.StringValue" },
+        "payload_bytes": if matches!(args.message.as_str(), "int64" | "opcua") { 0 } else { args.payload },
         "messages": args.messages,
         "subjects": args.subjects,
         "publishers": args.publishers,

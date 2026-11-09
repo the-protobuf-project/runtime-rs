@@ -21,7 +21,30 @@ use streams::{
 use super::{Conn, Error, env, unknown_profile};
 
 pub async fn connect(jetstream: bool, profile: &str, registry: Registry) -> Result<Conn, Error> {
-    let client = match profile {
+    // Publishers and subscribers get a connection each, as `nats bench` runs
+    // them and as a service that both produces and consumes heavily would:
+    // one async-nats connection is one reader and one writer task, and
+    // sharing it makes PubAcks queue behind deliveries.
+    let config = NatsConfig {
+        registry,
+        ..NatsConfig::default()
+    };
+    let (publisher, subscriber) = (dial(profile).await?, dial(profile).await?);
+    Ok(if jetstream {
+        Conn {
+            publisher: Box::new(JetStreamProvider::new(publisher, config.clone()).await?),
+            subscriber: Some(Box::new(JetStreamProvider::new(subscriber, config).await?)),
+        }
+    } else {
+        Conn {
+            publisher: Box::new(NatsProvider::new(publisher, config.clone())),
+            subscriber: Some(Box::new(NatsProvider::new(subscriber, config))),
+        }
+    })
+}
+
+async fn dial(profile: &str) -> Result<async_nats::Client, Error> {
+    Ok(match profile {
         "plain" => async_nats::connect(env("NATS_URL", "nats://127.0.0.1:14222")).await?,
         "tls" => {
             let certs = std::env::var("NATS_E2E_CERTS").map_or_else(
@@ -37,14 +60,5 @@ pub async fn connect(jetstream: bool, profile: &str, registry: Registry) -> Resu
                 .await?
         }
         other => return Err(unknown_profile("nats", other)),
-    };
-    let config = NatsConfig {
-        registry,
-        ..NatsConfig::default()
-    };
-    Ok(if jetstream {
-        Conn::one(JetStreamProvider::new(client, config).await?)
-    } else {
-        Conn::one(NatsProvider::new(client, config))
     })
 }

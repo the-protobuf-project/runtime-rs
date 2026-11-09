@@ -10,7 +10,7 @@ mod metrics;
 mod subject;
 
 pub use batch::{batch_result, check_batch, publish_each};
-pub use envelope::{pack, unpack};
+pub use envelope::{pack, unpack, unpack_shared};
 pub use metrics::Metrics;
 pub use subject::{declares, declares_pattern, matches, unknown_subject};
 

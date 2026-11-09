@@ -102,8 +102,9 @@ impl KafkaProvider {
         if let Some(body) = &body {
             record = record.payload(body);
         }
+        // Keyed by the stream id, so declarations of one stream stay in order.
         self.inner
-            .producer
+            .producer(Some(id))
             .send(record, DIAL_TIMEOUT)
             .await
             .map_err(|(error, _)| {
@@ -299,13 +300,15 @@ impl Streams for KafkaProvider {
         Ok(out)
     }
 
-    /// Flushes what the producer still holds. The caller's config is not a
+    /// Flushes what the producers still hold. The caller's config is not a
     /// connection, so there is nothing of theirs to close.
     async fn close(&self) -> Result<()> {
-        let producer = self.inner.producer.clone();
+        let producers = self.inner.producers.clone();
         blocking(move || {
             use rdkafka::producer::Producer as _;
-            producer.flush(DIAL_TIMEOUT)
+            producers
+                .iter()
+                .try_for_each(|producer| producer.flush(DIAL_TIMEOUT))
         })
         .await?
         .map_err(|error| StreamError::internal("kafka: cannot flush the producer", error))

@@ -14,8 +14,8 @@ use rdkafka::{
         BaseConsumer, CommitMode, Consumer, ConsumerContext, RebalanceProtocol, StreamConsumer,
     },
     error::KafkaError,
-    producer::FutureRecord,
-    types::RDKafkaRespErr,
+    producer::{FutureProducer, FutureRecord},
+    types::{RDKafkaErrorCode, RDKafkaRespErr},
 };
 use tokio::sync::{Notify, mpsc};
 
@@ -73,11 +73,11 @@ impl KafkaManager {
     }
 
     /// The topic carrying `subject`, which [`Self::check_subject`] has passed.
-    fn topic(&self, subject: &str) -> String {
-        self.topics
-            .get(subject)
-            .cloned()
-            .unwrap_or_else(|| self.inner.topic(&self.stream.id, subject))
+    fn topic(&self, subject: &str) -> std::borrow::Cow<'_, str> {
+        match self.topics.get(subject) {
+            Some(topic) => topic.as_str().into(),
+            None => self.inner.topic(&self.stream.id, subject).into(),
+        }
     }
 
     /// Rejects a subject the stream does not declare.
@@ -107,14 +107,19 @@ impl KafkaManager {
         Ok(())
     }
 
-    /// Appends one framed payload to `topic`, keyed by the partition key.
-    async fn send(&self, topic: &str, frame: &[u8], key: Option<&str>) -> Result<()> {
+    /// Appends one framed payload to `topic` through `producer`, keyed by the
+    /// partition key.
+    async fn send(
+        producer: &FutureProducer,
+        topic: &str,
+        frame: &[u8],
+        key: Option<&str>,
+    ) -> Result<()> {
         let mut record = FutureRecord::<str, [u8]>::to(topic).payload(frame);
         if let Some(key) = key {
             record = record.key(key);
         }
-        self.inner
-            .producer
+        producer
             .send(record, QUEUE_TIMEOUT)
             .await
             .map(drop)
@@ -125,7 +130,7 @@ impl KafkaManager {
 
     /// Builds the consumer a subscription reads with, positioned and ready.
     async fn consumer(&self, subject: &str, reader: &Reader) -> Result<Arc<Kafka>> {
-        let topic = self.topic(subject);
+        let topic = self.topic(subject).into_owned();
         let fail = |error: KafkaError| {
             StreamError::internal(&format!("kafka: cannot consume {subject:?}"), error)
         };
@@ -233,13 +238,14 @@ impl KafkaManager {
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();
         let metrics = self.inner.config.metrics.clone();
-        let (subject, name) = (subject.to_owned(), consumer.to_owned());
-        let topic = self.topic(&subject);
+        // Shared, so each delivery points at one copy rather than its own.
+        let (subject, name): (Arc<str>, Arc<str>) = (subject.into(), consumer.into());
+        let topic = self.topic(&subject).into_owned();
         let commits = Arc::new(Commits::new(topic));
         let committer = tokio::spawn(commit_acked(
             Arc::clone(&reader),
             Arc::clone(&commits),
-            subject.clone(),
+            subject.to_string(),
         ));
         tokio::spawn(async move {
             let mut delivered = 0usize;
@@ -266,10 +272,10 @@ impl KafkaManager {
                     partition,
                     offset,
                     metrics: metrics.clone(),
-                    subject: subject.clone(),
-                    name: name.clone(),
+                    subject: Arc::clone(&subject),
+                    name: Arc::clone(&name),
                 };
-                let message = match provider::unpack(&registry, &subject, frame) {
+                let message = match provider::unpack_shared(&registry, &subject, frame) {
                     Ok(message) => message,
                     Err(error) => {
                         // Nothing will ever decode this, so no handler will ever
@@ -310,7 +316,39 @@ impl KafkaManager {
 type Kafka = StreamConsumer<Start>;
 
 /// The current end of every partition of `topic`.
+///
+/// A topic created a moment ago may not have its leaders elected yet, which
+/// the broker reports as an error that clears by itself; those are waited out
+/// for up to [`DIAL_TIMEOUT`] rather than failing a subscribe made right
+/// after `create`.
 fn watermarks(consumer: &Kafka, topic: &str) -> std::result::Result<HashMap<i32, i64>, KafkaError> {
+    let deadline = std::time::Instant::now() + DIAL_TIMEOUT;
+    loop {
+        match try_watermarks(consumer, topic) {
+            Err(error)
+                if std::time::Instant::now() < deadline
+                    && matches!(
+                        error.rdkafka_error_code(),
+                        Some(
+                            RDKafkaErrorCode::NotLeaderForPartition
+                                | RDKafkaErrorCode::LeaderNotAvailable
+                                | RDKafkaErrorCode::UnknownTopicOrPartition
+                                | RDKafkaErrorCode::UnknownPartition
+                        )
+                    ) =>
+            {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            result => return result,
+        }
+    }
+}
+
+/// One attempt at [`watermarks`].
+fn try_watermarks(
+    consumer: &Kafka,
+    topic: &str,
+) -> std::result::Result<HashMap<i32, i64>, KafkaError> {
     let metadata = consumer.fetch_metadata(Some(topic), DIAL_TIMEOUT)?;
     let mut ends = HashMap::new();
     for described in metadata.topics() {
@@ -423,10 +461,8 @@ impl Publisher for KafkaManager {
         let id = provider::publish_id(opts);
         let frame = provider::pack(&id, &payload);
         let topic = self.topic(subject);
-        if let Err(error) = self
-            .send(&topic, &frame, opts.partition_key.as_deref())
-            .await
-        {
+        let key = opts.partition_key.as_deref();
+        if let Err(error) = Self::send(self.inner.producer(key), &topic, &frame, key).await {
             tracing::error!(subject, id = %id, error = %error, "could not publish");
             return Err(error);
         }
@@ -463,7 +499,14 @@ impl Batch for KafkaManager {
             .map(|(payload, id)| provider::pack(id, payload))
             .collect();
         let key = opts.partition_key.as_deref();
-        let results = join_all(frames.iter().map(|frame| self.send(&topic, frame, key))).await;
+        // One producer for the whole batch, so its records keep their order.
+        let producer = self.inner.producer(key);
+        let results = join_all(
+            frames
+                .iter()
+                .map(|frame| Self::send(producer, &topic, frame, key)),
+        )
+        .await;
         let failures = results
             .into_iter()
             .enumerate()
@@ -498,7 +541,7 @@ impl Subscriber for KafkaManager {
 
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();
-        let subject = subject.to_owned();
+        let subject: Arc<str> = subject.into();
         tokio::spawn(async move {
             let mut delivered = 0usize;
             loop {
@@ -511,7 +554,7 @@ impl Subscriber for KafkaManager {
                         let offset = record.offset();
                         let frame = Bytes::copy_from_slice(record.payload().unwrap_or_default());
                         drop(record);
-                        match provider::unpack(&registry, &subject, frame) {
+                        match provider::unpack_shared(&registry, &subject, frame) {
                             Ok(message) => message,
                             Err(error) => {
                                 tracing::warn!(subject = %subject, offset, error = %error,
@@ -777,8 +820,8 @@ struct Settle {
     partition: i32,
     offset: i64,
     metrics: provider::Metrics,
-    subject: String,
-    name: String,
+    subject: Arc<str>,
+    name: Arc<str>,
 }
 
 #[async_trait::async_trait]

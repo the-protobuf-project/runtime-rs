@@ -9,6 +9,8 @@ mod kafka;
 mod mqtt;
 #[cfg(feature = "nats")]
 mod nats;
+#[cfg(feature = "opcua")]
+mod opcua;
 #[cfg(feature = "rabbitmq")]
 mod rabbitmq;
 #[cfg(feature = "redis")]
@@ -24,6 +26,7 @@ pub struct Conn {
 }
 
 impl Conn {
+    #[allow(dead_code)] // every backend but NATS uses it
     pub fn one(streams: impl Streams + 'static) -> Self {
         Self {
             publisher: Box::new(streams),
@@ -56,6 +59,8 @@ pub async fn connect(backend: &str, profile: &str, registry: Registry) -> Result
         "mqtt" => mqtt::connect(profile, registry).await,
         #[cfg(feature = "zeromq")]
         "zeromq" => zeromq::connect(profile, registry).await,
+        #[cfg(feature = "opcua")]
+        "opcua" => opcua::connect(profile, registry).await,
         other => Err(format!("backend {other:?} is unknown or its feature is not enabled").into()),
     }
 }

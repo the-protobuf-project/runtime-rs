@@ -10,18 +10,21 @@ pub fn matches(pattern: &str, subject: &str) -> bool {
     if pattern == subject {
         return true;
     }
-    let pattern: Vec<&str> = pattern.split('.').collect();
-    let subject: Vec<&str> = subject.split('.').collect();
-    for (i, token) in pattern.iter().enumerate() {
-        match *token {
-            ">" => return i == pattern.len() - 1 && subject.len() > i,
-            "*" if i >= subject.len() => return false,
-            "*" => {}
-            literal if subject.get(i) != Some(&literal) => return false,
+    // Walked token by token without collecting either side: this runs for
+    // every declared subject on every publish, where two vectors each time
+    // were a measurable share of a publish's cost.
+    let mut pattern = pattern.split('.').peekable();
+    let mut subject = subject.split('.');
+    while let Some(token) = pattern.next() {
+        match (token, subject.next()) {
+            (">", next) => return pattern.peek().is_none() && next.is_some(),
+            (_, None) => return false,
+            ("*", Some(_)) => {}
+            (literal, Some(got)) if literal != got => return false,
             _ => {}
         }
     }
-    pattern.len() == subject.len()
+    subject.next().is_none()
 }
 
 /// Whether `declared` lists `subject` literally.
@@ -34,8 +37,12 @@ pub fn declares(declared: &[String], subject: &str) -> bool {
 }
 
 /// Whether any declared subject, read as a pattern, matches `subject`.
+///
+/// A literal declaration of the subject itself is the common case, so it is
+/// looked for first; only when there is none are the declarations read as
+/// patterns.
 pub fn declares_pattern(declared: &[String], subject: &str) -> bool {
-    declared.iter().any(|d| matches(d, subject))
+    declares(declared, subject) || declared.iter().any(|d| matches(d, subject))
 }
 
 /// The error for a subject `stream` does not declare.

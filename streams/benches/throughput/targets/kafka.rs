@@ -44,6 +44,9 @@ pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
         prefix: "bench".into(),
         partitions: 10,
         registry,
+        producers: env("KAFKA_PRODUCERS", "8")
+            .parse()
+            .expect("KAFKA_PRODUCERS"),
         ..KafkaConfig::default()
     };
     Ok(Conn::one(KafkaProvider::connect(client, config).await?))

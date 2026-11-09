@@ -5,7 +5,7 @@
 //! travels in the frame so a message decodes the way it was written rather than
 //! the way the receiving program happens to be configured.
 
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{borrow::Cow, collections::BTreeSet, sync::Arc};
 
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
@@ -121,7 +121,9 @@ impl Payload {
 /// bytes nobody can read. JSON is always present.
 #[derive(Clone, Debug)]
 pub struct Registry {
-    names: BTreeSet<Cow<'static, str>>,
+    // Shared names, so a received message points at the registry's copy of
+    // its codec name instead of allocating one.
+    names: BTreeSet<Arc<str>>,
 }
 
 impl Default for Registry {
@@ -134,20 +136,26 @@ impl Registry {
     /// A registry accepting JSON only.
     pub fn new() -> Self {
         Self {
-            names: BTreeSet::from([Cow::Borrowed("json")]),
+            names: BTreeSet::from([Arc::from("json")]),
         }
     }
 
     /// Accepts frames written by a codec with this name as well.
     pub fn with(mut self, name: impl Into<Cow<'static, str>>) -> Self {
-        self.names.insert(name.into());
+        self.names.insert(Arc::from(name.into().as_ref()));
         self
     }
 
     /// Checks that a frame's codec is one this program can decode.
     pub fn lookup(&self, name: &str) -> Result<()> {
-        if self.names.contains(name) {
-            return Ok(());
+        self.resolve(name).map(|_| ())
+    }
+
+    /// The registry's shared copy of a codec name, or the refusal
+    /// [`Registry::lookup`] gives.
+    pub(crate) fn resolve(&self, name: &str) -> Result<Arc<str>> {
+        if let Some(found) = self.names.get(name) {
+            return Ok(found.clone());
         }
         Err(StreamError::Unsupported(format!(
             "this message was encoded with the {name:?} codec, which this program does not have; \

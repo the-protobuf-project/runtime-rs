@@ -157,3 +157,71 @@ The secure e2e suite with `STREAMS_E2E_RESTART=1` (strict) passed 3/3 in a row
 unit tests (10). Clippy (`rabbitmq,protobuf,live-tests,tls`, `-D warnings`) is
 clean, rustfmt (2024) is clean on the changed files, and `cargo tree -i
 aws-lc-rs` finds no match.
+
+## Round 5: against the official tool
+
+Baseline: `streams/benches/native-baseline.sh rabbitmq`, which runs RabbitMQ's
+own load tool (`pivotalrabbitmq/perf-test`, JVM capped at `-Xmx512m`) against
+the plaintext broker through `host.docker.internal:15682`. That is the same
+Docker Desktop port forward the driver crosses, and it never touches port 5672.
+The tool uses one producer, one consumer, one queue and 256-byte bodies. Its
+settings match the driver's: persistent messages and publisher confirms with
+`--confirm 32` (the harness's 32 publishers, each awaiting one confirm) and
+`--confirm 500` (one batch). Fanout uses an exclusive server-named queue with
+auto-ack, as a `subscribe` does. Durable uses a durable classic queue,
+`--qos 1024` and per-message acks, as `consume` does. Each baseline below ran
+in the same minutes as the driver runs next to it, with the Kafka and NATS
+agents benchmarking at the same time. 300k messages.
+
+| scenario | official tool | before (round 4 code) | after | share (after) |
+| --- | --- | --- | --- | --- |
+| raw ceiling (transient, no confirms, auto-ack) | 80–91k | — | — | — |
+| fanout, 32 in flight (tool `-c 32`; driver 32 pubs, 10 subjects) | 11.0k | 18.3k | 30.0k | 273% |
+| fanout, 1 subject | 11.0k | 18.7k | 14.5k | 132% |
+| batch 500, 256 B bodies, 1 publisher, 1 subject (tool `-c 500`) | 65.8k | — | 57.4k | 87% |
+| batch 500, 256 B, 32 pubs, 10 subjects (tool `-c 16000`) | 74.8k | — | 92.8k | 124% |
+| batch 500, Int64Value (harness default) | — | 126–166k | 113–160k | n/a (smaller bodies) |
+| durable, 32 in flight, 10 subjects (tool `-c 32 -q 1024`) | 11.7k | 5.9–12.4k | 14.0k | 120% |
+| durable, 1 subject | 11.7k | 10.7–16.3k | 9.1k | 78% (noise; before ran 10.7–16.3k) |
+| durable, tool `-c 500` / `-c 16000` | 37–45k / 52k | — | — | — |
+
+Publish and delivery rates are the same in every row (nothing lags), so one
+share covers both. The spread within a row is the noise from the other
+agents' runs. For example, the driver's single-subject fanout fell between
+14.5k and 18.7k from one run to the next, and the tool's `-c 32` fanout
+between 11k and 19k.
+
+Findings:
+
+- **The driver is not behind the official tool at the same in-flight window.**
+  The tool's single channel with 32 unconfirmed messages does what 32
+  confirm-awaiting publishers do, and with 10 subjects the driver does better,
+  because 10 queue processes and 4 publishing channels work in parallel. The
+  only shape below 100% is batch with a single publisher (87%): one lapin
+  channel against the tool's one channel, both bound by the confirm round trip.
+- **Durable is bound in the tool exactly as in the driver.** With persistent
+  messages on a durable queue and 32 confirms in flight, perf-test drops from
+  ~90k (raw) to 5–12k, and only a larger confirm window brings it back (37–52k
+  at 500–16000). The confirm waits for the queue's fsync, and throughput is
+  the window divided by that latency. The driver reaches the same figure with
+  the same window. More throughput needs more concurrent publishers or `Batch`,
+  not driver work: `publish` must return only after its confirm.
+- **The client is idle.** `sample` during unpaced fanout: the tokio workers and
+  lapin's IO thread spend almost all their time in `__psynch_cvwait` and
+  `kevent` (~30k of ~30.3k samples). Malloc, memmove and lapin's own code are
+  each under 0.1%. Nothing on the client is worth optimizing for throughput.
+
+Change (`src/drivers/rabbitmq/manager.rs`): the receive paths use
+`provider::unpack_shared` with a cached `Arc<str>` of the last routing key,
+so deliveries on one subject share one subject string. A durable delivery's
+acker shares the subscription's subject and consumer names (`Arc<str>`), where
+it used to copy both `String`s per message. Decoding moved out of the
+per-delivery `async` block, so only rejecting a malformed message awaits.
+Behaviour is unchanged: no lost or duplicated messages, the same ack and
+reject semantics, and the same wire format. The throughput change is within
+the noise, as expected for a client that is waiting on the network.
+
+Tests: secure e2e (`STREAMS_E2E_RESTART=1`, `STREAMS_DURABILITY=strict`) 3/3 in
+a row (7 each). Plaintext live suite 13/13. Driver unit tests 11/11. Clippy
+(`rabbitmq,protobuf,live-tests,tls`, `-D warnings`) and rustfmt (2024) clean.
+`cargo tree -i aws-lc-rs` finds no match.

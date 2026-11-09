@@ -56,7 +56,7 @@ use std::{
     collections::{BTreeMap, HashMap, VecDeque},
     sync::{
         Arc, Mutex, MutexGuard, RwLock,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Duration,
 };
@@ -94,6 +94,10 @@ pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// thousand, queue without ever finding it full: a full channel makes a
 /// publish back off and retry, which costs a millisecond each time.
 const REQUEST_CAPACITY: usize = 8192;
+
+/// Publishing connections a provider opens when
+/// [`MqttConfig::publish_connections`] is not changed.
+pub const DEFAULT_PUBLISH_CONNECTIONS: usize = 4;
 
 /// How long the publishing connection waits before redialing a lost broker,
 /// so an outage is a retry a second rather than a spin.
@@ -143,6 +147,21 @@ pub struct MqttConfig {
     /// message before failing. At QoS 0 there is no acknowledgement and it
     /// bounds only the hand-off to the connection.
     pub publish_timeout: Duration,
+
+    /// How many connections publishes are spread over. At least one.
+    ///
+    /// Every QoS 1 publish waits for its PUBACK, and one connection carries
+    /// every request through one event loop and one socket in turn, so with
+    /// many concurrent publishers it becomes the queue they all wait in.
+    /// Several connections share the load and the broker acknowledges each
+    /// one independently. A publish goes out whole on one connection and still
+    /// returns only once the broker has it, and a batch stays on one
+    /// connection, in order.
+    ///
+    /// With [`client_id`](Self::client_id) set, the first connection uses it
+    /// and the others append `-1`, `-2`, and so on, since a broker gives a
+    /// client id to one connection at a time.
+    pub publish_connections: usize,
 }
 
 impl Default for MqttConfig {
@@ -155,6 +174,7 @@ impl Default for MqttConfig {
             registry: Registry::new(),
             metrics: Metrics::default(),
             publish_timeout: DEFAULT_PUBLISH_TIMEOUT,
+            publish_connections: DEFAULT_PUBLISH_CONNECTIONS,
         }
     }
 }
@@ -173,7 +193,7 @@ pub struct MqttProvider {
 pub(crate) struct Inner {
     options: MqttOptions,
     config: MqttConfig,
-    publisher: PublishLink,
+    publisher: PublishPool,
     declared: RwLock<BTreeMap<String, Stream>>,
 }
 
@@ -194,10 +214,30 @@ impl MqttProvider {
             .clone()
             .unwrap_or_else(|| format!("runtime-rs-{}", crate::provider::new_id()));
 
-        // One connection for publishing. Subscriptions get their own, because a
+        // Connections for publishing. Subscriptions get their own, because a
         // session's identity is its client id and is fixed when it connects.
-        let (client, events, _) = dial(&options, &client_id, Session::Clean).await?;
-        let publisher = PublishLink::spawn(client, events, config.publish_timeout);
+        let mut links = Vec::new();
+        for n in 0..config.publish_connections.max(1) {
+            let id = if n == 0 {
+                client_id.clone()
+            } else {
+                format!("{client_id}-{n}")
+            };
+            let (client, events, _) = match dial(&options, &id, Session::Clean).await {
+                Ok(dialed) => dialed,
+                Err(error) => {
+                    for link in &links {
+                        PublishLink::close(link).await;
+                    }
+                    return Err(error);
+                }
+            };
+            links.push(PublishLink::spawn(client, events, config.publish_timeout));
+        }
+        let publisher = PublishPool {
+            links,
+            next: AtomicUsize::new(0),
+        };
         Ok(Self {
             inner: Arc::new(Inner {
                 options,
@@ -290,7 +330,7 @@ impl Streams for MqttProvider {
         Ok(self.inner.read().values().cloned().collect())
     }
 
-    /// Disconnects the publishing connection.
+    /// Disconnects the publishing connections.
     ///
     /// Subscriptions hold connections of their own and end when their streams
     /// are dropped, so drop those first or their sessions stay attached until
@@ -431,8 +471,26 @@ impl Waiters {
     }
 }
 
-/// The publishing connection and the task driving its event loop.
-struct PublishLink {
+/// The publishing connections, taken in turn.
+pub(crate) struct PublishPool {
+    links: Vec<PublishLink>,
+    next: AtomicUsize,
+}
+
+impl PublishPool {
+    /// The connection the next publish goes out on.
+    pub(crate) fn link(&self) -> &PublishLink {
+        let n = self.next.fetch_add(1, Ordering::Relaxed);
+        &self.links[n % self.links.len()]
+    }
+
+    async fn close(&self) {
+        futures::future::join_all(self.links.iter().map(PublishLink::close)).await;
+    }
+}
+
+/// A publishing connection and the task driving its event loop.
+pub(crate) struct PublishLink {
     client: AsyncClient,
     waiters: Arc<Mutex<Waiters>>,
     closed: Arc<AtomicBool>,
@@ -455,7 +513,7 @@ impl PublishLink {
     }
 
     /// Publishes `body` on `topic` and waits for the broker to take it.
-    async fn publish(&self, topic: &str, qos: QoS, body: Bytes) -> Result<()> {
+    pub(crate) async fn publish(&self, topic: &str, qos: QoS, body: Bytes) -> Result<()> {
         let deadline = Instant::now() + self.timeout;
         let settled = self.enqueue(topic, qos, body, deadline).await?;
         self.settled(settled, deadline).await
@@ -465,7 +523,12 @@ impl PublishLink {
     /// the broker to take each: one round trip for the batch rather than one
     /// per message. Outcomes are in `bodies` order; the messages go on the
     /// wire in that order too, since one caller queues them back to back.
-    async fn publish_all(&self, topic: &str, qos: QoS, bodies: Vec<Bytes>) -> Vec<Result<()>> {
+    pub(crate) async fn publish_all(
+        &self,
+        topic: &str,
+        qos: QoS,
+        bodies: Vec<Bytes>,
+    ) -> Vec<Result<()>> {
         let deadline = Instant::now() + self.timeout;
         let mut pending = Vec::with_capacity(bodies.len());
         for body in bodies {

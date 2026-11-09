@@ -37,10 +37,11 @@
 //!
 //! [`as_durable`]: crate::as_durable
 
+mod acks;
 mod jetstream;
 mod plain;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use opentelemetry::metrics::Meter;
 use tracing::error;
@@ -153,6 +154,23 @@ impl NatsConfig {
     }
 }
 
+/// The subject of the messages a subscription receives, held once.
+///
+/// A subscription to a literal subject sees the same subject on every message,
+/// and one to a pattern usually sees a few. Each message is unpacked against
+/// the last one seen, so it shares that copy instead of allocating its own.
+#[derive(Default)]
+struct LastSubject(Option<Arc<str>>);
+
+impl LastSubject {
+    fn of(&mut self, subject: &str) -> &Arc<str> {
+        if self.0.as_deref() != Some(subject) {
+            self.0 = Some(Arc::from(subject));
+        }
+        self.0.as_ref().expect("just set")
+    }
+}
+
 /// Rejects a subject `stream` does not declare.
 ///
 /// A NATS subject is a pattern, so a stream declaring `orders.*` accepts
@@ -238,6 +256,15 @@ mod tests {
                 "{subject}"
             );
         }
+    }
+
+    #[test]
+    fn last_subject_is_shared_until_it_changes() {
+        let mut last = LastSubject::default();
+        let a = last.of("orders.placed").clone();
+        assert!(Arc::ptr_eq(&a, last.of("orders.placed")));
+        assert_eq!(&**last.of("orders.shipped"), "orders.shipped");
+        assert!(!Arc::ptr_eq(&a, last.of("orders.placed")));
     }
 
     #[test]

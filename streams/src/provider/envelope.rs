@@ -11,6 +11,8 @@
 //! topic, and the version byte lets the layout change without a future frame
 //! being misread as this one.
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 
 use crate::{Message, Payload, Registry, Result, StreamError};
@@ -44,9 +46,20 @@ pub fn pack(id: &str, payload: &Payload) -> Vec<u8> {
 /// version, one without an id, and one naming a codec `registry` lacks. The
 /// data is a slice of `frame`, not a copy.
 pub fn unpack(registry: &Registry, subject: &str, frame: impl Into<Bytes>) -> Result<Message> {
+    unpack_shared(registry, &Arc::from(subject), frame)
+}
+
+/// [`unpack`] for a subject the caller already holds shared, as a subscription
+/// does for every message it receives: the message points at that one copy, so
+/// reading a frame allocates only its id.
+pub fn unpack_shared(
+    registry: &Registry,
+    subject: &Arc<str>,
+    frame: impl Into<Bytes>,
+) -> Result<Message> {
     let frame: Bytes = frame.into();
     let fail = |reason: String| StreamError::Frame {
-        subject: subject.to_owned(),
+        subject: subject.to_string(),
         reason,
     };
     if frame.len() < 2 || frame[0] != FRAME_MARKER {
@@ -66,8 +79,8 @@ pub fn unpack(registry: &Registry, subject: &str, frame: impl Into<Bytes>) -> Re
     }
     let name = std::str::from_utf8(name).map_err(|_| fail("has a non-UTF-8 codec name".into()))?;
     let id = std::str::from_utf8(id).map_err(|_| fail("has a non-UTF-8 id".into()))?;
-    registry.lookup(name)?;
-    Ok(Message::new(id, subject, name, frame.slice(at..)))
+    let codec = registry.resolve(name)?;
+    Ok(Message::new(id, subject.clone(), codec, frame.slice(at..)))
 }
 
 /// Reads one length-prefixed field at `*at`, advancing past it.

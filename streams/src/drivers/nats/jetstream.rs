@@ -1,9 +1,9 @@
 //! JetStream: the same subjects as core NATS, backed by a stored log.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, collections::VecDeque, sync::Arc, time::Duration};
 
 use async_nats::{
-    Client,
+    Client, Subject,
     jetstream::{
         self, AckKind, ErrorCode,
         consumer::{
@@ -11,15 +11,10 @@ use async_nats::{
             pull::{self, MessagesErrorKind, OrderedConfig},
         },
         context::{CreateStreamErrorKind, GetStreamErrorKind},
-        message::PublishMessage,
         stream,
     },
 };
-use futures::{
-    FutureExt, StreamExt, TryStreamExt,
-    future::{self, Either},
-    stream::{BoxStream, FuturesOrdered},
-};
+use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use tracing::{debug, error, info, warn};
 
 use crate::{
@@ -27,7 +22,11 @@ use crate::{
     Publisher, Registry, Result, Stream, StreamError, Streams, Subscriber, Subscription, provider,
 };
 
-use super::{NatsConfig, check_concrete, check_subject};
+use super::{
+    LastSubject, NatsConfig,
+    acks::{self, AckError, Acks, Credit, Pending},
+    check_concrete, check_subject,
+};
 
 /// Metadata key for [`Stream::name`].
 ///
@@ -65,6 +64,9 @@ const ORDERED_INACTIVE_THRESHOLD: Duration = Duration::from_secs(30);
 /// What every manager bound from one provider needs.
 struct Shared {
     context: jetstream::Context,
+    client: Client,
+    /// The PubAck routing for this connection, started by the first publish.
+    acks: tokio::sync::OnceCell<Acks>,
     registry: Registry,
     metrics: provider::Metrics,
     /// Zero leaves it to the server.
@@ -90,7 +92,7 @@ impl JetStreamProvider {
                     .into(),
             ));
         }
-        let context = jetstream::new(client);
+        let context = jetstream::new(client.clone());
         context
             .query_account()
             .await
@@ -98,6 +100,8 @@ impl JetStreamProvider {
         Ok(Self {
             shared: Arc::new(Shared {
                 context,
+                client,
+                acks: tokio::sync::OnceCell::new(),
                 metrics: config.metrics(),
                 ack_wait: config.ack_wait.unwrap_or_default(),
                 max_deliver: config.max_deliver.map(i64::from).unwrap_or_default(),
@@ -308,16 +312,19 @@ impl Publisher for JetStreamManager {
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.check_publish(subject, opts)?;
         let id = provider::publish_id(opts);
-        self.send(subject, &id, &payload).await?.await?;
+        let target = Subject::from(subject);
+        let acks = self.acks().await?;
+        let mut credit = Credit::new(acks);
+        credit.take(1).await;
+        credit.spend();
+        let pending = self.send(acks, &target, &id, &payload).await?;
+        self.stored(subject, &id, pending).await?;
         Ok(id)
     }
 }
 
-/// A sent publish, resolving once the server has stored it.
-type Stored = futures::future::BoxFuture<'static, Result<()>>;
-
-/// How many publishes of one batch are awaiting their acks at once. The
-/// context's own limit (5,000 across the connection) still applies on top.
+/// How many publishes of one batch are awaiting their acks at once, as
+/// nats.go's `PublishAsyncMaxPending` bounds them.
 const BATCH_IN_FLIGHT: usize = 1024;
 
 impl JetStreamManager {
@@ -333,36 +340,47 @@ impl JetStreamManager {
         Ok(())
     }
 
-    /// Sends one frame under `id`, returning once it has left for the server.
-    /// The future it returns resolves when the server has stored it.
-    ///
-    /// Sending takes one of the context's in-flight permits, which the returned
-    /// future gives back, so it must be awaited (or dropped) for later sends
-    /// to proceed.
-    async fn send(&self, subject: &str, id: &str, payload: &Payload) -> Result<Stored> {
-        let body = provider::pack(id, payload);
-        let bytes = body.len();
-        let fail = move |subject: &str, id: &str, error: &dyn std::fmt::Display| {
-            warn!(subject, id, %error, "could not publish");
-            StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
-        };
-        let ack = self
-            .shared
-            .context
-            .send_publish(
-                subject.to_owned(),
-                PublishMessage::build().payload(body.into()).message_id(id),
-            )
+    /// The connection's PubAck routing, started on first use.
+    async fn acks(&self) -> Result<&Acks> {
+        self.shared
+            .acks
+            .get_or_try_init(|| Acks::start(self.shared.client.clone()))
             .await
-            .map_err(|error| fail(subject, id, &error))?;
-        let (subject, id) = (subject.to_owned(), id.to_owned());
-        Ok(async move {
-            ack.await.map_err(|error| fail(&subject, &id, &error))?;
-            debug!(subject, id, bytes, "published");
-            Ok(())
-        }
-        .boxed())
+            .map_err(|error| {
+                error!(%error, "could not subscribe for PubAcks");
+                StreamError::internal("nats: cannot subscribe for PubAcks", error)
+            })
     }
+
+    /// Sends one frame under `id`, returning once it has left for the server.
+    /// What it returns resolves, through [`stored`](Self::stored), once the
+    /// server has stored it.
+    async fn send(
+        &self,
+        acks: &Acks,
+        subject: &Subject,
+        id: &str,
+        payload: &Payload,
+    ) -> Result<Pending> {
+        let body = provider::pack(id, payload);
+        acks.send(subject.clone(), id, body.into())
+            .await
+            .map_err(|error| publish_failed(subject.as_str(), id, &error))
+    }
+
+    /// Waits for the server to store a sent publish.
+    async fn stored(&self, subject: &str, id: &str, pending: Pending) -> Result<()> {
+        acks::stored(pending)
+            .await
+            .map_err(|error| publish_failed(subject, id, &error))?;
+        debug!(subject, id, "published");
+        Ok(())
+    }
+}
+
+fn publish_failed(subject: &str, id: &str, error: &AckError) -> StreamError {
+    warn!(subject, id, %error, "could not publish");
+    StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
 }
 
 #[async_trait::async_trait]
@@ -403,6 +421,7 @@ impl Subscriber for JetStreamManager {
 
         let registry = self.shared.registry.clone();
         let subject = subject.to_owned();
+        let mut last = LastSubject::default();
         Ok(messages
             // The ordered consumer recreates itself across gaps and reconnects,
             // so an error reaching here is one it gave up on.
@@ -418,11 +437,15 @@ impl Subscriber for JetStreamManager {
             })
             .filter_map(move |item| {
                 let decoded = item.ok().and_then(|message| {
-                    provider::unpack(&registry, message.subject.as_str(), message.payload.clone())
-                        .map_err(|error| {
-                            warn!(subject = %message.subject, %error, "dropping a malformed message");
-                        })
-                        .ok()
+                    provider::unpack_shared(
+                        &registry,
+                        last.of(message.subject.as_str()),
+                        message.payload.clone(),
+                    )
+                    .map_err(|error| {
+                        warn!(subject = %message.subject, %error, "dropping a malformed message");
+                    })
+                    .ok()
                 });
                 futures::future::ready(decoded)
             })
@@ -567,7 +590,8 @@ type Raw = BoxStream<'static, std::result::Result<jetstream::Message, pull::Mess
 /// pulls; the durable consumer stays on the server with its position, and what
 /// was in flight is redelivered once its ack wait runs out.
 fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
-    futures::stream::unfold((raw, lent), |(mut raw, lent)| async move {
+    let state = (raw, lent, LastSubject::default());
+    futures::stream::unfold(state, |(mut raw, lent, mut last)| async move {
         loop {
             let message = match raw.next().await? {
                 Ok(message) => message,
@@ -583,9 +607,9 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
                 }
             };
 
-            let decoded = provider::unpack(
+            let decoded = provider::unpack_shared(
                 &lent.registry,
-                message.subject.as_str(),
+                last.of(message.subject.as_str()),
                 message.payload.clone(),
             );
             let decoded = match decoded {
@@ -615,7 +639,7 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
                 consumer: lent.consumer.clone(),
             };
             let delivery = Delivery::new(decoded, attempt, Box::new(acker));
-            return Some((delivery, (raw, lent)));
+            return Some((delivery, (raw, lent, last)));
         }
     })
     .boxed()
@@ -661,10 +685,10 @@ impl Batch for JetStreamManager {
     ///
     /// Frames are sent one after another, in order, so the stream stores them
     /// in order; only the waits for their acks overlap. Up to
-    /// `BATCH_IN_FLIGHT` wait at once. While a send waits for room under the
-    /// context's own in-flight limit, the acks already outstanding keep being
-    /// collected, so a batch larger than that limit makes progress instead of
-    /// holding every permit and waiting on itself. Each message carries its
+    /// `BATCH_IN_FLIGHT` wait at once, within the connection's own limit of
+    /// `MAX_PENDING` across every publisher. While that limit is reached, the
+    /// batch settles its own oldest waits before it waits on anyone else, so
+    /// it never holds room it is itself waiting for. Each message carries its
     /// own id as `Nats-Msg-Id`, so a retried batch is collapsed by the
     /// duplicate window just as a retried single publish is. A message that
     /// fails is reported by index in [`StreamError::PartialBatch`]; the others
@@ -677,30 +701,50 @@ impl Batch for JetStreamManager {
     ) -> Result<Vec<String>> {
         provider::check_batch(opts)?;
         self.check_publish(subject, opts)?;
+        let target = Subject::from(subject);
+        let acks = self.acks().await?;
+        let mut credit = Credit::new(acks);
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
         let mut outcomes: Vec<Result<()>> = Vec::with_capacity(ids.len());
-        let mut acks: FuturesOrdered<Stored> = FuturesOrdered::new();
-        for (payload, id) in payloads.iter().zip(&ids) {
-            while acks.len() >= BATCH_IN_FLIGHT {
-                outcomes.extend(acks.next().await);
+        let mut waiting: VecDeque<(usize, Pending)> = VecDeque::with_capacity(BATCH_IN_FLIGHT);
+        for (index, (payload, id)) in payloads.iter().zip(&ids).enumerate() {
+            if waiting.len() >= BATCH_IN_FLIGHT {
+                let (done, pending) = waiting.pop_front().expect("a wait");
+                outcomes.push(self.stored(subject, &ids[done], pending).await);
+                credit.finish();
             }
-            let mut send = std::pin::pin!(self.send(subject, id, payload));
-            let sent = loop {
-                if acks.is_empty() {
-                    break send.as_mut().await;
+            // Room under the connection's in-flight limit: take it without
+            // waiting if there is some, else settle this batch's own oldest
+            // wait, and only wait on other publishers when nothing of ours
+            // is outstanding.
+            let left = payloads.len() - index;
+            while !credit.has_spare() && !credit.try_take(left) {
+                match waiting.pop_front() {
+                    Some((done, pending)) => {
+                        outcomes.push(self.stored(subject, &ids[done], pending).await);
+                        credit.finish();
+                    }
+                    None => credit.take(left).await,
                 }
-                match future::select(send.as_mut(), acks.next()).await {
-                    Either::Left((sent, _)) => break sent,
-                    Either::Right((done, _)) => outcomes.extend(done),
+            }
+            credit.spend();
+            match self.send(acks, &target, id, payload).await {
+                Ok(pending) => waiting.push_back((index, pending)),
+                Err(error) => {
+                    credit.finish();
+                    // Settle everything sent before it first, so outcomes
+                    // stay in index order.
+                    while let Some((done, pending)) = waiting.pop_front() {
+                        outcomes.push(self.stored(subject, &ids[done], pending).await);
+                        credit.finish();
+                    }
+                    outcomes.push(Err(error));
                 }
-            };
-            acks.push_back(match sent {
-                Ok(stored) => stored,
-                Err(error) => future::ready(Err(error)).boxed(),
-            });
+            }
         }
-        while let Some(done) = acks.next().await {
-            outcomes.push(done);
+        while let Some((done, pending)) = waiting.pop_front() {
+            outcomes.push(self.stored(subject, &ids[done], pending).await);
+            credit.finish();
         }
         let failures = outcomes
             .into_iter()

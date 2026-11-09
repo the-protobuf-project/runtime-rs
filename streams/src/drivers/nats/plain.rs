@@ -237,11 +237,12 @@ impl Subscriber for NatsManager {
         // No task sits between the client and the caller: the stream is the
         // client's subscriber, so dropping it is the unsubscribe.
         let registry = self.shared.registry.clone();
+        let mut last = super::LastSubject::default();
         Ok(raw
             .filter_map(move |message| {
-                let decoded = provider::unpack(
+                let decoded = provider::unpack_shared(
                     &registry,
-                    message.subject.as_str(),
+                    last.of(message.subject.as_str()),
                     message.payload,
                 )
                 .map_err(|error| {

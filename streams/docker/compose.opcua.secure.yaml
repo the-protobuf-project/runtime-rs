@@ -1,0 +1,61 @@
+# Microsoft's OPC PLC simulator, secured, for tests/opcua_e2e.rs:
+#
+#   streams/docker/compose.opcua.secure.sh            # issue the certificates once
+#   docker compose -f streams/docker/compose.opcua.secure.yaml up -d --wait
+#   cargo test -p tpp-streams --features opcua,tls,live-tests --test opcua_e2e
+#
+# What is enforced, on 127.0.0.1:14841:
+#
+# - No SecurityPolicy None endpoint: without `--ut` opc-plc offers only signed
+#   and encrypted channels (Basic256Sha256, Aes128Sha256RsaOaep and
+#   Aes256Sha256RsaPss, each with Sign and SignAndEncrypt). The suite uses
+#   Basic256Sha256 with SignAndEncrypt and proves None is refused.
+# - Real application trust, not auto-accept: `--aa` is not set, so the server
+#   accepts only the client certificate it is handed with `--tf`, and rejects
+#   every other (the suite proves it with a certificate nobody trusts). Its
+#   own certificate is the one compose.opcua.secure.sh issued.
+#   Auto-accept would let any client that can reach the port open a channel.
+#   The server's own certificate is provisioned as its own store (mounted at
+#   /own, `--ap`), so the client pins it rather than trusting what is presented.
+# - Username/password users only: anonymous (`--daa`) and X.509 user tokens
+#   (`--dca`) are off, and the test-only user is e2e-operator.
+#
+# opc-plc's application URI is urn:OpcPlc:<hostname>, which the issued server
+# certificate names, so the hostname is fixed here. The writable typed nodes
+# are compose.opcua.nodes.json's. Its PKI lives in the container, so a
+# restart keeps it and `down` discards it.
+name: tpp-streams-live-opcua
+services:
+  opc-plc-secure:
+    image: mcr.microsoft.com/iotedge/opc-plc:2.12.48
+    container_name: tpp-streams-opcua-secure
+    hostname: tpp-streams-opcua-secure
+    command:
+      - --pn=14841
+      - --daa
+      - --dca
+      - --du=e2e-operator
+      - --dc=e2e-operator-secret
+      - --au=e2e-admin
+      - --ac=e2e-admin-secret
+      - --ap=/own
+      - --tf=/certs/client.der
+      - --nf=/nodes/nodes.json
+      - --sn=1
+      - --fn=1
+      - --gn=0
+      - --vfbs=0
+      - --loglevel=info
+    ports:
+      - "127.0.0.1:14841:14841"
+    volumes:
+      - ./compose.opcua.nodes.json:/nodes/nodes.json:ro
+      - ./tls/out/opcua/own:/own
+      - ./tls/out/opcua/client.der:/certs/client.der:ro
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/14841' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: "no"

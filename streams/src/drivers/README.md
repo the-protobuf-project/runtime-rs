@@ -14,6 +14,7 @@ client for that broker:
 | `redis` | [`redis`](https://github.com/redis-rs/redis-rs) (official) | go-redis | `RedisProvider::new` (pub/sub), `::scheduled` (TTL), `::durable` (Streams) |
 | `mqtt` | [`rumqttc`](https://github.com/bytebeamio/rumqtt) | paho.golang | `MqttProvider::connect(MqttOptions, MqttConfig)` |
 | `zeromq` | [`zeromq`](https://github.com/zeromq/zmq.rs) (official, pure Rust) | zmq4 | `ZmqProvider::publisher` / `::subscriber(ZmqConfig)` |
+| `opcua` | [`async-opcua`](https://github.com/FreeOpcUa/async-opcua) (pure Rust, RustCrypto) | none: Rust only | `OpcUaProvider::new(Arc<Session>, OpcUaConfig)` |
 
 ## Ownership
 
@@ -42,3 +43,39 @@ behaviours differ on purpose:
   right after cannot be missed.
 - Self-dialing constructors and codec options are not ported: clients are
   yours, and a `Payload` carries its own codec.
+
+## OPC UA
+
+OPC UA is how PLCs, SCADA, and building controllers expose their state, so
+this driver speaks to them on their terms rather than carrying runtime-go's
+frame. It is client/server: a stream's subjects are node ids
+(`ns=3;s=Temperature`, or the stable `nsu=<uri>;s=Temperature`), `publish` is
+a Write to the node's Value that returns after the server's Write response,
+`subscribe` is a data-change monitored item in one client subscription per
+provider, and `Batch` is one Write request. The payload is
+`OpcUaValue` (`"opcua.datavalue"`): a `DataValue` in OPC UA binary encoding,
+so the value stays typed and its status code and source and server
+timestamps reach the subscriber. Groups, TTL, `Durable`, and `Positioned`
+are refused: OPC UA has no consumer groups, no scheduled writes, and no
+reader acknowledgement, and HistoryRead is a historian query, not a replay
+position. OPC UA has no message id, so `publish` returns a generated one that
+does not travel.
+
+`async-opcua` is the maintained successor of locka99/opcua; no Rust OPC UA
+crate has wide adoption, and this one is pure Rust on RustCrypto, so it adds
+no C build and no aws-lc. Its `rsa` 0.9 dependency carries RUSTSEC-2023-0071
+(Marvin: non-constant-time RSA private-key arithmetic, with no fixed release).
+Every RSA security policy, Basic256Sha256 and Aes256Sha256RsaPss included,
+does private-key operations (OAEP decryption and signing) when it opens or
+renews a secure channel, so a secured channel inherits the advisory. Both
+policies pad with OAEP, not PKCS#1 v1.5, which removes the classic padding
+oracle but not the timing leak; avoid Basic128Rsa15, and keep OPC UA ports
+off untrusted networks, as OPC UA deployments already do.
+
+Two async-opcua 0.19 behaviours the driver works around, both in the module
+docs: after a reconnect the recreated subscription is never published to
+until something triggers a publish, so a watchdog nudges a subscription that
+has been silent past twice its keep-alive; and a Publish response from the
+OPC Foundation's .NET stack holding more than about 1,800 notifications drops
+the connection as `BadDecodingError`, so `OpcUaConfig::max_notifications_per_publish`
+defaults to 1000.
