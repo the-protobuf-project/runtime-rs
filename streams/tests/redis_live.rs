@@ -749,6 +749,43 @@ async fn a_consumer_resumes_where_the_name_left_off() {
     assert_eq!(resumed.json::<Event>().unwrap().user, "second");
 }
 
+/// A consumer dropped while its read is blocked must not strand a message
+/// published in that moment: the read it abandoned would otherwise leave the
+/// entry pending with a consumer that no longer exists until the reclaim
+/// interval (30 s here) passes.
+#[tokio::test]
+async fn a_message_published_as_a_consumer_drops_is_not_stranded() {
+    let provider = durable_with(RedisConfig {
+        reclaim_after: Duration::from_secs(30),
+        ..config()
+    })
+    .await;
+    for round in 0..20 {
+        let (_, m) = bind(&provider, &[SUBJECT]).await;
+        let d = as_durable(m.as_ref()).unwrap();
+        let blocked = d
+            .consume(SUBJECT, "workers", &Options::default())
+            .await
+            .unwrap();
+        // Let the loop reach its blocking read before the reader goes.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(blocked);
+        m.publish(SUBJECT, event("racing", ""), &Options::default())
+            .await
+            .unwrap();
+        let mut next = d
+            .consume(SUBJECT, "workers", &Options::default())
+            .await
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), next.next())
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: the message was stranded"))
+            .expect("the consumer ended");
+        assert_eq!(got.json::<Event>().unwrap().user, "racing");
+        got.ack().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn consume_from_earliest_replays_history() {
     let (_, m) = bind(&durable().await, &[SUBJECT]).await;

@@ -181,7 +181,9 @@ impl Args {
             }
             .into();
         }
-        if a.message == "opcua" && a.subject_prefix.is_empty() {
+        // Subjects on the client/server backend are node ids in the
+        // simulator's namespace; PubSub maps plain subjects to its own topics.
+        if a.backend == "opcua" && a.subject_prefix.is_empty() {
             a.subject_prefix = "nsu=http://microsoft.com/Opc/OpcPlc/;s=".into();
         }
         assert!(
@@ -307,10 +309,38 @@ struct Shared {
     published: AtomicU64,
     publish_errors: AtomicU64,
     received: AtomicU64,
+    /// Distinct sequence numbers delivered so far. The wait for delivery
+    /// stops on this, not on `received`: a backend that redelivers (Kafka
+    /// during a rebalance) reaches the published count with duplicates while
+    /// the last unique messages are still on their way.
+    unique: AtomicU64,
+    /// One bit per sequence number, set on its first delivery.
+    seen: Vec<AtomicU64>,
     first_error: Mutex<Option<String>>,
 }
 
 impl Shared {
+    /// Counters for a run of `messages` sequence numbers.
+    fn new(messages: u64) -> Self {
+        Self {
+            seen: (0..messages.div_ceil(64))
+                .map(|_| AtomicU64::new(0))
+                .collect(),
+            ..Self::default()
+        }
+    }
+
+    /// Records a delivery of `seq`, counting it once however often it arrives.
+    fn mark(&self, seq: u64) {
+        let Some(word) = self.seen.get((seq / 64) as usize) else {
+            return;
+        };
+        let bit = 1u64 << (seq % 64);
+        if word.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+            self.unique.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
     /// Counts `n` failed publishes, keeping only the first error's text for the report.
     fn error(&self, n: u64, e: impl std::fmt::Display) {
         self.publish_errors.fetch_add(n, Ordering::Relaxed);
@@ -393,7 +423,7 @@ async fn run(args: &Args) -> serde_json::Value {
     }
 
     // Attach every receiver before anything is published, unless draining.
-    let shared = Arc::new(Shared::default());
+    let shared = Arc::new(Shared::new(args.messages));
     let (mut slots, mut tasks) = (Vec::new(), Vec::new());
     if !args.drain {
         (slots, tasks) = attach_all(args, receiver.as_ref(), &subjects, &shared).await;
@@ -495,7 +525,7 @@ async fn run(args: &Args) -> serde_json::Value {
         if !receiving {
             break;
         }
-        let got = shared.received.load(Ordering::Relaxed);
+        let got = shared.unique.load(Ordering::Relaxed);
         if got >= published || Instant::now() > deadline {
             break;
         }
@@ -632,6 +662,7 @@ async fn receive(
             let mut s = slot.lock().unwrap();
             match read {
                 Some((seq, latency)) => {
+                    shared.mark(seq);
                     s.seqs.push(seq);
                     if let Some(l) = latency {
                         s.latencies_us

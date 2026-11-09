@@ -59,6 +59,9 @@ const MEASURE_LAG_EVERY: Duration = Duration::from_secs(1);
 /// long a loop goes without checking for work to reclaim, so it is short
 /// enough to feel responsive and long enough not to poll in a hot loop.
 pub(super) const BLOCK_FOR: Duration = Duration::from_secs(2);
+/// How much longer than its block a read is waited for once its reader has
+/// gone, so the entries it took can be handed back.
+const TAKE_GRACE: Duration = Duration::from_secs(1);
 /// How long a consumer waits after a read that came back nearly empty, so the
 /// next read collects a batch. Without it, every blocked reader is woken for
 /// nearly every entry at moderate rates, and Redis spends its single thread
@@ -516,6 +519,40 @@ impl ConsumeLoop {
         }
     }
 
+    /// Runs a command that assigns entries to this consumer (`XREADGROUP`,
+    /// `XAUTOCLAIM`), returning its reply and whether the reader went away
+    /// while it ran.
+    ///
+    /// Unlike [`ConsumeLoop::query`] it is not abandoned when the reader goes.
+    /// Redis may already have assigned entries to this consumer by then, and a
+    /// reply nobody reads strands them as pending with a consumer that no
+    /// longer exists until the reclaim interval passes. So the command is
+    /// allowed to finish (a blocking read returns within its block) and the
+    /// caller hands back what it took.
+    async fn take<T: redis::FromRedisValue>(
+        &self,
+        conn: &mut MultiplexedConnection,
+        command: &redis::Cmd,
+    ) -> (redis::RedisResult<T>, bool) {
+        let call = command.query_async::<T>(conn);
+        tokio::pin!(call);
+        tokio::select! {
+            reply = &mut call => (reply, false),
+            _ = self.tx.closed() => {
+                match tokio::time::timeout(BLOCK_FOR + TAKE_GRACE, &mut call).await {
+                    Ok(reply) => (reply, true),
+                    Err(_) => (
+                        Err(redis::RedisError::from((
+                            redis::ErrorKind::Io,
+                            "the read outlived its block after the reader left",
+                        ))),
+                        true,
+                    ),
+                }
+            }
+        }
+    }
+
     /// Takes over messages idle past the reclaim interval and delivers them,
     /// returning how many it sent.
     async fn reclaim(&self, conn: &mut MultiplexedConnection) -> std::result::Result<u64, Stop> {
@@ -531,7 +568,14 @@ impl ConsumeLoop {
             .arg("0")
             .arg("COUNT")
             .arg(self.batch);
-        let reply = match self.query::<StreamAutoClaimReply>(conn, &command).await? {
+        let (reply, closed) = self.take::<StreamAutoClaimReply>(conn, &command).await;
+        if closed {
+            if let Ok(reply) = reply {
+                self.release(reply.claimed.into_iter().map(|e| e.id)).await;
+            }
+            return Err(Stop::Closed);
+        }
+        let reply = match reply {
             Ok(reply) => reply,
             Err(error) => {
                 // A failed reclaim is not a reason to stop consuming new work.
@@ -546,16 +590,65 @@ impl ConsumeLoop {
 
         let attempts = self.attempts(conn).await?;
         let mut sent = 0;
-        for entry in reply.claimed {
+        let mut claimed = reply.claimed.into_iter();
+        while let Some(entry) = claimed.next() {
             // Claimed but no longer listed as pending: it has been delivered at
             // least twice by definition, so say so rather than claim it is new.
             let attempt = attempts.get(&entry.id).copied().unwrap_or(2);
             tracing::debug!(subject = %self.subject, entry = %entry.id, attempt,
                 "reclaimed an abandoned message");
-            self.deliver(entry, attempt).await?;
+            let id = entry.id.clone();
+            if let Err(stop) = self.deliver(entry, attempt).await {
+                if matches!(stop, Stop::Closed) {
+                    self.release(std::iter::once(id).chain(claimed.map(|e| e.id)))
+                        .await;
+                }
+                return Err(stop);
+            }
             sent += 1;
         }
         Ok(sent)
+    }
+
+    /// Hands back entries this consumer took from the group but could not
+    /// lend, because its reader had already gone.
+    ///
+    /// A read in flight when the reader drops still takes entries, and Redis
+    /// then lists them as pending with this consumer. Left alone they would
+    /// wait out the whole reclaim interval before any consumer saw them, so a
+    /// reader that stops at the wrong moment would delay messages published
+    /// just after it. Claiming them back with an idle time of the reclaim
+    /// interval makes them eligible at once: the next consumer's first reclaim
+    /// takes them. `JUSTID` leaves their delivery count as it was, since none
+    /// of them reached a reader. Best effort: if it fails they are still
+    /// reclaimed, only later.
+    async fn release(&self, ids: impl Iterator<Item = String>) {
+        if self.inner.reclaim_after.is_zero() {
+            return;
+        }
+        let ids: Vec<String> = ids.collect();
+        if ids.is_empty() {
+            return;
+        }
+        let mut command = redis::cmd("XCLAIM");
+        command
+            .arg(&self.key)
+            .arg(&self.group)
+            .arg(&self.name)
+            .arg(0);
+        for id in &ids {
+            command.arg(id);
+        }
+        command
+            .arg("IDLE")
+            .arg(self.inner.reclaim_after.as_millis() as u64)
+            .arg("JUSTID");
+        let released: std::result::Result<Vec<String>, _> =
+            self.inner.query(&command, Replay::Idempotent).await;
+        if let Err(error) = released {
+            tracing::warn!(subject = %self.subject, consumer = %self.group, %error,
+                entries = ids.len(), "could not hand undelivered entries back; they are reclaimed later");
+        }
     }
 
     /// How many times each message outstanding with this consumer has been
@@ -619,10 +712,15 @@ impl ConsumeLoop {
             .arg("STREAMS")
             .arg(&self.key)
             .arg(">");
-        let reply = match self
-            .query::<Option<StreamReadReply>>(conn, &command)
-            .await?
-        {
+        let (reply, closed) = self.take::<Option<StreamReadReply>>(conn, &command).await;
+        if closed {
+            if let Ok(Some(reply)) = reply {
+                self.release(reply.keys.into_iter().flat_map(|k| k.ids).map(|e| e.id))
+                    .await;
+            }
+            return Err(Stop::Closed);
+        }
+        let reply = match reply {
             Ok(Some(reply)) => reply,
             // None is the block expiring with nothing to report.
             Ok(None) => return Ok(0),
@@ -638,9 +736,17 @@ impl ConsumeLoop {
             }
         };
         let mut sent = 0;
-        for entry in reply.keys.into_iter().flat_map(|k| k.ids) {
+        let mut fresh = reply.keys.into_iter().flat_map(|k| k.ids);
+        while let Some(entry) = fresh.next() {
+            let id = entry.id.clone();
             // Fresh from the log, so this is its first delivery.
-            self.deliver(entry, 1).await?;
+            if let Err(stop) = self.deliver(entry, 1).await {
+                if matches!(stop, Stop::Closed) {
+                    self.release(std::iter::once(id).chain(fresh.map(|e| e.id)))
+                        .await;
+                }
+                return Err(stop);
+            }
             sent += 1;
         }
         Ok(sent)

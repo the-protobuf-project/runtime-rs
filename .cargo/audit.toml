@@ -1,0 +1,12 @@
+# Advisories cargo audit is told to accept, each with the reason it cannot be
+# fixed here and what would let the ignore be removed.
+
+[advisories]
+ignore = [
+    # rsa 0.9 Marvin attack: a timing side channel in RSA decryption. It is
+    # reached only through async-opcua (tpp-streams' opt-in `opcua` feature),
+    # whose 0.19 release, the latest, pins rsa 0.9; the fix is rsa 0.10.
+    # Remove this once async-opcua moves to rsa 0.10. Until then OPC UA's
+    # RSA security policies carry the exposure, as streams/README.md says.
+    "RUSTSEC-2023-0071",
+]

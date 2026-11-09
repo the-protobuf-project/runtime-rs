@@ -57,7 +57,7 @@ down() { # compose-name
 # Arguments a backend needs beyond the common ones. OPC UA client/server writes
 # typed Int64 values to nodes instead of protobuf messages.
 extra() { # backend
-  case "$1" in opcua) echo "--message opcua" ;; *) echo "" ;; esac
+  case "$1" in opcua | opcua-pubsub) echo "--message opcua" ;; *) echo "" ;; esac
 }
 
 publishers() { # backend scenario
