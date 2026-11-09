@@ -48,7 +48,7 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 http = { workspace = true }
 
-rmcp = { version = "3.8", optional = true, features = [
+rmcp = { version = "3.9", optional = true, features = [
     "server",
     "macros",
     "transport-streamable-http-server",
@@ -93,7 +93,7 @@ windows-sys = { version = "0.61", features = [
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 # A real MCP client over a Unix socket, for tests/mcp_unix.rs.
-rmcp = { version = "3.8", features = ["client", "transport-streamable-http-client-unix-socket"] }
+rmcp = { version = "3.9", features = ["client", "transport-streamable-http-client-unix-socket"] }
 reqwest = { workspace = true }
 futures = { workspace = true }
 serde_json = { workspace = true }
