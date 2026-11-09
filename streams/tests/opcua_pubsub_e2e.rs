@@ -256,3 +256,124 @@ async fn a_wrong_password_is_refused() {
     .expect("the broker refuses a wrong password");
     assert!(matches!(error, StreamError::Internal(_)), "{error}");
 }
+
+/// `mosquitto_sub` inside the broker's container (on its certificate-identity
+/// listener, which has no ACLs), as MQTT 5, printing each message's user
+/// properties and topic: another tool reading what the provider wrote.
+fn mosquitto_sub(topic: &str) -> std::process::Command {
+    let container =
+        std::env::var("MQTT_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-mqtt-secure".into());
+    let mut command = std::process::Command::new("docker");
+    command.args([
+        "exec",
+        &container,
+        "mosquitto_sub",
+        "-h",
+        "localhost",
+        "-p",
+        "8883",
+        "--cafile",
+        "/certs/ca.crt",
+        "--cert",
+        "/certs/client.crt",
+        "--key",
+        "/certs/client.key",
+        "-V",
+        "mqttv5",
+        "-F",
+        "%P %t",
+        "-t",
+        topic,
+        "-C",
+        "1",
+        "-W",
+        "15",
+    ]);
+    command
+}
+
+// Headers ride as MQTT 5 user properties beside the Part 14 JSON, through
+// the ACLs, and another MQTT 5 tool on the broker sees them.
+#[tokio::test]
+async fn headers_are_user_properties_another_tool_sees() {
+    let prefix = prefix(APP.0);
+    let streams = connect(APP, &prefix).await;
+    let stream = streams
+        .create(
+            Stream::named("h")
+                .with_id("line-h")
+                .subject("boiler")
+                .header("lang", "rust"),
+        )
+        .await
+        .unwrap();
+    let manager = streams.bind(&stream.id).await.unwrap();
+    let mut all = manager
+        .subscribe("boiler", &Options::default())
+        .await
+        .unwrap();
+
+    let opts = Options::default()
+        .header("site", "plant-3")
+        .with_expiry(Duration::from_secs(30));
+    manager
+        .publish("boiler/Temperature", OpcUaValue::payload(21.5f64), &opts)
+        .await
+        .unwrap();
+    let message = next(&mut all).await;
+    assert_eq!(value(&message), Variant::from(21.5f64));
+    assert_eq!(message.headers().get("lang"), Some("rust"));
+    assert_eq!(message.headers().get("site"), Some("plant-3"));
+
+    // The retained metadata carries the stream's headers; the tool started
+    // afterwards is handed it at once.
+    let set = DataSet::new().with("Temperature", DataValue::value_only(1.0f64));
+    streams
+        .publish_metadata("line-h", "boiler", set.metadata("boiler"))
+        .await
+        .unwrap();
+    let topic = format!("{prefix}/json/metadata/plant-e2e/line-h/boiler");
+    let out = mosquitto_sub(&topic).output().expect("run mosquitto_sub");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("lang:rust {topic}"),
+        "mosquitto_sub: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Live data: the tool subscribes first; publish until it has heard one.
+    let topic = format!("{prefix}/json/data/plant-e2e/line-h/boiler");
+    let mut child = mosquitto_sub(&topic)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mosquitto_sub");
+    for _ in 0..50 {
+        manager
+            .publish("boiler/Temperature", OpcUaValue::payload(2.0f64), &opts)
+            .await
+            .unwrap();
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("lang:rust site:plant-3 {topic}")
+    );
+
+    // Retain on data is refused by name.
+    assert!(matches!(
+        manager
+            .publish(
+                "boiler/Temperature",
+                OpcUaValue::payload(1.0f64),
+                &Options::default().with_retain(),
+            )
+            .await,
+        Err(StreamError::Unsupported(_))
+    ));
+    drop(all);
+    streams.close().await.unwrap();
+}

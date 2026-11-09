@@ -27,8 +27,8 @@ use std::{collections::HashSet, path::PathBuf, process::Command, sync::Arc, time
 
 use futures::StreamExt;
 use streams::{
-    Deliveries, Delivery, Manager, Message, Options, Payload, Position, Stream, StreamError,
-    Streams, Subscription, as_batch, as_durable, as_positioned,
+    Deliveries, Delivery, Headers, Manager, Message, Options, Payload, Position, Stream,
+    StreamError, Streams, Subscription, as_batch, as_durable, as_positioned,
     drivers::redis::{
         RedisConfig, RedisProvider,
         redis::{self, ClientTlsConfig, TlsCertificates},
@@ -1141,6 +1141,259 @@ async fn max_len_caps_the_log_over_tls() {
     let _: () = command(redis::cmd("DEL").arg(&key)).await;
 }
 
+// --- headers, expiry, retain, delayed nak ------------------------------------
+
+fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
+    pairs.into_iter().collect()
+}
+
+/// A stream on SUBJECT stamping `lang` and `site` on everything.
+fn with_defaults() -> Stream {
+    Stream::named("e2e-headers")
+        .subject(SUBJECT)
+        .header("lang", "rust")
+        .header("site", "plant-3")
+}
+
+fn defaults() -> Headers {
+    headers([("lang", "rust"), ("site", "plant-3")])
+}
+
+/// What a publish with [`override_opts`] arrives with.
+fn overridden() -> Headers {
+    headers([("lang", "rust"), ("site", "plant-9"), ("trace", "t-1")])
+}
+
+fn override_opts() -> Options {
+    Options::default()
+        .header("site", "plant-9")
+        .header("trace", "t-1")
+}
+
+async fn create_stream(provider: &RedisProvider, stream: Stream) -> (Stream, Arc<dyn Manager>) {
+    let stream = provider.create(stream).await.unwrap();
+    let manager = provider.bind(&stream.id).await.unwrap();
+    (stream, manager)
+}
+
+fn invalid<T: std::fmt::Debug>(result: streams::Result<T>) {
+    assert!(
+        matches!(result, Err(StreamError::InvalidHeader(_))),
+        "expected InvalidHeader, got {result:?}"
+    );
+}
+
+/// Headers in all three modes as the ACL-confined `streams` user: stream
+/// defaults arrive, a publish's own override them, durable ones are entry
+/// fields any client sees, and a header-less message is still the frame
+/// runtime-go reads.
+#[tokio::test]
+async fn headers_over_tls() {
+    let _server = SERVER.read().await;
+    let config = config();
+    let client = client().await;
+
+    // Pub/sub, with a raw subscriber reading the frames.
+    let immediate = RedisProvider::new(client.clone(), config.clone());
+    let (stream, m) = create_stream(&immediate, with_defaults()).await;
+    assert_eq!(immediate.get(&stream.id).await.unwrap().headers, defaults());
+    let mut messages = m.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    m.publish(SUBJECT, event("a", ""), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut messages).await.headers(), &defaults());
+    m.publish(SUBJECT, event("b", ""), &override_opts())
+        .await
+        .unwrap();
+    let got = recv(&mut messages).await;
+    assert_eq!(got.headers(), &overridden());
+    assert_eq!(user(&got), "b");
+    drop(messages);
+
+    let (plain, p) = create(&immediate, &[SUBJECT]).await;
+    let channel = format!("{}:stream:ch:{}:{SUBJECT}", config.prefix, plain.id);
+    let mut raw = tls_client(true).get_async_pubsub().await.unwrap();
+    raw.subscribe(&channel).await.unwrap();
+    let mut raw = raw.into_on_message();
+    let payload = event("go", "");
+    let id = p
+        .publish(SUBJECT, payload.clone(), &Options::default())
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(WITHIN, raw.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .get_payload_bytes()
+        .to_vec();
+    assert_eq!(
+        frame,
+        streams::provider::pack(&id, &payload),
+        "not Go's frame"
+    );
+    drop(raw);
+
+    // Scheduled.
+    let scheduled = RedisProvider::scheduled(client.clone(), config.clone());
+    let (_, s) = create_stream(&scheduled, with_defaults()).await;
+    let mut fired = s.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    s.publish(
+        SUBJECT,
+        event("later", ""),
+        &override_opts().with_ttl(Duration::from_millis(200)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(recv(&mut fired).await.headers(), &overridden());
+    drop(fired);
+
+    // Durable: entry fields beside a version-1 `msg`, read back on a
+    // redelivery.
+    let durable = RedisProvider::durable(client.clone(), config.clone());
+    let (dstream, d) = create_stream(&durable, with_defaults()).await;
+    let key = format!("{}:durable:s:{}:{SUBJECT}", config.prefix, dstream.id);
+    let mut deliveries = as_durable(d.as_ref())
+        .unwrap()
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    let id = d
+        .publish(SUBJECT, event("d", ""), &override_opts())
+        .await
+        .unwrap();
+    let entries: redis::streams::StreamRangeReply =
+        command(redis::cmd("XRANGE").arg(&key).arg("-").arg("+")).await;
+    let mut fields: Vec<&str> = entries.ids[0].map.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(fields, ["h:lang", "h:site", "h:trace", "msg"]);
+    let frame: Vec<u8> = entries.ids[0].get("msg").unwrap();
+    assert_eq!(frame[1], 1);
+    let first = recv_delivery(&mut deliveries).await;
+    assert_eq!(first.headers(), &overridden());
+    first.nak().await.unwrap();
+    let again = recv_delivery(&mut deliveries).await;
+    assert_eq!(again.id(), id);
+    assert!(again.attempt() >= 2);
+    assert_eq!(again.headers(), &overridden());
+    again.ack().await.unwrap();
+    drop(deliveries);
+
+    // Invalid headers fail where they are set, in every mode.
+    for provider in [&immediate, &scheduled, &durable] {
+        invalid(
+            provider
+                .create(Stream::named("x").subject(SUBJECT).header("a:b", "1"))
+                .await,
+        );
+        invalid(
+            provider
+                .update(&dstream.id, Stream::named("x").header("bad key", "1"))
+                .await,
+        );
+    }
+    invalid(
+        d.publish(
+            SUBJECT,
+            event("", ""),
+            &Options::default().header("k", "a\nb"),
+        )
+        .await,
+    );
+
+    for (provider, id) in [
+        (&immediate, &stream.id),
+        (&immediate, &plain.id),
+        (&durable, &dstream.id),
+    ] {
+        provider.delete(id).await.unwrap();
+    }
+    let _: () = command(redis::cmd("DEL").arg(&key)).await;
+}
+
+#[tokio::test]
+async fn expiry_and_retain_are_refused_over_tls() {
+    let _server = SERVER.read().await;
+    let config = config();
+    let client = client().await;
+    let modes = [
+        (
+            RedisProvider::new(client.clone(), config.clone()),
+            Options::default(),
+        ),
+        (
+            RedisProvider::scheduled(client.clone(), config.clone()),
+            after(200),
+        ),
+        (
+            RedisProvider::durable(client.clone(), config.clone()),
+            Options::default(),
+        ),
+    ];
+    for (provider, base) in modes {
+        let (stream, m) = create(&provider, &[SUBJECT]).await;
+        let batch = as_batch(m.as_ref()).unwrap();
+        for opts in [
+            base.clone().with_expiry(Duration::from_secs(5)),
+            base.clone().with_retain(),
+        ] {
+            unsupported(m.publish(SUBJECT, event("", ""), &opts).await);
+            unsupported(
+                batch
+                    .publish_batch(SUBJECT, vec![event("", "")], &opts)
+                    .await,
+            );
+        }
+        provider.delete(&stream.id).await.unwrap();
+    }
+}
+
+/// A delayed nak over TLS, as `streams` (whose ACL grants XCLAIM for it):
+/// held back for the delay, well short of a plain nak's reclaim interval, and
+/// counted as one redelivery.
+#[tokio::test]
+async fn a_delayed_nak_over_tls() {
+    let _server = SERVER.read().await;
+    let reclaim = Duration::from_secs(8);
+    let delay = Duration::from_millis(1500);
+    let config = RedisConfig {
+        reclaim_after: reclaim,
+        ..config()
+    };
+    let durable = RedisProvider::durable(client().await, config.clone());
+    let (stream, m) = create_stream(&durable, with_defaults()).await;
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    let id = m
+        .publish(SUBJECT, event("busy", ""), &Options::default())
+        .await
+        .unwrap();
+    let first = recv_delivery(&mut deliveries).await;
+    assert!(first.can_delay_redelivery());
+    let naked_at = tokio::time::Instant::now();
+    first.nak_after(delay).await.unwrap();
+    silent(&mut deliveries, delay - Duration::from_millis(100)).await;
+    let again = recv_delivery(&mut deliveries).await;
+    let waited = naked_at.elapsed();
+    assert_eq!(again.id(), id);
+    assert!(waited >= delay, "redelivered after {waited:?}");
+    assert!(waited < reclaim - Duration::from_secs(2), "{waited:?}");
+    assert_eq!(again.attempt(), 2);
+    assert_eq!(again.headers(), &defaults());
+
+    // Longer than the reclaim interval cannot be honoured.
+    unsupported(again.nak_after(reclaim * 2).await);
+    drop(deliveries);
+    durable.delete(&stream.id).await.unwrap();
+    let _: () = command(redis::cmd("DEL").arg(format!(
+        "{}:durable:s:{}:{SUBJECT}",
+        config.prefix, stream.id
+    )))
+    .await;
+}
+
 // --- a broker restart -----------------------------------------------------------
 
 /// Restarts the container and waits until it answers over mTLS again.
@@ -1212,7 +1465,7 @@ async fn survives_a_broker_restart() {
     // Durable setup: one acked, one held unacked by a consumer that stays
     // attached through the restart.
     let durable = RedisProvider::durable(client.clone(), config.clone());
-    let (stream, m) = create(&durable, &[SUBJECT]).await;
+    let (stream, m) = create_stream(&durable, with_defaults()).await;
     let key = format!("{}:durable:s:{}:{SUBJECT}", config.prefix, stream.id);
     let d = as_durable(m.as_ref()).unwrap();
     let mut workers = d
@@ -1224,7 +1477,7 @@ async fn survives_a_broker_restart() {
         .await
         .unwrap();
     let held = m
-        .publish(SUBJECT, event("held", ""), &Options::default())
+        .publish(SUBJECT, event("held", ""), &override_opts())
         .await
         .unwrap();
     let first = recv_delivery(&mut workers).await;
@@ -1287,6 +1540,7 @@ async fn survives_a_broker_restart() {
     let back = recv_delivery(&mut workers).await;
     assert_eq!(back.id(), held, "the unacked message was not redelivered");
     assert!(back.attempt() >= 2, "attempt {}", back.attempt());
+    assert_eq!(back.headers(), &overridden(), "headers lost in the restart");
     back.ack().await.unwrap();
     let fresh = m
         .publish(SUBJECT, event("after", ""), &Options::default())
@@ -1295,6 +1549,11 @@ async fn survives_a_broker_restart() {
     let next = recv_delivery(&mut workers).await;
     assert_eq!(next.id(), fresh, "the acked message came back");
     assert_eq!(next.attempt(), 1);
+    assert_eq!(
+        next.headers(),
+        &defaults(),
+        "stream headers lost in the restart"
+    );
     next.ack().await.unwrap();
     silent(&mut workers, Duration::from_secs(1)).await;
     drop(workers);

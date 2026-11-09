@@ -37,6 +37,50 @@
 //! queue     <exchange>.<safe consumer>.<safe subject>
 //! ```
 //!
+//! # Headers
+//!
+//! [`Headers`](crate::Headers) travel in the AMQP basic-properties `headers`
+//! table, each value a long string, on single publishes, every channel of the
+//! pool, and batches alike. The body stays runtime-go's version-1 frame, so a
+//! Go peer reads the payload and `rabbitmqadmin`, the management UI, or any
+//! AMQP client sees the headers as ordinary message properties. A publish with
+//! no headers sends no table at all, byte-identical to runtime-go's.
+//!
+//! Received messages, durable deliveries and redeliveries included, carry the
+//! string-valued entries of the table. Two kinds of key are RabbitMQ's and are
+//! refused with [`StreamError::InvalidHeader`] at
+//! [`create`](Streams::create), [`update`](Streams::update) and every publish,
+//! and skipped on receipt: the `x-` prefix (`x-delivery-count`, `x-death`,
+//! the plugins' `x-delay`), and `CC` and `BCC`, which RabbitMQ reads as extra
+//! routing keys. A key over 255 bytes is refused too, AMQP's limit for a field
+//! name. A stream's default headers are kept with its declaration in this
+//! process, like the rest of its metadata; a message's own are in the message,
+//! so they survive in a durable queue across a broker restart.
+//!
+//! # Expiry, retain, delayed nak
+//!
+//! [`Options::expires`](crate::Options::expires) is the per-message
+//! `expiration` property, whole milliseconds rounded up, at most `2^32 - 1`.
+//! RabbitMQ drops an expired message rather than delivering it, but only once
+//! it reaches the head of its queue: a message behind one that has not
+//! expired stays in the queue, counted in its depth, until everything ahead
+//! of it is consumed, and is then dropped. A per-queue `x-message-ttl` would
+//! expire messages promptly but applies one TTL to every message in the queue,
+//! which is a different promise, so it is not used.
+//!
+//! [`Options::retain`](crate::Options::retain) is refused: a queue forgets a
+//! message once it is consumed, and a queue bound later starts empty, so
+//! there is no last value to hand a late subscriber.
+//!
+//! [`Delivery::nak_after`](crate::Delivery::nak_after) is refused, and
+//! [`Delivery::can_delay_redelivery`](crate::Delivery::can_delay_redelivery)
+//! is false. AMQP's nack requeues at once. Holding one back takes the
+//! delayed-message exchange plugin, which the stock image does not ship, or a
+//! dead-letter exchange and a TTL'd retry queue per consumer, which adds
+//! queues runtime-go does not know and lets a retried message overtake or
+//! fall behind the rest. The refused message is requeued for immediate
+//! redelivery, as the error says, rather than left holding a prefetch slot.
+//!
 //! # Declarations are local
 //!
 //! The exchange behind a stream is real and survives a broker restart, but
@@ -542,10 +586,25 @@ mod tests {
                 name: "n".into(),
                 subjects: vec!["a.b".into()],
                 ..Default::default()
-            },
+            }
+            .header("lang", "rust"),
         );
         assert_eq!(out.id, "id-1");
         assert!(out.active);
         assert_eq!(out.subjects, ["a.b"]);
+        assert_eq!(out.headers.get("lang"), Some("rust"));
+    }
+
+    #[test]
+    fn default_headers_are_checked() {
+        let ok = Stream::named("s").header("lang", "rust");
+        assert!(check_headers(&ok).is_ok());
+        for key in ["x-death", "CC", "a b"] {
+            let bad = Stream::named("s").header(key, "v");
+            assert!(
+                matches!(check_headers(&bad), Err(StreamError::InvalidHeader(_))),
+                "{key}"
+            );
+        }
     }
 }

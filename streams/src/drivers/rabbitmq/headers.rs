@@ -139,9 +139,18 @@ mod tests {
     #[test]
     fn received_keeps_strings_and_drops_the_brokers_bookkeeping() {
         let table = FieldTable::from(BTreeMap::from([
-            (ShortString::from("lang"), AMQPValue::LongString("go".into())),
-            (ShortString::from("site"), AMQPValue::ShortString("p3".into())),
-            (ShortString::from("x-delivery-count"), AMQPValue::LongLongInt(2)),
+            (
+                ShortString::from("lang"),
+                AMQPValue::LongString("go".into()),
+            ),
+            (
+                ShortString::from("site"),
+                AMQPValue::ShortString("p3".into()),
+            ),
+            (
+                ShortString::from("x-delivery-count"),
+                AMQPValue::LongLongInt(2),
+            ),
             (
                 ShortString::from("x-first-death-queue"),
                 AMQPValue::LongString("q".into()),
@@ -161,10 +170,20 @@ mod tests {
     fn reserved_names_are_refused() {
         for key in ["x-delivery-count", "x-death", "x-delay", "CC", "BCC"] {
             let error = check(&headers(&[(key, "v")])).unwrap_err();
-            assert!(matches!(error, StreamError::InvalidHeader(_)), "{key}: {error}");
+            assert!(
+                matches!(error, StreamError::InvalidHeader(_)),
+                "{key}: {error}"
+            );
         }
         // Only the exact names and the lower-case prefix mean anything to the broker.
-        assert!(check(&headers(&[("X-Request-Id", "1"), ("cc", "x"), ("CCX", "y")])).is_ok());
+        assert!(
+            check(&headers(&[
+                ("X-Request-Id", "1"),
+                ("cc", "x"),
+                ("CCX", "y")
+            ]))
+            .is_ok()
+        );
         let long = headers(&[(&"k".repeat(256), "v")]);
         assert!(check(&long).unwrap_err().to_string().contains("255"));
         assert!(check(&headers(&[(&"k".repeat(255), "v")])).is_ok());
@@ -174,7 +193,10 @@ mod tests {
     fn expiration_is_whole_milliseconds_rounded_up() {
         assert_eq!(expiration(Duration::from_secs(5)).unwrap().as_str(), "5000");
         assert_eq!(expiration(Duration::from_micros(1)).unwrap().as_str(), "1");
-        assert_eq!(expiration(Duration::from_micros(1500)).unwrap().as_str(), "2");
+        assert_eq!(
+            expiration(Duration::from_micros(1500)).unwrap().as_str(),
+            "2"
+        );
         let max = Duration::from_millis(u64::from(u32::MAX));
         assert_eq!(expiration(max).unwrap().as_str(), u32::MAX.to_string());
         let error = expiration(max + Duration::from_millis(1)).unwrap_err();

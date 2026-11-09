@@ -520,7 +520,11 @@ async fn jetstream_is_wire_compatible_with_go() {
         raw.headers.get("Nats-Msg-Id").map(|v| v.as_str()),
         Some("retried-1")
     );
-    assert_eq!(raw.headers.iter().count(), 1, "only Nats-Msg-Id without headers");
+    assert_eq!(
+        raw.headers.iter().count(),
+        1,
+        "only Nats-Msg-Id without headers"
+    );
     assert!(!info.config.metadata.contains_key("runtime-go.headers"));
     let message = provider::unpack(&streams::Registry::new(), &subject, raw.payload).unwrap();
     assert_eq!(message.id(), "retried-1");
@@ -561,12 +565,17 @@ async fn plain_headers_travel_as_nats_headers() {
     let provider = NatsProvider::new(nc.clone(), NatsConfig::default());
     let subject = unique(SUBJECT);
     let stream = provider.create(headed(&subject)).await.unwrap();
-    assert_eq!(provider.get(&stream.id).await.unwrap().headers, stream.headers);
+    assert_eq!(
+        provider.get(&stream.id).await.unwrap().headers,
+        stream.headers
+    );
     let m = provider.bind(&stream.id).await.unwrap();
     let mut raw = nc.subscribe(subject.clone()).await.unwrap();
     let mut sub = m.subscribe(&subject, &Options::default()).await.unwrap();
 
-    let opts = Options::default().header("site", "plant-4").header("trace", "00-ab");
+    let opts = Options::default()
+        .header("site", "plant-4")
+        .header("trace", "00-ab");
     let id = m.publish(&subject, event("ada"), &opts).await.unwrap();
     let got = next(&mut sub).await;
     assert_eq!(got.id(), id);
@@ -577,13 +586,24 @@ async fn plain_headers_travel_as_nats_headers() {
     let headers = native.headers.expect("NATS headers");
     assert_eq!(headers.get("site").map(|v| v.as_str()), Some("plant-4"));
     let framed = provider::unpack(&streams::Registry::new(), &subject, native.payload).unwrap();
-    assert!(framed.headers().is_empty(), "headers stayed out of the frame");
+    assert!(
+        framed.headers().is_empty(),
+        "headers stayed out of the frame"
+    );
 
-    let bare = provider.create(Stream::named("bare").subjects([subject.as_str()])).await.unwrap();
+    let bare = provider
+        .create(Stream::named("bare").subjects([subject.as_str()]))
+        .await
+        .unwrap();
     let bare = provider.bind(&bare.id).await.unwrap();
-    bare.publish(&subject, event("go"), &Options::default()).await.unwrap();
+    bare.publish(&subject, event("go"), &Options::default())
+        .await
+        .unwrap();
     assert!(next(&mut sub).await.headers().is_empty());
-    assert!(next(&mut raw).await.headers.is_none(), "a header-less publish is a plain PUB");
+    assert!(
+        next(&mut raw).await.headers.is_none(),
+        "a header-less publish is a plain PUB"
+    );
 
     let ids = as_batch(m.as_ref())
         .unwrap()
@@ -592,7 +612,10 @@ async fn plain_headers_travel_as_nats_headers() {
         .unwrap();
     for id in ids {
         let got = next(&mut sub).await;
-        assert_eq!((got.id(), got.headers().get("lang")), (id.as_str(), Some("rust")));
+        assert_eq!(
+            (got.id(), got.headers().get("lang")),
+            (id.as_str(), Some("rust"))
+        );
     }
 }
 
@@ -600,11 +623,19 @@ async fn plain_headers_travel_as_nats_headers() {
 async fn plain_refuses_bad_headers_expiry_and_retain() {
     let provider = NatsProvider::new(client().await, NatsConfig::default());
     let subject = unique(SUBJECT);
-    invalid_header(provider.create(headed(&subject).header("Nats-Msg-Id", "x")).await);
+    invalid_header(
+        provider
+            .create(headed(&subject).header("Nats-Msg-Id", "x"))
+            .await,
+    );
     let (_, m) = declare(&provider, &[&subject]).await;
     invalid_header(
-        m.publish(&subject, event("a"), &Options::default().header("Nats-TTL", "1"))
-            .await,
+        m.publish(
+            &subject,
+            event("a"),
+            &Options::default().header("Nats-TTL", "1"),
+        )
+        .await,
     );
     invalid_header(
         m.publish(&subject, event("a"), &Options::default().header("a b", "1"))
@@ -642,7 +673,11 @@ async fn jetstream_headers_are_stored_and_redelivered() {
     assert_eq!(first.id(), id);
     assert_eq!(first.headers().get("lang"), Some("rust"));
     assert_eq!(first.headers().get("site"), Some("plant-4"));
-    assert!(!first.headers().contains_key("Nats-Msg-Id"), "{:?}", first.headers());
+    assert!(
+        !first.headers().contains_key("Nats-Msg-Id"),
+        "{:?}",
+        first.headers()
+    );
     first.nak().await.unwrap();
     let second = next(&mut deliveries).await;
     assert_eq!((second.id(), second.attempt()), (id.as_str(), 2));
@@ -665,18 +700,27 @@ async fn jetstream_headers_are_stored_and_redelivered() {
     let handle = js.get_stream(safe_name(&stream.id)).await.unwrap();
     let raw = handle.get_raw_message(1).await.unwrap();
     assert_eq!(raw.headers.get("lang").map(|v| v.as_str()), Some("rust"));
-    assert_eq!(raw.headers.get("Nats-Msg-Id").map(|v| v.as_str()), Some(id.as_str()));
+    assert_eq!(
+        raw.headers.get("Nats-Msg-Id").map(|v| v.as_str()),
+        Some(id.as_str())
+    );
 
     // An update replaces the set; one without headers leaves none behind.
     let updated = provider
-        .update(&stream.id, Stream::named("headed").subjects([subject.as_str()]))
+        .update(
+            &stream.id,
+            Stream::named("headed").subjects([subject.as_str()]),
+        )
         .await
         .unwrap();
     assert!(updated.headers.is_empty());
     assert!(provider.get(&stream.id).await.unwrap().headers.is_empty());
     invalid_header(
         provider
-            .update(&stream.id, headed(&subject).header("Nats-Expected-Stream", "x"))
+            .update(
+                &stream.id,
+                headed(&subject).header("Nats-Expected-Stream", "x"),
+            )
             .await,
     );
     drop(deliveries);
@@ -687,7 +731,11 @@ async fn jetstream_headers_are_stored_and_redelivered() {
 async fn jetstream_refuses_bad_headers_and_retain() {
     let provider = jetstream().await;
     let subject = unique(SUBJECT);
-    invalid_header(provider.create(headed(&subject).header("Nats-TTL", "1")).await);
+    invalid_header(
+        provider
+            .create(headed(&subject).header("Nats-TTL", "1"))
+            .await,
+    );
     invalid_header(provider.create(headed(&subject).header("", "1")).await);
     let (stream, m) = declare(&provider, &[&subject]).await;
     let reserved = Options::default().header("Nats-Msg-Id", "x");
@@ -701,7 +749,10 @@ async fn jetstream_refuses_bad_headers_and_retain() {
     let retained = Options::default().with_retain();
     refused_naming(m.publish(&subject, event("a"), &retained).await, "retain");
     let short = Options::default().with_expiry(Duration::from_millis(500));
-    refused_naming(m.publish(&subject, event("a"), &short).await, "whole seconds");
+    refused_naming(
+        m.publish(&subject, event("a"), &short).await,
+        "whole seconds",
+    );
     provider.delete(&stream.id).await.unwrap();
 }
 
@@ -716,7 +767,10 @@ async fn jetstream_expiry_removes_the_message() {
     let (stream, m) = declare(&provider, &[&subject]).await;
     let expiring = Options::default().with_expiry(Duration::from_secs(1));
     let gone = m.publish(&subject, event("late"), &expiring).await.unwrap();
-    let kept = m.publish(&subject, event("kept"), &Options::default()).await.unwrap();
+    let kept = m
+        .publish(&subject, event("kept"), &Options::default())
+        .await
+        .unwrap();
 
     let js = async_nats::jetstream::new(nc);
     let raw = js
@@ -734,7 +788,10 @@ async fn jetstream_expiry_removes_the_message() {
         if handle.info().await.unwrap().state.messages == 1 {
             break;
         }
-        assert!(std::time::Instant::now() < deadline, "the message did not expire");
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the message did not expire"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
     let mut deliveries = as_positioned(m.as_ref())
@@ -762,7 +819,10 @@ async fn jetstream_nak_after_holds_the_redelivery_back() {
         .consume(&subject, "patient", &Options::default())
         .await
         .unwrap();
-    let id = m.publish(&subject, event("ada"), &Options::default()).await.unwrap();
+    let id = m
+        .publish(&subject, event("ada"), &Options::default())
+        .await
+        .unwrap();
 
     let first = next(&mut deliveries).await;
     assert!(first.can_delay_redelivery());
@@ -770,7 +830,11 @@ async fn jetstream_nak_after_holds_the_redelivery_back() {
     first.nak_after(Duration::from_secs(2)).await.unwrap();
     nothing(&mut deliveries, Duration::from_millis(1500)).await;
     let second = next(&mut deliveries).await;
-    assert!(naked.elapsed() >= Duration::from_secs(2), "{:?}", naked.elapsed());
+    assert!(
+        naked.elapsed() >= Duration::from_secs(2),
+        "{:?}",
+        naked.elapsed()
+    );
     assert_eq!((second.id(), second.attempt()), (id.as_str(), 2));
     second.ack().await.unwrap();
     drop(deliveries);
@@ -796,8 +860,15 @@ async fn jetstream_expiry_needs_allow_msg_ttl() {
         .unwrap();
     let m = provider.bind(&id).await.unwrap();
     let expiring = Options::default().with_expiry(Duration::from_secs(5));
-    refused_naming(m.publish(&subject, event("a"), &expiring).await, "allow_msg_ttl");
-    assert!(m.publish(&subject, event("a"), &Options::default()).await.is_ok());
+    refused_naming(
+        m.publish(&subject, event("a"), &expiring).await,
+        "allow_msg_ttl",
+    );
+    assert!(
+        m.publish(&subject, event("a"), &Options::default())
+            .await
+            .is_ok()
+    );
 
     provider
         .update(&id, Stream::named("foreign").subjects([subject.as_str()]))

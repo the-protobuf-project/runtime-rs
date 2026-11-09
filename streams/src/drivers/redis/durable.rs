@@ -879,6 +879,13 @@ impl Acker for RedisAck {
     fn delays_nak(&self) -> bool {
         !self.acks.target.inner.reclaim_after.is_zero()
     }
+
+    /// Redis redelivers an entry once it has been idle for the reclaim
+    /// interval and cannot set an idle time in the future, so that interval
+    /// is the longest a delayed nak can wait.
+    fn max_nak_delay(&self) -> Option<Duration> {
+        Some(self.acks.target.inner.reclaim_after)
+    }
 }
 
 /// The idle time, in milliseconds, that makes an entry eligible for a reclaim

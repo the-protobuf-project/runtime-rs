@@ -48,6 +48,10 @@
 //! | Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No | No |
 //! | Positioned replay | Yes | JetStream | No | Streams | No | No | No |
 //! | Batch | Native | Pipelined (JetStream) | Pipelined | Pipelined | Pipelined | Each | One Write |
+//! | Headers | Record headers | NATS headers | AMQP headers | Stream fields; frame v2 on pub/sub | MQTT 5 user properties | Frame v2 | PubSub only (user properties) |
+//! | Expiry | No | JetStream (whole seconds) | Yes (at the head of the queue) | No | Yes (whole seconds) | No | PubSub only |
+//! | Retain (last value) | No | No | No | No | Yes | No | No |
+//! | Delayed nak | No | JetStream | No | Streams (up to the reclaim interval) | No | No | No |
 //!
 //! # Lifetime is the stream's
 //!
@@ -83,9 +87,9 @@ pub mod typed;
 pub use codec::Protobuf;
 pub use codec::{Codec, Json, Payload, Registry};
 pub use core::{
-    Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Message, Options, Position,
-    Positioned, Publisher, Stream, Streams, Subscriber, Subscription, as_batch, as_durable,
-    as_positioned,
+    Acker, Batch, Deliveries, Delivery, Durable, Headers, MAX_KEY, MAX_TOTAL, MAX_VALUE, Manager,
+    Message, Options, Position, Positioned, Publisher, Stream, Streams, Subscriber, Subscription,
+    as_batch, as_durable, as_positioned,
 };
 pub use error::{Result, StreamError};
 pub use logging::{with_logging, with_logging_middleware, with_subscriber_logging};

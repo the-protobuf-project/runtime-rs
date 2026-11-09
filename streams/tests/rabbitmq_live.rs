@@ -735,7 +735,11 @@ async fn headers_survive_redelivery() {
         .await
         .unwrap();
     h.manager
-        .publish(SUBJECT, event("ada", ""), &Options::default().header("try", "1"))
+        .publish(
+            SUBJECT,
+            event("ada", ""),
+            &Options::default().header("try", "1"),
+        )
         .await
         .unwrap();
     let want = pairs(&[("lang", "rust"), ("try", "1")]);
@@ -783,18 +787,31 @@ async fn bad_headers_are_refused() {
             .await,
         Err(StreamError::InvalidHeader(_))
     ));
-    assert!(p.list().await.unwrap().is_empty(), "a refused create stored a stream");
+    assert!(
+        p.list().await.unwrap().is_empty(),
+        "a refused create stored a stream"
+    );
 
     let good = p
-        .create(Stream::named("ok").subjects([SUBJECT]).header("lang", "rust"))
+        .create(
+            Stream::named("ok")
+                .subjects([SUBJECT])
+                .header("lang", "rust"),
+        )
         .await
         .unwrap();
     assert!(matches!(
-        p.update(&good.id, Stream::named("ok").subjects([SUBJECT]).header("x-a", "b"))
-            .await,
+        p.update(
+            &good.id,
+            Stream::named("ok").subjects([SUBJECT]).header("x-a", "b")
+        )
+        .await,
         Err(StreamError::InvalidHeader(_))
     ));
-    assert_eq!(p.get(&good.id).await.unwrap().headers.get("lang"), Some("rust"));
+    assert_eq!(
+        p.get(&good.id).await.unwrap().headers.get("lang"),
+        Some("rust")
+    );
 
     let m = p.bind(&good.id).await.unwrap();
     let batch = as_batch(m.as_ref()).unwrap();
@@ -809,7 +826,9 @@ async fn bad_headers_are_refused() {
         );
         assert!(
             matches!(
-                batch.publish_batch(SUBJECT, vec![event("", "")], &opts).await,
+                batch
+                    .publish_batch(SUBJECT, vec![event("", "")], &opts)
+                    .await,
                 Err(StreamError::InvalidHeader(_))
             ),
             "batch accepted {key:?}"
@@ -860,7 +879,11 @@ async fn expired_messages_are_not_delivered() {
     let too_long = Duration::from_millis(u64::from(u32::MAX) + 1);
     assert!(matches!(
         h.manager
-            .publish(SUBJECT, event("", ""), &Options::default().with_expiry(too_long))
+            .publish(
+                SUBJECT,
+                event("", ""),
+                &Options::default().with_expiry(too_long)
+            )
             .await,
         Err(StreamError::Unsupported(_))
     ));
@@ -902,7 +925,11 @@ async fn expiry_waits_for_the_head_of_the_queue() {
         .await
         .unwrap();
     tokio::time::sleep(Duration::from_millis(800)).await;
-    assert_eq!(depth(&queue), 2, "the expired message is still held behind the head");
+    assert_eq!(
+        depth(&queue),
+        2,
+        "the expired message is still held behind the head"
+    );
 
     let durable = as_durable(h.manager.as_ref()).unwrap();
     let mut d = durable
@@ -936,7 +963,11 @@ async fn retain_and_delayed_nak_are_refused() {
     assert!(matches!(
         as_batch(h.manager.as_ref())
             .unwrap()
-            .publish_batch(SUBJECT, vec![event("", "")], &Options::default().with_retain())
+            .publish_batch(
+                SUBJECT,
+                vec![event("", "")],
+                &Options::default().with_retain()
+            )
             .await,
         Err(StreamError::Unsupported(_))
     ));

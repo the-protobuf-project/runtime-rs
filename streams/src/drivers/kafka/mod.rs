@@ -34,6 +34,31 @@
 //! names, the metadata topic, its record keys, and its JSON are runtime-go's,
 //! so a Go and a Rust service declare and read the same streams on one cluster.
 //!
+//! # Headers, expiry, retain, delayed nak
+//!
+//! [`Headers`](crate::Headers) travel as Kafka record headers, each value its
+//! UTF-8 bytes, on single publishes through every producer of the pool and on
+//! every record of a batch; the payload stays runtime-go's version-1 frame,
+//! and a publish without headers writes no header block at all, exactly what
+//! runtime-go writes. Kafka's own tools see them
+//! (`kafka-console-consumer.sh --property print.headers=true`). Kafka
+//! reserves no header names, so only [`Headers::validate`](crate::Headers::validate)
+//! applies, at `create`, `update` and publish. On receipt a repeated key takes
+//! its last value, as Kafka's `lastHeader` does, a null value reads as empty,
+//! and a header another producer wrote that is not UTF-8 is skipped with a
+//! warning. A stream's default headers are part of its declaration in the
+//! metadata topic, so they survive a restart; a message's are in its record,
+//! so a redelivery or a replay brings them back.
+//!
+//! Kafka has no per-message expiry, so a non-zero
+//! [`Options::expires`](crate::Options::expires) is refused: a record stays
+//! until the topic's retention removes it. [`Options::retain`](crate::Options::retain)
+//! is refused too: the nearest thing, a compacted topic, keeps only the newest
+//! record per key for the whole subject, changing what every reader sees.
+//! [`Delivery::nak_after`](crate::Delivery::nak_after) is refused
+//! (`can_delay_redelivery()` is false): a partition is read in order, so
+//! holding one record back would hold back everything behind it.
+//!
 //! ```no_run
 //! # async fn example() -> streams::Result<()> {
 //! use rdkafka::ClientConfig;

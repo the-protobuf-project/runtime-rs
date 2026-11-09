@@ -215,3 +215,12 @@ alternating), so the config is unchanged.
 - `cargo clippy -p tpp-streams --all-targets --features mqtt,protobuf,live-tests,tls -- -D warnings`: clean.
 - `rustfmt --edition 2024 --check` on the changed files: clean.
 - `cargo tree -p tpp-streams --all-features -i aws-lc-rs`: no match.
+
+## Headers
+
+A header-less publish sends no PUBLISH properties, exactly what it sent before
+headers existed; the only extra work is merging two empty header maps. One
+check after the change, plaintext, unpaced, 200k messages, while other agents'
+brokers shared the Docker VM: fanout with 512 publishers 86.5k/s (the earlier
+same-hour range was 81–122k/s), batch of 100 212k/s (230k/s before). Both are
+ok with nothing lost, and both are within the run-to-run drift noted above.

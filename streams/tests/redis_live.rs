@@ -970,7 +970,11 @@ async fn pubsub_carries_stream_and_publish_headers() {
 
     let batch = as_batch(m.as_ref()).unwrap();
     batch
-        .publish_batch(SUBJECT, vec![event("c", ""), event("d", "")], &override_opts())
+        .publish_batch(
+            SUBJECT,
+            vec![event("c", ""), event("d", "")],
+            &override_opts(),
+        )
         .await
         .unwrap();
     for _ in 0..2 {
@@ -1018,9 +1022,13 @@ async fn pubsub_frames_stay_version_1_without_headers() {
 async fn scheduled_carries_headers() {
     let (_, m) = bind_stream(&scheduled().await, with_defaults()).await;
     let mut messages = m.subscribe(SUBJECT, &Options::default()).await.unwrap();
-    m.publish(SUBJECT, event("later", ""), &override_opts().with_ttl(Duration::from_millis(200)))
-        .await
-        .unwrap();
+    m.publish(
+        SUBJECT,
+        event("later", ""),
+        &override_opts().with_ttl(Duration::from_millis(200)),
+    )
+    .await
+    .unwrap();
     let got = recv(&mut messages, WITHIN).await;
     assert_eq!(got.headers(), &overridden());
     assert_eq!(got.json::<Event>().unwrap().user, "later");
@@ -1064,7 +1072,11 @@ async fn durable_headers_are_entry_fields() {
     let again = recv_delivery(&mut deliveries, Duration::from_secs(10)).await;
     assert_eq!(again.id(), id);
     assert!(again.attempt() >= 2);
-    assert_eq!(again.headers(), &overridden(), "a redelivery lost its headers");
+    assert_eq!(
+        again.headers(),
+        &overridden(),
+        "a redelivery lost its headers"
+    );
     again.ack().await.unwrap();
 
     let batch = as_batch(m.as_ref()).unwrap();
@@ -1087,7 +1099,10 @@ async fn stream_headers_are_stored_and_omitted_when_empty() {
     for provider in [immediate().await, scheduled().await, durable().await] {
         let created = provider.create(with_defaults()).await.unwrap();
         let read = provider.get(&created.id).await.unwrap();
-        assert_eq!(read.headers, headers([("lang", "rust"), ("site", "plant-3")]));
+        assert_eq!(
+            read.headers,
+            headers([("lang", "rust"), ("site", "plant-3")])
+        );
         let updated = provider
             .update(&created.id, with_defaults().header("team", "billing"))
             .await
@@ -1180,7 +1195,11 @@ async fn expiry_and_retain_are_refused_in_every_mode() {
             base.clone().with_retain(),
         ] {
             unsupported(m.publish(SUBJECT, event("", ""), &opts).await);
-            unsupported(batch.publish_batch(SUBJECT, vec![event("", "")], &opts).await);
+            unsupported(
+                batch
+                    .publish_batch(SUBJECT, vec![event("", "")], &opts)
+                    .await,
+            );
         }
         // A zero expiry is no expiry, as a zero TTL is no TTL.
         m.publish(

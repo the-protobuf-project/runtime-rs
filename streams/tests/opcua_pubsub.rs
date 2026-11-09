@@ -824,3 +824,154 @@ async fn retained_data_is_not_delivered() {
         .unwrap();
     assert_eq!(value(&next(&mut subscription).await), Variant::from(2i32));
 }
+
+// Headers ride as MQTT 5 user properties on the NetworkMessage's PUBLISH;
+// the Part 14 JSON is unchanged.
+#[tokio::test]
+async fn headers_are_user_properties_beside_part_14_json() {
+    let (streams, port) = provider().await;
+    let stream = streams
+        .create(
+            Stream::named("h")
+                .with_id("line-h")
+                .subject("boiler")
+                .header("lang", "rust")
+                .header("site", "plant-3"),
+        )
+        .await
+        .unwrap();
+    let manager = streams.bind(&stream.id).await.unwrap();
+    let (_client, mut events) = raw(port, Some("opcua/json/data/plant-1/line-h/#")).await;
+    let mut subscription = manager
+        .subscribe("boiler", &Options::default())
+        .await
+        .unwrap();
+
+    let opts = Options::default()
+        .header("site", "plant-4")
+        .with_expiry(Duration::from_millis(2500));
+    manager
+        .publish("boiler/Temperature", OpcUaValue::payload(21.5f64), &opts)
+        .await
+        .unwrap();
+
+    let message = next(&mut subscription).await;
+    assert_eq!(message.subject(), "boiler/Temperature");
+    assert_eq!(message.headers().get("lang"), Some("rust"));
+    assert_eq!(message.headers().get("site"), Some("plant-4"));
+
+    let publish = raw_next(&mut events).await;
+    let properties = publish.properties.clone().expect("properties");
+    assert_eq!(properties.content_type.as_deref(), Some("application/json"));
+    assert_eq!(
+        properties.user_properties,
+        vec![
+            ("lang".to_owned(), "rust".to_owned()),
+            ("site".to_owned(), "plant-4".to_owned()),
+        ]
+    );
+    let interval = properties.message_expiry_interval.expect("an expiry");
+    assert!((2..=3).contains(&interval), "rounded up: {interval}");
+    let json: Value = serde_json::from_slice(&publish.payload).unwrap();
+    assert!(
+        !publish.payload.windows(4).any(|w| w == b"lang"),
+        "no header inside the Part 14 JSON: {json}"
+    );
+    assert_eq!(json["MessageType"], "ua-data");
+
+    // A batch's NetworkMessage carries them too.
+    as_batch(manager.as_ref())
+        .unwrap()
+        .publish_batch(
+            "boiler/Temperature",
+            vec![OpcUaValue::payload(1.0f64), OpcUaValue::payload(2.0f64)],
+            &Options::default().header("n", "b"),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        let message = next(&mut subscription).await;
+        assert_eq!(message.headers().get("n"), Some("b"));
+        assert_eq!(message.headers().get("lang"), Some("rust"));
+    }
+}
+
+#[tokio::test]
+async fn another_publishers_user_properties_arrive_as_headers() {
+    let (streams, port) = provider().await;
+    let manager = declare(&streams, "plant-2/line-a", &["w"]).await;
+    let mut subscription = manager.subscribe("w", &Options::default()).await.unwrap();
+    let (client, mut events) = raw(port, None).await;
+    let body = json!({
+        "MessageId": "m-1",
+        "MessageType": "ua-data",
+        "PublisherId": "plant-2",
+        "Messages": [data_set_message("w", 1, "f", 7)],
+    });
+    client
+        .publish_with_properties(
+            "opcua/json/data/plant-2/line-a/w",
+            QoS::AtLeastOnce,
+            false,
+            Bytes::from(body.to_string()),
+            rumqttc::v5::mqttbytes::v5::PublishProperties {
+                user_properties: vec![("lang".into(), "dotnet".into())],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    tokio::spawn(async move { while events.poll().await.is_ok() {} });
+    let message = next(&mut subscription).await;
+    assert_eq!(value(&message), Variant::from(7i32));
+    assert_eq!(message.headers().get("lang"), Some("dotnet"));
+}
+
+#[tokio::test]
+async fn retain_is_refused_and_invalid_headers_fail_at_create() {
+    let (streams, _) = provider().await;
+    let manager = declare(&streams, "line-r", &["w"]).await;
+    for result in [
+        manager
+            .publish(
+                "w/f",
+                OpcUaValue::payload(1i32),
+                &Options::default().with_retain(),
+            )
+            .await
+            .map(|_| ()),
+        as_batch(manager.as_ref())
+            .unwrap()
+            .publish_batch(
+                "w/f",
+                vec![OpcUaValue::payload(1i32)],
+                &Options::default().with_retain(),
+            )
+            .await
+            .map(|_| ()),
+    ] {
+        match result {
+            Err(StreamError::Unsupported(why)) => assert!(why.contains("retained"), "{why}"),
+            other => panic!("retain: {other:?}"),
+        }
+    }
+    let error = streams
+        .create(
+            Stream::named("bad")
+                .with_id("line-b")
+                .subject("w")
+                .header("a b", "x"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+    let error = manager
+        .publish(
+            "w/f",
+            OpcUaValue::payload(1i32),
+            &Options::default().header("k", "two\nlines"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+}

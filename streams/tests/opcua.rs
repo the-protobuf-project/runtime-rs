@@ -601,6 +601,75 @@ async fn refusals() {
     ));
 }
 
+// A Write has nowhere to put headers, nothing that could expire, and no
+// retain flag: each is refused by name rather than dropped.
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_expiry_and_retain_are_refused() {
+    let (_server, _session, provider, ns) = setup().await;
+    let (stream, manager) = bound(&provider, ns).await;
+    let temp = node(ns, "Temperature");
+    let unsupported = |r: Result<(), StreamError>, what: &str| match r {
+        Err(StreamError::Unsupported(text)) => text,
+        other => panic!("{what}: {other:?}"),
+    };
+
+    let text = unsupported(
+        provider
+            .create(
+                Stream::named("h")
+                    .subject(temp.clone())
+                    .header("lang", "rust"),
+            )
+            .await
+            .map(|_| ()),
+        "create with headers",
+    );
+    assert!(text.contains("headers"), "{text}");
+    let text = unsupported(
+        provider
+            .update(
+                &stream.id,
+                Stream::named("h")
+                    .subject(temp.clone())
+                    .header("lang", "rust"),
+            )
+            .await
+            .map(|_| ()),
+        "update with headers",
+    );
+    assert!(text.contains("headers"), "{text}");
+
+    let value = || OpcUaValue::payload(1.0f64);
+    for (opts, says) in [
+        (Options::default().header("lang", "rust"), "headers"),
+        (
+            Options::default().with_expiry(Duration::from_secs(5)),
+            "expire",
+        ),
+        (Options::default().with_retain(), "retain"),
+    ] {
+        let text = unsupported(
+            manager.publish(&temp, value(), &opts).await.map(|_| ()),
+            says,
+        );
+        assert!(text.contains(says), "{text}");
+        let text = unsupported(
+            as_batch(manager.as_ref())
+                .unwrap()
+                .publish_batch(&temp, vec![value()], &opts)
+                .await
+                .map(|_| ()),
+            says,
+        );
+        assert!(text.contains(says), "{text}");
+    }
+    // Nothing was written by the refused calls, and a plain write still is.
+    manager
+        .publish(&temp, value(), &Options::default())
+        .await
+        .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dropping_a_subscription_deletes_the_monitored_item() {
     let (server, session, provider, ns) = setup().await;

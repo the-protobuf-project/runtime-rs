@@ -943,7 +943,9 @@ mod tests {
     #[test]
     fn properties_carry_headers_and_expiry_only_when_set() {
         assert!(publish_properties(Headers::new(), None).is_none());
-        let headers: Headers = [("site", "plant-3"), ("lang", "rust")].into_iter().collect();
+        let headers: Headers = [("site", "plant-3"), ("lang", "rust")]
+            .into_iter()
+            .collect();
         let p = publish_properties(headers.clone(), Some(Duration::from_millis(1500))).unwrap();
         assert_eq!(
             p.user_properties,

@@ -129,3 +129,7 @@ Producer settings were left as they were. `linger.ms` 5 instead of 1 was within 
 - **Single awaited publishes reach about half the tool.** Each one is its own record awaiting its own ack, so throughput is concurrency ÷ latency: 512 publishers give ~100k, and 16384 give ~300k at a p50 of 40–90 ms. The broker then sees many small one-partition requests. The tool keeps ~40k records in flight with no per-record wait. That is what `publish_batch` does, and it matches the tool. To go further for single publishes, librdkafka would have to send multi-partition requests, which it does not.
 - **Consume**: 10 consumers (one per subject topic) against the tool's one consumer, so the 148% partly reflects more parallel fetches. Each tail subscription alone tops out near 180k/s (`--subjects 1`: one `StreamConsumer` behind one channel).
 - **Noise**: the native tool itself ranged 415–662k produce and 111–671k consume across five rounds on the same broker.
+
+## Headers (round 6)
+
+Header-less publishes take the same path as before: `provider::outgoing` merges two empty maps without allocating and no `OwnedHeaders` is built, so the record is byte-for-byte what round 5 wrote. Checked A/B, interleaved on the plaintext broker against a build of 145b3c2 (`batch --message string --batch 500 --publishers 64 --consumers 0`, 500k, eight rounds each, other agents' brokers sharing the VM): median 430k msg/s before, 424k after, ranges 316–600k and 160–609k. No regression within the noise.

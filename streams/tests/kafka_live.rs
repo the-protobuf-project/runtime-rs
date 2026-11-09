@@ -333,9 +333,12 @@ async fn declare_with_headers(provider: &KafkaProvider) -> (Stream, Arc<dyn Mana
     (stream, manager)
 }
 
+/// One record as Kafka holds it: its headers in order, then its payload.
+type RawRecord = (Vec<(String, Vec<u8>)>, Vec<u8>);
+
 /// Every record on `topic`, read raw with librdkafka from the start: the
 /// headers as Kafka holds them and the payload bytes.
-fn raw_records(topic: &str, want: usize) -> Vec<(Vec<(String, Vec<u8>)>, Vec<u8>)> {
+fn raw_records(topic: &str, want: usize) -> Vec<RawRecord> {
     use streams::drivers::kafka::rdkafka::message::Headers as _;
     let mut config = client();
     config

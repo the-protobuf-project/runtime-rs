@@ -64,6 +64,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No | No |
 | Positioned replay | Yes | JetStream | No | Streams | No | No | No |
 | Batch | Native | Pipelined (JetStream) | Pipelined | Pipelined | Pipelined | Each | One Write |
+| Headers | Record headers | NATS headers | AMQP headers | Stream fields; frame v2 on pub/sub | MQTT 5 user properties | Frame v2 | PubSub only (user properties) |
+| Expiry | No | JetStream (whole seconds) | Yes (at the head of the queue) | No | Yes (whole seconds) | No | PubSub only |
+| Retain (last value) | No | No | No | No | Yes | No | No |
+| Delayed nak | No | JetStream | No | Streams (up to the reclaim interval) | No | No | No |
 
 Payloads are framed byte-for-byte as runtime-go frames them, and every broker
 driver keeps Go's topic, key, and metadata layout, so Go and Rust services can

@@ -27,8 +27,8 @@ use crate::{
 use super::{
     LastSubject, NatsConfig,
     acks::{self, AckError, Acks, Credit, Pending},
-    check_concrete, check_stream_headers, check_subject, from_header_map, outgoing,
-    refuse_retain, to_header_map,
+    check_concrete, check_stream_headers, check_subject, from_header_map, outgoing, refuse_retain,
+    to_header_map,
 };
 
 /// Metadata key for [`Stream::name`].
@@ -906,7 +906,10 @@ mod tests {
     #[test]
     fn stream_headers_live_in_one_metadata_key() {
         let plain = config_for("S", &Stream::named("orders"));
-        assert!(!plain.metadata.contains_key(META_HEADERS), "Go's metadata, unchanged");
+        assert!(
+            !plain.metadata.contains_key(META_HEADERS),
+            "Go's metadata, unchanged"
+        );
         assert!(plain.allow_message_ttl);
         assert!(to_stream(&plain).headers.is_empty());
 

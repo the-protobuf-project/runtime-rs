@@ -648,7 +648,7 @@ async fn durable_across_a_broker_restart() {
 
     let conn = connect().await;
     let p = provider(&conn, &prefix).await;
-    p.create(stream("ledger", &[SUBJECT])).await.unwrap();
+    p.create(ledger()).await.unwrap();
     let m = p.bind("ledger").await.unwrap();
     let durable = as_durable(m.as_ref()).unwrap();
     let mut consumer = durable
@@ -660,12 +660,23 @@ async fn durable_across_a_broker_restart() {
         .publish(SUBJECT, event("acked", ""), &Options::default())
         .await
         .unwrap();
+    // Headers travel with the message, so a restart keeps them in the queue.
     let unacked = m
-        .publish(SUBJECT, event("unacked", ""), &Options::default())
+        .publish(
+            SUBJECT,
+            event("unacked", ""),
+            &Options::default().header("traceparent", "00-unacked"),
+        )
         .await
         .unwrap();
     let waiting = m
-        .publish(SUBJECT, event("waiting", ""), &Options::default())
+        .publish(
+            SUBJECT,
+            event("waiting", ""),
+            &Options::default()
+                .header("site", "plant-4")
+                .with_expiry(Duration::from_secs(600)),
+        )
         .await
         .unwrap();
     let d = next(&mut consumer).await;
@@ -680,9 +691,9 @@ async fn durable_across_a_broker_restart() {
 
     let conn = connect().await;
     let p = provider(&conn, &prefix).await;
-    // The exchange is durable; declaring the stream again is how a new process
-    // shares it.
-    p.create(stream("ledger", &[SUBJECT])).await.unwrap();
+    // The exchange is durable; declaring the stream again, with its default
+    // headers, is how a new process shares it.
+    p.create(ledger()).await.unwrap();
     let m = p.bind("ledger").await.unwrap();
     let durable = as_durable(m.as_ref()).unwrap();
     let mut consumer = durable
@@ -692,6 +703,17 @@ async fn durable_across_a_broker_restart() {
     let mut back = Vec::new();
     for _ in 0..2 {
         let d = next(&mut consumer).await;
+        let want = if d.id() == unacked {
+            [
+                ("lang", "rust"),
+                ("site", "plant-3"),
+                ("traceparent", "00-unacked"),
+            ]
+            .as_slice()
+        } else {
+            [("lang", "rust"), ("site", "plant-4")].as_slice()
+        };
+        assert_eq!(d.headers(), &want.iter().copied().collect(), "{}", d.id());
         back.push((d.id().to_owned(), d.attempt()));
         d.ack().await.unwrap();
     }
@@ -713,6 +735,7 @@ async fn durable_across_a_broker_restart() {
         .unwrap();
     let d = next(&mut consumer).await;
     assert_eq!(d.id(), fresh);
+    assert_eq!(d.headers().get("lang"), Some("rust"));
     d.ack().await.unwrap();
     drop(consumer);
     drop(held);
@@ -726,6 +749,169 @@ async fn durable_across_a_broker_restart() {
     }
     assert_eq!(on_broker("list_queues", &prefix), Vec::<String>::new());
     assert_eq!(on_broker("list_exchanges", &prefix), Vec::<String>::new());
+}
+
+/// The restart test's stream, with default headers a new process declares
+/// again, since stream metadata lives in the process.
+fn ledger() -> Stream {
+    stream("ledger", &[SUBJECT]).headers([("lang", "rust"), ("site", "plant-3")])
+}
+
+/// Headers, expiry, retain and delayed nak over mutual TLS: defaults and
+/// overrides arrive on single publishes and batches, another client sees them
+/// as an AMQP table of long strings with the `expiration` property, they
+/// survive a nak, bad keys are refused at create and publish, an expired
+/// message is not delivered, and retain and a delayed nak are refused by name.
+#[tokio::test]
+async fn headers_and_expiry_over_mutual_tls() {
+    use lapin::types::AMQPValue;
+
+    let _shared = BROKER.read().await;
+    let conn = connect().await;
+    let prefix = prefix();
+    let p = provider(&conn, &prefix).await;
+
+    for key in ["x-death", "CC", "has space"] {
+        assert!(
+            matches!(
+                p.create(stream("bad", &[SUBJECT]).header(key, "v")).await,
+                Err(StreamError::InvalidHeader(_))
+            ),
+            "create accepted {key:?}"
+        );
+    }
+    p.create(stream("h", &[SUBJECT]).header("lang", "rust"))
+        .await
+        .unwrap();
+    let m = p.bind("h").await.unwrap();
+    let durable = as_durable(m.as_ref()).unwrap();
+    let queue = format!("{prefix}.h.audit.user-created");
+
+    // Declare the queue, then publish while nobody consumes.
+    drop(
+        durable
+            .consume(SUBJECT, "audit", &Options::default())
+            .await
+            .unwrap(),
+    );
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let id = m
+        .publish(
+            SUBJECT,
+            event("ada", ""),
+            &Options::default()
+                .header("traceparent", "00-ab")
+                .with_expiry(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+
+    // Another client reads the queue directly and sees AMQP properties.
+    let ch = conn.create_channel().await.unwrap();
+    let raw = ch
+        .basic_get(queue.as_str().into(), BasicGetOptions { no_ack: false })
+        .await
+        .unwrap()
+        .expect("the durable queue did not hold the message");
+    let table = raw.properties.headers().clone().unwrap();
+    assert_eq!(
+        table.inner().get("lang"),
+        Some(&AMQPValue::LongString("rust".into()))
+    );
+    assert_eq!(
+        table.inner().get("traceparent"),
+        Some(&AMQPValue::LongString("00-ab".into()))
+    );
+    assert_eq!(
+        raw.properties.expiration().as_ref().map(|e| e.as_str()),
+        Some("60000")
+    );
+    assert_eq!(raw.data, streams::provider::pack(&id, &event("ada", "")));
+    ch.close(200, "OK".into()).await.unwrap();
+
+    // The unsettled get went back; the consumer gets it with its headers, and
+    // again after a nak.
+    let mut audit = durable
+        .consume(SUBJECT, "audit", &Options::default())
+        .await
+        .unwrap();
+    let d = next(&mut audit).await;
+    assert_eq!(d.id(), id);
+    assert_eq!(d.headers().get("traceparent"), Some("00-ab"));
+    assert!(!d.can_delay_redelivery());
+    d.nak().await.unwrap();
+    let d = next(&mut audit).await;
+    assert_eq!(d.headers().get("lang"), Some("rust"));
+    assert_eq!(d.headers().get("traceparent"), Some("00-ab"));
+    // A refused delayed nak requeues at once rather than stranding it.
+    assert!(matches!(
+        d.nak_after(Duration::from_secs(30)).await,
+        Err(StreamError::Unsupported(_))
+    ));
+    let d = next(&mut audit).await;
+    assert_eq!(d.id(), id);
+    d.ack().await.unwrap();
+
+    // Batches carry them too.
+    let ids = as_batch(m.as_ref())
+        .unwrap()
+        .publish_batch(
+            SUBJECT,
+            vec![event("a", ""), event("b", "")],
+            &Options::default().header("lang", "go"),
+        )
+        .await
+        .unwrap();
+    for id in &ids {
+        let d = next(&mut audit).await;
+        assert_eq!(d.id(), id);
+        assert_eq!(d.headers().get("lang"), Some("go"));
+        d.ack().await.unwrap();
+    }
+    drop(audit);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // An expired message is dropped by the broker.
+    m.publish(
+        SUBJECT,
+        event("stale", ""),
+        &Options::default().with_expiry(Duration::from_millis(200)),
+    )
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let mut audit = durable
+        .consume(SUBJECT, "audit", &Options::default())
+        .await
+        .unwrap();
+    quiet(&mut audit).await;
+    drop(audit);
+
+    // Refusals at publish.
+    for opts in [
+        Options::default().header("x-delay", "1000"),
+        Options::default().header("BCC", "user.deleted"),
+        Options::default().header("lang", "two\nlines"),
+    ] {
+        assert!(matches!(
+            m.publish(SUBJECT, event("", ""), &opts).await,
+            Err(StreamError::InvalidHeader(_))
+        ));
+    }
+    assert!(matches!(
+        m.publish(SUBJECT, event("", ""), &Options::default().with_retain())
+            .await,
+        Err(StreamError::Unsupported(_))
+    ));
+
+    p.delete("h").await.unwrap();
+    let ch = conn.create_channel().await.unwrap();
+    for q in on_broker("list_queues", &prefix) {
+        ch.queue_delete(q.as_str().into(), QueueDeleteOptions::default())
+            .await
+            .unwrap();
+    }
+    p.close().await.unwrap();
 }
 
 /// Restarts the broker container and waits until it reports healthy again.

@@ -416,6 +416,19 @@ async fn refusals() {
             .await,
         Err(StreamError::Unsupported(_))
     ));
+    // A Write has nowhere to carry headers, nothing to expire, no retain flag.
+    for opts in [
+        Options::default().header("lang", "rust"),
+        Options::default().with_expiry(Duration::from_secs(5)),
+        Options::default().with_retain(),
+    ] {
+        assert!(matches!(
+            manager
+                .publish(&temp, OpcUaValue::payload(1.0f64), &opts)
+                .await,
+            Err(StreamError::Unsupported(_))
+        ));
+    }
     assert!(as_durable(manager.as_ref()).is_err());
     assert!(as_positioned(manager.as_ref()).is_err());
 }

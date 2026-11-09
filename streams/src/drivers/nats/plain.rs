@@ -462,7 +462,11 @@ mod tests {
     #[tokio::test]
     async fn headers_are_checked_at_create_update_and_publish() {
         let p = provider().await;
-        for bad in [("Nats-Msg-Id", "x"), ("has space", "x"), ("lang", "two\nlines")] {
+        for bad in [
+            ("Nats-Msg-Id", "x"),
+            ("has space", "x"),
+            ("lang", "two\nlines"),
+        ] {
             let refused = p
                 .create(Stream::named("s").subjects(["a"]).header(bad.0, bad.1))
                 .await;
@@ -475,19 +479,34 @@ mod tests {
             .create(Stream::named("s").subjects(["a"]).header("lang", "rust"))
             .await
             .unwrap();
-        assert_eq!(p.get(&s.id).await.unwrap().headers.get("lang"), Some("rust"));
+        assert_eq!(
+            p.get(&s.id).await.unwrap().headers.get("lang"),
+            Some("rust")
+        );
         let refused = p
-            .update(&s.id, Stream::named("s").subjects(["a"]).header("Nats-TTL", "1"))
+            .update(
+                &s.id,
+                Stream::named("s").subjects(["a"]).header("Nats-TTL", "1"),
+            )
             .await;
-        assert!(matches!(refused, Err(StreamError::InvalidHeader(_))), "{refused:?}");
+        assert!(
+            matches!(refused, Err(StreamError::InvalidHeader(_))),
+            "{refused:?}"
+        );
 
         let m = p.bind(&s.id).await.unwrap();
         let reserved = Options::default().header("Nats-Expected-Stream", "x");
         let refused = m.publish("a", json(), &reserved).await;
-        assert!(matches!(refused, Err(StreamError::InvalidHeader(_))), "{refused:?}");
+        assert!(
+            matches!(refused, Err(StreamError::InvalidHeader(_))),
+            "{refused:?}"
+        );
         let batch = as_batch(m.as_ref()).unwrap();
         let refused = batch.publish_batch("a", vec![json()], &reserved).await;
-        assert!(matches!(refused, Err(StreamError::InvalidHeader(_))), "{refused:?}");
+        assert!(
+            matches!(refused, Err(StreamError::InvalidHeader(_))),
+            "{refused:?}"
+        );
         let fine = Options::default().header("trace", "00-ab");
         assert!(m.publish("a", json(), &fine).await.is_ok());
     }

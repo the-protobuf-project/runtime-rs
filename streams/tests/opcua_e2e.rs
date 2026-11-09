@@ -288,6 +288,43 @@ async fn signed_and_encrypted_round_trip() {
     }
 }
 
+// Headers, expiry and retain are refused by name over the secure session too,
+// and nothing is written.
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_expiry_and_retain_are_refused() {
+    let _serial = SERIAL.lock().await;
+    let (provider, manager) = bound(connected(As::default()).await).await;
+    let temp = node("Temperature");
+    let error = provider
+        .create(
+            Stream::named("h")
+                .subject(temp.clone())
+                .header("lang", "rust"),
+        )
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(&error, StreamError::Unsupported(why) if why.contains("headers")),
+        "{error}"
+    );
+    for (opts, says) in [
+        (Options::default().header("lang", "rust"), "headers"),
+        (
+            Options::default().with_expiry(Duration::from_secs(5)),
+            "expire",
+        ),
+        (Options::default().with_retain(), "retain"),
+    ] {
+        match manager
+            .publish(&temp, OpcUaValue::payload(1.0f64), &opts)
+            .await
+        {
+            Err(StreamError::Unsupported(why)) => assert!(why.contains(says), "{why}"),
+            other => panic!("{says}: {other:?}"),
+        }
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn aes256_sha256_rsa_pss_works_too() {
     let _serial = SERIAL.lock().await;

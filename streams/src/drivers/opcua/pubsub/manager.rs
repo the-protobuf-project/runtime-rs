@@ -169,7 +169,10 @@ impl PubSubManager {
             &self.inner.options,
             &client_id,
             Session::Clean,
-            filters.iter().map(|f| Filter::new(f.clone(), qos)).collect(),
+            filters
+                .iter()
+                .map(|f| Filter::new(f.clone(), qos))
+                .collect(),
             &format!("opcua pubsub: cannot subscribe to {subject:?}"),
         )
         .await?;

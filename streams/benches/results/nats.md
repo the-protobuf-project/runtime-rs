@@ -223,3 +223,11 @@ official tool hits the same limit. Single publishes need about 500 in flight, so
 - `nats_live`: 16/16 passed.
 - Library tests: 17/17 passed. New: PubAck parsing, and `LastSubject`.
 - `clippy -D warnings`, `rustfmt --check` and the `aws-lc-rs` check (no match): clean.
+
+## Headers (round 6)
+
+Header-less publishes are unchanged on the wire (a plain `PUB` on core NATS,
+only `Nats-Msg-Id` on JetStream) and in speed. One unpaced plaintext run each
+after the change: core fanout 382k/s, core batch 1.52M/s, JetStream batch
+126k/s, JetStream fanout (512 pubs) 100k/s, all `ok` and inside the ranges
+above.

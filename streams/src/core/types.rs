@@ -235,18 +235,29 @@ pub trait Acker: Send + Sync {
     /// Returns the message for redelivery no sooner than `delay` from now.
     ///
     /// Only a provider whose broker can hold a redelivery back implements
-    /// it; the default refuses rather than redelivering at once, which would
-    /// be a different thing than the caller asked for.
+    /// it. The default naks at once and then reports that it could not wait:
+    /// leaving the message unsettled instead would strand it, holding a
+    /// prefetch slot until the broker gives up on the consumer.
     async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
         let _ = delay;
+        self.nak().await?;
         Err(StreamError::Unsupported(
-            "this provider cannot hold a redelivery back; nak redelivers at once".into(),
+            "this provider cannot hold a redelivery back, so the message was returned for \
+             redelivery at once"
+                .into(),
         ))
     }
 
     /// Whether [`Acker::nak_after`] is implemented.
     fn delays_nak(&self) -> bool {
         false
+    }
+
+    /// The longest delay [`Acker::nak_after`] honours, where the broker caps
+    /// it; `None` when there is no cap (or no delay at all, see
+    /// [`Acker::delays_nak`]).
+    fn max_nak_delay(&self) -> Option<Duration> {
+        None
     }
 }
 
@@ -304,19 +315,33 @@ impl Delivery {
         self.acker.nak().await
     }
 
-    /// Whether [`Delivery::nak_after`] is available on this delivery's
-    /// provider. Check it first: a refused `nak_after` has already given the
-    /// delivery up, and the broker then redelivers it on its own schedule.
+    /// Whether [`Delivery::nak_after`] really waits on this delivery's
+    /// provider. Where it does not, `nak_after` returns the message for
+    /// redelivery at once and reports [`StreamError::Unsupported`].
     pub fn can_delay_redelivery(&self) -> bool {
         self.acker.delays_nak()
+    }
+
+    /// The longest delay [`Delivery::nak_after`] will wait on this
+    /// delivery's provider, where the broker caps it (Redis Streams waits at
+    /// most its reclaim interval); `None` when there is no cap. Read it before
+    /// calling `nak_after`, which consumes the delivery.
+    pub fn max_redelivery_delay(&self) -> Option<Duration> {
+        if self.acker.delays_nak() {
+            self.acker.max_nak_delay()
+        } else {
+            None
+        }
     }
 
     /// Returns the message for redelivery no sooner than `delay` from now,
     /// for work that should wait before it is tried again (a device that is
     /// busy, a dependency that is restarting).
     ///
-    /// Refused with [`StreamError::Unsupported`] where the broker cannot hold
-    /// a redelivery back; see [`Delivery::can_delay_redelivery`].
+    /// Where the broker cannot hold a redelivery back, the message is
+    /// returned for redelivery at once, as [`Delivery::nak`] would, and the
+    /// call reports [`StreamError::Unsupported`] so the caller knows it did
+    /// not wait; see [`Delivery::can_delay_redelivery`].
     pub async fn nak_after(self, delay: Duration) -> Result<()> {
         self.acker.nak_after(delay).await
     }

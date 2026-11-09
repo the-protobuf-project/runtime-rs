@@ -87,8 +87,7 @@ use async_nats::HeaderMap;
 use crate::{Headers, Options, Registry, Result, Stream, StreamError, provider};
 
 pub use jetstream::{
-    JetStreamManager, JetStreamProvider, META_ACTIVE, META_HEADERS, META_NAME, META_USER,
-    safe_name,
+    JetStreamManager, JetStreamProvider, META_ACTIVE, META_HEADERS, META_NAME, META_USER, safe_name,
 };
 pub use plain::{NatsManager, NatsProvider};
 
@@ -304,7 +303,9 @@ fn from_header_map(map: Option<&HeaderMap>) -> Headers {
         })
         .filter_map(|(name, values)| {
             let name: &str = name.as_ref();
-            values.first().map(|v| (name.to_owned(), v.as_str().to_owned()))
+            values
+                .first()
+                .map(|v| (name.to_owned(), v.as_str().to_owned()))
         })
         .collect()
 }
@@ -377,7 +378,9 @@ mod tests {
 
     #[test]
     fn the_nats_prefix_is_reserved() {
-        let s = Stream::named("s").subjects(["a"]).header("Nats-Msg-Id", "x");
+        let s = Stream::named("s")
+            .subjects(["a"])
+            .header("Nats-Msg-Id", "x");
         let error = check_stream_headers(&s).unwrap_err();
         assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
         let s = Stream::named("s").subjects(["a"]).header("bad key", "x");

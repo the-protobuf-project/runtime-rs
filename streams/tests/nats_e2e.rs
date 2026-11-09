@@ -1063,14 +1063,21 @@ async fn core_headers_over_tls() {
     let nc = client().await;
     let p = NatsProvider::new(nc.clone(), NatsConfig::default());
     let subject = unique("headers.core");
-    is(&p.create(headed(&subject).header("Nats-Msg-Id", "x")).await, invalid_header);
+    is(
+        &p.create(headed(&subject).header("Nats-Msg-Id", "x")).await,
+        invalid_header,
+    );
     let s = p.create(headed(&subject)).await.unwrap();
     let m = p.bind(&s.id).await.unwrap();
     let mut raw = nc.subscribe(subject.clone()).await.unwrap();
     let mut sub = m.subscribe(&subject, &Options::default()).await.unwrap();
 
     let id = m
-        .publish(&subject, event("ada"), &Options::default().header("site", "plant-4"))
+        .publish(
+            &subject,
+            event("ada"),
+            &Options::default().header("site", "plant-4"),
+        )
         .await
         .unwrap();
     let got = next(&mut sub).await;
@@ -1081,12 +1088,19 @@ async fn core_headers_over_tls() {
     assert_eq!(native.get("site").map(|v| v.as_str()), Some("plant-4"));
 
     is(
-        &m.publish(&subject, event("a"), &Options::default().header("Nats-TTL", "1"))
-            .await,
+        &m.publish(
+            &subject,
+            event("a"),
+            &Options::default().header("Nats-TTL", "1"),
+        )
+        .await,
         invalid_header,
     );
     let expiring = Options::default().with_expiry(Duration::from_secs(5));
-    is(&m.publish(&subject, event("a"), &expiring).await, unsupported);
+    is(
+        &m.publish(&subject, event("a"), &expiring).await,
+        unsupported,
+    );
     is(
         &m.publish(&subject, event("a"), &Options::default().with_retain())
             .await,
@@ -1104,7 +1118,10 @@ async fn jetstream_headers_expiry_and_delayed_nak_over_tls() {
     let nc = client().await;
     let p = jetstream_with(nc.clone(), NatsConfig::default().with_ack_wait(ACK_WAIT)).await;
     let subject = unique("headers.js");
-    is(&p.create(headed(&subject).header("Nats-TTL", "1")).await, invalid_header);
+    is(
+        &p.create(headed(&subject).header("Nats-TTL", "1")).await,
+        invalid_header,
+    );
     let s = p.create(headed(&subject)).await.unwrap();
     assert_eq!(p.get(&s.id).await.unwrap().headers, s.headers);
     let m = p.bind(&s.id).await.unwrap();
@@ -1136,14 +1153,21 @@ async fn jetstream_headers_expiry_and_delayed_nak_over_tls() {
         .unwrap();
     for id in &ids {
         let d = next(&mut deliveries).await;
-        assert_eq!((d.id(), d.headers().get("site")), (id.as_str(), Some("plant-4")));
+        assert_eq!(
+            (d.id(), d.headers().get("site")),
+            (id.as_str(), Some("plant-4"))
+        );
         d.ack().await.unwrap();
     }
     drop(deliveries);
 
     is(
-        &m.publish(&subject, event("a"), &Options::default().header("Nats-Msg-Id", "x"))
-            .await,
+        &m.publish(
+            &subject,
+            event("a"),
+            &Options::default().header("Nats-Msg-Id", "x"),
+        )
+        .await,
         invalid_header,
     );
     is(
@@ -1211,11 +1235,14 @@ async fn jetstream_survives_a_broker_restart() {
         let nc = client().await;
         let p = jetstream_with(nc.clone(), fast()).await;
         let s = p
-            .create(Stream {
-                name: "durable".into(),
-                subjects: subjects(&[&subject]),
-                ..Stream::default()
-            }.header("lang", "rust"))
+            .create(
+                Stream {
+                    name: "durable".into(),
+                    subjects: subjects(&[&subject]),
+                    ..Stream::default()
+                }
+                .header("lang", "rust"),
+            )
             .await
             .unwrap();
         let m = p.bind(&s.id).await.unwrap();
@@ -1266,7 +1293,11 @@ async fn jetstream_survives_a_broker_restart() {
     let p = jetstream_with(nc.clone(), fast()).await;
     let s = p.get(&stream_id).await.expect("the stream survived");
     assert_eq!(s.name, "durable");
-    assert_eq!(s.headers.get("lang"), Some("rust"), "stream headers survived");
+    assert_eq!(
+        s.headers.get("lang"),
+        Some("rust"),
+        "stream headers survived"
+    );
     let m = p.bind(&stream_id).await.unwrap();
     let mut deliveries = as_durable(m.as_ref())
         .unwrap()
