@@ -21,6 +21,9 @@ docker compose -f streams/docker/compose.redis.yaml down
 | `compose.redis.yaml` | redis:7-alpine, keyspace expiry events on | 16380 |
 | `compose.redis.secure.yaml` | redis:7-alpine, TLS-only mTLS (`--port 0`) plus ACL users (`compose.redis.secure.acl`: `default` off, `streams` limited to the driver's commands, keys and channels, `admin` for test inspection), AOF `appendfsync always` on a named volume, expiry events on | 16381 |
 | `compose.mqtt.yaml` | eclipse-mosquitto (`compose.mqtt.mosquitto.conf`) | 11883 |
+| `compose.opcua.yaml` | mcr.microsoft.com/iotedge/opc-plc (Microsoft's OPC PLC simulator), SecurityPolicy None, anonymous, writable typed nodes from `compose.opcua.nodes.json` | 14840 |
+| `compose.opcua.secure.yaml` | opc-plc, Basic256Sha256 / Aes256Sha256RsaPss only (no None), username/password user `e2e-operator` (no anonymous), client application certificate trusted via `--tf` (no auto-accept), server certificate provisioned so the client pins it; run `compose.opcua.secure.sh` first to issue the certificates into `tls/out/opcua/` | 14841 |
+| `compose.opcua.pubsub.yaml` | OPC UA PubSub interop: Microsoft OPC Publisher 2.9.15 (`--strict`, PubSub messaging, reversible JSON, Part 14 topic templates, PublisherId `opc-publisher`, nodes in `compose.opcua.pubsub.publishednodes.json`) reading an internal opc-plc and publishing to eclipse-mosquitto (`compose.mqtt.mosquitto.conf`); tear down with `down -v` | 11885 (MQTT) |
 | `compose.mqtt.secure.yaml` | eclipse-mosquitto, MQTTS-only mTLS (`compose.mqtt.secure.mosquitto.conf`): cert CN as username on 18883; username/password from a `mosquitto_passwd` file written at start, under ACLs (`compose.mqtt.secure.acl`), on 18884; sessions persisted on a named volume | 18883, 18884 |
 
 ZeroMQ is brokerless and needs nothing here. The Redis file enables keyspace

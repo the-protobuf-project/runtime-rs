@@ -85,4 +85,4 @@ tonic-prost = { workspace = true }
 tokio-stream = { workspace = true }
 tonic-prost-build = { workspace = true }
 # A real MCP client over a Unix socket, for tests/no_tcp.rs.
-rmcp = { version = "3.8", features = ["client", "transport-streamable-http-client-unix-socket"] }
+rmcp = { version = "3.9", features = ["client", "transport-streamable-http-client-unix-socket"] }

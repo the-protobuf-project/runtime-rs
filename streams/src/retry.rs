@@ -42,6 +42,7 @@ pub fn with_retry_middleware(attempts: usize, backoff: Duration) -> Middleware {
 
 #[async_trait::async_trait]
 impl Publisher for RetryPublisher {
+    /// Pins an id before the first attempt so every retry reuses it.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         // Every attempt goes out under one id, so a duplicate from a lost
         // acknowledgement is recognisable as one.
@@ -80,6 +81,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Publisher for Flaky {
+        /// Records the id it was given, then pops the next scripted failure.
         async fn publish(&self, _: &str, _: Payload, opts: &Options) -> Result<String> {
             self.ids.lock().unwrap().push(opts.id.clone().unwrap());
             match self.failures.lock().unwrap().pop() {
@@ -89,6 +91,7 @@ mod tests {
         }
     }
 
+    /// A publisher that fails with `failures`, last element first, then succeeds.
     fn flaky(failures: Vec<StreamError>) -> Arc<Flaky> {
         Arc::new(Flaky {
             failures: Mutex::new(failures),

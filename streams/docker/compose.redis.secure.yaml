@@ -60,7 +60,9 @@
 #             multi exec discard because a schedule is one transaction.
 #   lifecycle xadd xtrim xrange (metadata), del, scan + type (list).
 #   durable   xadd xrevrange xread xreadgroup xautoclaim xpending xack, and of
-#             XGROUP only create and delconsumer.
+#             XGROUP only create and delconsumer. xclaim for a delayed nak,
+#             which claims the entry back to its own consumer with IDLE and
+#             JUSTID so the reclaim reaches it only once the delay has passed.
 # Nothing else: no CONFIG, KEYS, FLUSH*, EVAL, XINFO, or XGROUP DESTROY.
 services:
   redis:

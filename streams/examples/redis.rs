@@ -19,6 +19,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON-encoded event.
 fn event(user: &str, action: &str) -> streams::Result<Payload> {
     Payload::json(&Event {
         user: user.into(),
@@ -26,6 +27,8 @@ fn event(user: &str, action: &str) -> streams::Result<Payload> {
     })
 }
 
+/// Walks the immediate, scheduled and durable providers on one client, with
+/// a short ack timeout so the durable redelivery shows quickly.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::env::var("REDIS_ADDR").unwrap_or_else(|_| "127.0.0.1:16380".into());

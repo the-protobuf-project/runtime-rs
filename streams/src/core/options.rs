@@ -2,6 +2,8 @@
 
 use std::time::Duration;
 
+use crate::Headers;
+
 /// The per-operation settings a provider understands.
 ///
 /// A provider ignores a setting that only tunes delivery and it cannot honor,
@@ -37,6 +39,21 @@ pub struct Options {
     /// Decides which partition a message lands on, and so which messages are
     /// ordered relative to each other. Providers with no partitions ignore it.
     pub partition_key: Option<String>,
+
+    /// This publish's own headers, laid over the stream's defaults: a key set
+    /// here wins for this message. See [`Headers`].
+    pub headers: Headers,
+
+    /// Drops the message if it has not been delivered within this time: a
+    /// command that waited out an outage should not run hours late. Not the
+    /// same as [`Options::ttl`], which delays delivery. Refused where the
+    /// broker has no per-message expiry.
+    pub expires: Option<Duration>,
+
+    /// Keeps this message as the subject's last value, handed to subscribers
+    /// that join later, as MQTT's retain flag does. Refused where the broker
+    /// has no such notion.
+    pub retain: bool,
 }
 
 impl Options {
@@ -70,8 +87,41 @@ impl Options {
         self
     }
 
+    /// Adds `key: value` to this publish's headers.
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key, value);
+        self
+    }
+
+    /// Adds each of `headers` to this publish's headers.
+    pub fn headers<K: Into<String>, V: Into<String>>(
+        mut self,
+        headers: impl IntoIterator<Item = (K, V)>,
+    ) -> Self {
+        self.headers.extend(headers);
+        self
+    }
+
+    /// Drops the message if it is not delivered within `expires`.
+    pub fn with_expiry(mut self, expires: Duration) -> Self {
+        self.expires = Some(expires);
+        self
+    }
+
+    /// Keeps the message as its subject's last value.
+    pub fn with_retain(mut self) -> Self {
+        self.retain = true;
+        self
+    }
+
     /// A non-zero TTL, treating `Some(ZERO)` the way Go treats zero.
     pub fn delay(&self) -> Option<Duration> {
         self.ttl.filter(|ttl| !ttl.is_zero())
+    }
+
+    /// A non-zero expiry, with `Some(ZERO)` read as none, as [`Options::delay`]
+    /// reads a zero TTL.
+    pub fn expiry(&self) -> Option<Duration> {
+        self.expires.filter(|e| !e.is_zero())
     }
 }

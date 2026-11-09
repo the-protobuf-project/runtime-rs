@@ -20,15 +20,17 @@ use tokio::sync::{mpsc, oneshot};
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    Acker, Batch, Deliveries, Delivery, Durable, Manager, Message, Options, Payload, Position,
-    Positioned, Publisher, Registry, Result, Stream, StreamError, Subscriber, Subscription,
-    provider::{batch_result, check_batch, new_id, pack, prefetch, publish_id, unpack},
+    Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Message, Options, Payload,
+    Position, Positioned, Publisher, Registry, Result, Stream, StreamError, Subscriber,
+    Subscription,
+    provider::{batch_result, check_batch, new_id, outgoing, pack, prefetch, publish_id, unpack},
 };
 
 use super::{
     Inner, Replay, fail,
-    keys::PAYLOAD_FIELD,
+    keys::{HEADER_FIELD_PREFIX, PAYLOAD_FIELD},
     pubsub::{capacity, refuse_group},
+    refuse_unhonoured,
 };
 
 /// How many entries one read asks for: one round trip per batch rather than
@@ -57,6 +59,9 @@ const MEASURE_LAG_EVERY: Duration = Duration::from_secs(1);
 /// long a loop goes without checking for work to reclaim, so it is short
 /// enough to feel responsive and long enough not to poll in a hot loop.
 pub(super) const BLOCK_FOR: Duration = Duration::from_secs(2);
+/// How much longer than its block a read is waited for once its reader has
+/// gone, so the entries it took can be handed back.
+const TAKE_GRACE: Duration = Duration::from_secs(1);
 /// How long a consumer waits after a read that came back nearly empty, so the
 /// next read collects a batch. Without it, every blocked reader is woken for
 /// nearly every entry at moderate rates, and Redis spends its single thread
@@ -87,10 +92,12 @@ pub struct DurableManager {
 }
 
 impl DurableManager {
+    /// A manager over `stream`; nothing is read or created until it is used.
     pub(super) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         Self { inner, stream }
     }
 
+    /// The Redis stream key that holds `subject`'s log.
     fn key(&self, subject: &str) -> String {
         self.inner.keys.subject(&self.stream.id, subject)
     }
@@ -108,26 +115,41 @@ impl DurableManager {
         Ok(())
     }
 
-    /// Queues one XADD of `frame` onto `pipe`, trimmed when a cap is set.
-    fn queue_append(&self, pipe: &mut redis::Pipeline, key: &str, frame: Vec<u8>) {
+    /// Queues one XADD of `frame` and `headers` onto `pipe`, trimmed when a
+    /// cap is set.
+    fn queue_append(
+        &self,
+        pipe: &mut redis::Pipeline,
+        key: &str,
+        frame: Vec<u8>,
+        headers: &Headers,
+    ) {
         let cmd = pipe.cmd("XADD").arg(key);
         if let Some(max) = self.inner.max_len {
             // Approximate: Redis trims on node boundaries, which is what lets
             // it trim without walking the stream.
             cmd.arg("MAXLEN").arg("~").arg(max);
         }
-        cmd.arg("*").arg(PAYLOAD_FIELD).arg(frame).ignore();
+        cmd.arg("*").arg(PAYLOAD_FIELD).arg(frame);
+        for (name, value) in headers.iter() {
+            cmd.arg(header_field(name)).arg(value);
+        }
+        cmd.ignore();
     }
 }
 
 #[async_trait::async_trait]
 impl Publisher for DurableManager {
+    /// An XADD that is never retried, because a retry would append a second
+    /// copy under a new entry id. Refuses a TTL: the log has no timer.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.inner.declares(&self.stream, subject)?;
         Self::refuse_ttl(opts)?;
+        refuse_unhonoured(opts)?;
+        let headers = outgoing(&self.stream, opts)?;
         let id = publish_id(opts);
         let mut pipe = redis::pipe();
-        self.queue_append(&mut pipe, &self.key(subject), pack(&id, &payload));
+        self.queue_append(&mut pipe, &self.key(subject), pack(&id, &payload), &headers);
         // Once: XADD * mints a new entry id each time, so a repeat appends the
         // message twice.
         self.inner
@@ -143,6 +165,8 @@ impl Publisher for DurableManager {
 /// round trip, and the ids come back in order because they are minted first.
 #[async_trait::async_trait]
 impl Batch for DurableManager {
+    /// One pipeline for every XADD. A failure is reported against every index,
+    /// since Redis does not say how many entries landed before it.
     async fn publish_batch(
         &self,
         subject: &str,
@@ -152,6 +176,8 @@ impl Batch for DurableManager {
         check_batch(opts)?;
         self.inner.declares(&self.stream, subject)?;
         Self::refuse_ttl(opts)?;
+        refuse_unhonoured(opts)?;
+        let headers = outgoing(&self.stream, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| new_id()).collect();
         if ids.is_empty() {
             return Ok(ids);
@@ -159,7 +185,7 @@ impl Batch for DurableManager {
         let key = self.key(subject);
         let mut pipe = redis::pipe();
         for (id, payload) in ids.iter().zip(&payloads) {
-            self.queue_append(&mut pipe, &key, pack(id, payload));
+            self.queue_append(&mut pipe, &key, pack(id, payload), &headers);
         }
         let sent = self
             .inner
@@ -181,6 +207,8 @@ impl Batch for DurableManager {
 /// [`Durable::consume`] when that matters.
 #[async_trait::async_trait]
 impl Subscriber for DurableManager {
+    /// Reads with XREAD from the newest entry at the time of the call. Refuses
+    /// a group, since every subscriber here sees every message.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         self.inner.declares(&self.stream, subject)?;
         refuse_group(opts)?;
@@ -244,6 +272,8 @@ impl Subscriber for DurableManager {
 
 #[async_trait::async_trait]
 impl Durable for DurableManager {
+    /// Joins the group at `$`: a new consumer sees only what is published after
+    /// it first attaches, and an existing one resumes where it left off.
     async fn consume(&self, subject: &str, consumer: &str, opts: &Options) -> Result<Deliveries> {
         self.consume_from(subject, consumer, Position::New, opts)
             .await
@@ -261,6 +291,8 @@ impl Durable for DurableManager {
 /// replay the log every time a process restarted.
 #[async_trait::async_trait]
 impl Positioned for DurableManager {
+    /// Creates the group at `at` if it does not exist, then spawns its delivery
+    /// loop under an identity unique to this call.
     async fn consume_from(
         &self,
         subject: &str,
@@ -323,6 +355,7 @@ impl Positioned for DurableManager {
             inner: Arc::clone(&self.inner),
             key: key.clone(),
             group: consumer.to_owned(),
+            name: name.clone(),
             subject: subject.to_owned(),
         });
         let loop_ = ConsumeLoop {
@@ -341,14 +374,17 @@ impl Positioned for DurableManager {
 }
 
 impl Manager for DurableManager {
+    /// Some: consumer groups keep position and pending entries on the server.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some, though the position only applies when the group is first created.
     fn positioned(&self) -> Option<&dyn Positioned> {
         Some(self)
     }
 
+    /// Some: a batch is one pipeline of XADDs.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -392,6 +428,8 @@ fn disconnected(error: &redis::RedisError) -> bool {
 }
 
 impl ConsumeLoop {
+    /// Delivers until the reader drops its end or Redis refuses a read or a
+    /// reclaim, reconnecting across dropped connections, then leaves the group.
     async fn run(self, mut reader: MultiplexedConnection) {
         let mut delivered = 0u64;
         // Often enough that an abandoned message waits little past its reclaim
@@ -481,6 +519,40 @@ impl ConsumeLoop {
         }
     }
 
+    /// Runs a command that assigns entries to this consumer (`XREADGROUP`,
+    /// `XAUTOCLAIM`), returning its reply and whether the reader went away
+    /// while it ran.
+    ///
+    /// Unlike [`ConsumeLoop::query`] it is not abandoned when the reader goes.
+    /// Redis may already have assigned entries to this consumer by then, and a
+    /// reply nobody reads strands them as pending with a consumer that no
+    /// longer exists until the reclaim interval passes. So the command is
+    /// allowed to finish (a blocking read returns within its block) and the
+    /// caller hands back what it took.
+    async fn take<T: redis::FromRedisValue>(
+        &self,
+        conn: &mut MultiplexedConnection,
+        command: &redis::Cmd,
+    ) -> (redis::RedisResult<T>, bool) {
+        let call = command.query_async::<T>(conn);
+        tokio::pin!(call);
+        tokio::select! {
+            reply = &mut call => (reply, false),
+            _ = self.tx.closed() => {
+                match tokio::time::timeout(BLOCK_FOR + TAKE_GRACE, &mut call).await {
+                    Ok(reply) => (reply, true),
+                    Err(_) => (
+                        Err(redis::RedisError::from((
+                            redis::ErrorKind::Io,
+                            "the read outlived its block after the reader left",
+                        ))),
+                        true,
+                    ),
+                }
+            }
+        }
+    }
+
     /// Takes over messages idle past the reclaim interval and delivers them,
     /// returning how many it sent.
     async fn reclaim(&self, conn: &mut MultiplexedConnection) -> std::result::Result<u64, Stop> {
@@ -496,7 +568,14 @@ impl ConsumeLoop {
             .arg("0")
             .arg("COUNT")
             .arg(self.batch);
-        let reply = match self.query::<StreamAutoClaimReply>(conn, &command).await? {
+        let (reply, closed) = self.take::<StreamAutoClaimReply>(conn, &command).await;
+        if closed {
+            if let Ok(reply) = reply {
+                self.release(reply.claimed.into_iter().map(|e| e.id)).await;
+            }
+            return Err(Stop::Closed);
+        }
+        let reply = match reply {
             Ok(reply) => reply,
             Err(error) => {
                 // A failed reclaim is not a reason to stop consuming new work.
@@ -511,16 +590,65 @@ impl ConsumeLoop {
 
         let attempts = self.attempts(conn).await?;
         let mut sent = 0;
-        for entry in reply.claimed {
+        let mut claimed = reply.claimed.into_iter();
+        while let Some(entry) = claimed.next() {
             // Claimed but no longer listed as pending: it has been delivered at
             // least twice by definition, so say so rather than claim it is new.
             let attempt = attempts.get(&entry.id).copied().unwrap_or(2);
             tracing::debug!(subject = %self.subject, entry = %entry.id, attempt,
                 "reclaimed an abandoned message");
-            self.deliver(entry, attempt).await?;
+            let id = entry.id.clone();
+            if let Err(stop) = self.deliver(entry, attempt).await {
+                if matches!(stop, Stop::Closed) {
+                    self.release(std::iter::once(id).chain(claimed.map(|e| e.id)))
+                        .await;
+                }
+                return Err(stop);
+            }
             sent += 1;
         }
         Ok(sent)
+    }
+
+    /// Hands back entries this consumer took from the group but could not
+    /// lend, because its reader had already gone.
+    ///
+    /// A read in flight when the reader drops still takes entries, and Redis
+    /// then lists them as pending with this consumer. Left alone they would
+    /// wait out the whole reclaim interval before any consumer saw them, so a
+    /// reader that stops at the wrong moment would delay messages published
+    /// just after it. Claiming them back with an idle time of the reclaim
+    /// interval makes them eligible at once: the next consumer's first reclaim
+    /// takes them. `JUSTID` leaves their delivery count as it was, since none
+    /// of them reached a reader. Best effort: if it fails they are still
+    /// reclaimed, only later.
+    async fn release(&self, ids: impl Iterator<Item = String>) {
+        if self.inner.reclaim_after.is_zero() {
+            return;
+        }
+        let ids: Vec<String> = ids.collect();
+        if ids.is_empty() {
+            return;
+        }
+        let mut command = redis::cmd("XCLAIM");
+        command
+            .arg(&self.key)
+            .arg(&self.group)
+            .arg(&self.name)
+            .arg(0);
+        for id in &ids {
+            command.arg(id);
+        }
+        command
+            .arg("IDLE")
+            .arg(self.inner.reclaim_after.as_millis() as u64)
+            .arg("JUSTID");
+        let released: std::result::Result<Vec<String>, _> =
+            self.inner.query(&command, Replay::Idempotent).await;
+        if let Err(error) = released {
+            tracing::warn!(subject = %self.subject, consumer = %self.group, %error,
+                entries = ids.len(), "could not hand undelivered entries back; they are reclaimed later");
+        }
     }
 
     /// How many times each message outstanding with this consumer has been
@@ -584,10 +712,15 @@ impl ConsumeLoop {
             .arg("STREAMS")
             .arg(&self.key)
             .arg(">");
-        let reply = match self
-            .query::<Option<StreamReadReply>>(conn, &command)
-            .await?
-        {
+        let (reply, closed) = self.take::<Option<StreamReadReply>>(conn, &command).await;
+        if closed {
+            if let Ok(Some(reply)) = reply {
+                self.release(reply.keys.into_iter().flat_map(|k| k.ids).map(|e| e.id))
+                    .await;
+            }
+            return Err(Stop::Closed);
+        }
+        let reply = match reply {
             Ok(Some(reply)) => reply,
             // None is the block expiring with nothing to report.
             Ok(None) => return Ok(0),
@@ -603,9 +736,17 @@ impl ConsumeLoop {
             }
         };
         let mut sent = 0;
-        for entry in reply.keys.into_iter().flat_map(|k| k.ids) {
+        let mut fresh = reply.keys.into_iter().flat_map(|k| k.ids);
+        while let Some(entry) = fresh.next() {
+            let id = entry.id.clone();
             // Fresh from the log, so this is its first delivery.
-            self.deliver(entry, 1).await?;
+            if let Err(stop) = self.deliver(entry, 1).await {
+                if matches!(stop, Stop::Closed) {
+                    self.release(std::iter::once(id).chain(fresh.map(|e| e.id)))
+                        .await;
+                }
+                return Err(stop);
+            }
             sent += 1;
         }
         Ok(sent)
@@ -680,6 +821,9 @@ struct AckTarget {
     inner: Arc<Inner>,
     key: String,
     group: String,
+    /// This consumer's identity in the group, which a delayed nak claims the
+    /// entry back to.
+    name: String,
     subject: String,
 }
 
@@ -753,6 +897,8 @@ struct RedisAck {
 
 #[async_trait::async_trait]
 impl Acker for RedisAck {
+    /// Queues an XACK for the consumer's ack task, which batches them. With
+    /// `confirm_acks` it waits for Redis to answer; without, it returns once queued.
     async fn ack(self: Box<Self>) -> Result<()> {
         let target = &self.acks.target;
         let failed = |error: String| {
@@ -801,8 +947,99 @@ impl Acker for RedisAck {
             .settled(&target.subject, &target.group, "nak");
         Ok(())
     }
+
+    /// Leaves the message pending, as [`RedisAck::nak`] does, with its idle
+    /// time set back so the group's reclaim reaches it `delay` from now rather
+    /// than after the whole reclaim interval.
+    ///
+    /// The reclaim takes entries idle for at least
+    /// [`RedisConfig::reclaim_after`](super::RedisConfig::reclaim_after), so
+    /// an entry made `reclaim_after - delay` idle becomes eligible once
+    /// `delay` has passed, and is redelivered on the next reclaim after that:
+    /// never sooner, at most a reclaim pass later. XCLAIM with `JUSTID` sets
+    /// the idle time without counting a delivery, so the attempt number the
+    /// redelivery carries is still the true one. The server holds the timing,
+    /// so it survives a restart and needs no clock of ours.
+    ///
+    /// Redis refuses an idle time in the future, so a delay longer than
+    /// `reclaim_after` cannot be honoured and is refused; the entry then
+    /// redelivers after `reclaim_after`, as a plain nak's does.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        let target = &self.acks.target;
+        let idle = idle_for_delay(target.inner.reclaim_after, delay)?;
+        // Safe to repeat: a second XCLAIM sets the same idle time again.
+        let claimed: Vec<String> = target
+            .inner
+            .query(
+                redis::cmd("XCLAIM")
+                    .arg(&target.key)
+                    .arg(&target.group)
+                    .arg(&target.name)
+                    .arg(0)
+                    .arg(&self.entry)
+                    .arg("IDLE")
+                    .arg(idle)
+                    .arg("JUSTID"),
+                Replay::Idempotent,
+            )
+            .await
+            .map_err(fail(format!(
+                "redis: cannot delay the redelivery of {} on {:?}",
+                self.entry, target.subject
+            )))?;
+        if claimed.is_empty() {
+            // Acknowledged already, or trimmed off the log: nothing is
+            // pending to redeliver.
+            tracing::warn!(subject = %target.subject, entry = %self.entry,
+                "a delayed nak found the entry no longer pending");
+        }
+        target
+            .inner
+            .metrics
+            .settled(&target.subject, &target.group, "nak");
+        Ok(())
+    }
+
+    /// Whenever reclaiming is on, since reclaiming is what redelivers.
+    fn delays_nak(&self) -> bool {
+        !self.acks.target.inner.reclaim_after.is_zero()
+    }
+
+    /// Redis redelivers an entry once it has been idle for the reclaim
+    /// interval and cannot set an idle time in the future, so that interval
+    /// is the longest a delayed nak can wait.
+    fn max_nak_delay(&self) -> Option<Duration> {
+        Some(self.acks.target.inner.reclaim_after)
+    }
 }
 
+/// The idle time, in milliseconds, that makes an entry eligible for a reclaim
+/// of `reclaim_after` once `delay` has passed, or why there is none.
+///
+/// Rounded so the delay is never shortened: the delay up, the result down.
+fn idle_for_delay(reclaim_after: Duration, delay: Duration) -> Result<u64> {
+    if reclaim_after.is_zero() {
+        return Err(StreamError::Unsupported(
+            "redis: reclaiming is off (RedisConfig::reclaim_after is zero), so nothing \
+             would ever redeliver a delayed nak"
+                .into(),
+        ));
+    }
+    if delay > reclaim_after {
+        return Err(StreamError::Unsupported(format!(
+            "redis: a delayed nak waits at most RedisConfig::reclaim_after ({reclaim_after:?}), \
+             because Redis redelivers an entry once it has been idle that long and cannot set \
+             an idle time in the future; asked for {delay:?}. The entry stays pending and \
+             redelivers after reclaim_after"
+        )));
+    }
+    let reclaim = reclaim_after.as_millis() as u64;
+    let delay = delay.as_nanos().div_ceil(1_000_000) as u64;
+    Ok(reclaim.saturating_sub(delay))
+}
+
+/// XACK one entry outside the batching ack task, for an entry that is
+/// settled by the loop itself rather than by a handler.
 async fn xack(inner: &Inner, key: &str, group: &str, entry: &str) -> Result<()> {
     // Acknowledging an acknowledged entry is a no-op.
     inner
@@ -835,13 +1072,31 @@ async fn last_id(inner: &Inner, key: &str) -> Result<String> {
         .map_or_else(|| "0".to_owned(), |entry| entry.id))
 }
 
-/// Turns a stream entry back into a message.
+/// The entry field header `name` is stored under.
+fn header_field(name: &str) -> String {
+    format!("{HEADER_FIELD_PREFIX}{name}")
+}
+
+/// Turns a stream entry back into a message, with the headers its `h:` fields
+/// carry.
 fn decode(registry: &Registry, subject: &str, entry: &StreamId) -> Result<Message> {
     let raw: Vec<u8> = entry.get(PAYLOAD_FIELD).ok_or_else(|| StreamError::Frame {
         subject: subject.to_owned(),
         reason: format!("entry {} carries no {PAYLOAD_FIELD:?} field", entry.id),
     })?;
-    unpack(registry, subject, raw)
+    let message = unpack(registry, subject, raw)?;
+    let mut headers = Headers::new();
+    for field in entry.map.keys() {
+        let Some(name) = field.strip_prefix(HEADER_FIELD_PREFIX) else {
+            continue;
+        };
+        // A field some other writer added that is not text is not a header
+        // this contract could have written; it is left out, not fatal.
+        if let Some(value) = entry.get::<String>(field) {
+            headers.insert(name, value);
+        }
+    }
+    Ok(message.with_headers(headers))
 }
 
 /// This process's identity within a consumer group.
@@ -887,6 +1142,64 @@ mod tests {
         assert!(matches!(
             decode(&Registry::new(), "s", &empty),
             Err(StreamError::Frame { .. })
+        ));
+    }
+
+    #[test]
+    fn decode_reads_header_fields_and_nothing_else() {
+        let frame = pack("m1", &Payload::json(&"x".to_owned()).unwrap());
+        let bulk = |s: &str| redis::Value::BulkString(s.as_bytes().to_vec());
+        let entry = StreamId {
+            id: "1-0".into(),
+            map: HashMap::from([
+                (PAYLOAD_FIELD.to_owned(), redis::Value::BulkString(frame)),
+                (header_field("lang"), bulk("rust")),
+                (header_field("msg"), bulk("a header called msg")),
+                ("other".to_owned(), bulk("not a header")),
+            ]),
+            ..Default::default()
+        };
+        let message = decode(&Registry::new(), "s", &entry).unwrap();
+        let want: Headers = [("lang", "rust"), ("msg", "a header called msg")]
+            .into_iter()
+            .collect();
+        assert_eq!(message.headers(), &want);
+        assert_eq!(message.json::<String>().unwrap(), "x");
+    }
+
+    #[test]
+    fn header_fields_cannot_collide_with_the_driver_fields() {
+        // The contract refuses ':' in a key, so no header maps onto `msg`,
+        // `meta`, or another header's field.
+        assert!(header_field("lang").starts_with(HEADER_FIELD_PREFIX));
+        for own in [PAYLOAD_FIELD, super::super::keys::METADATA_FIELD] {
+            assert!(!own.starts_with(HEADER_FIELD_PREFIX));
+        }
+        let bad: Headers = [("h:x", "1")].into_iter().collect();
+        assert!(matches!(bad.validate(), Err(StreamError::InvalidHeader(_))));
+    }
+
+    #[test]
+    fn a_delayed_nak_sets_back_the_idle_time() {
+        let reclaim = Duration::from_secs(30);
+        assert_eq!(idle_for_delay(reclaim, Duration::ZERO).unwrap(), 30_000);
+        assert_eq!(
+            idle_for_delay(reclaim, Duration::from_secs(5)).unwrap(),
+            25_000
+        );
+        // Rounded so the delay is never shortened.
+        assert_eq!(
+            idle_for_delay(reclaim, Duration::from_micros(1_500)).unwrap(),
+            29_998
+        );
+        assert_eq!(idle_for_delay(reclaim, reclaim).unwrap(), 0);
+        assert!(matches!(
+            idle_for_delay(reclaim, reclaim + Duration::from_millis(1)),
+            Err(StreamError::Unsupported(_))
+        ));
+        assert!(matches!(
+            idle_for_delay(Duration::ZERO, Duration::from_secs(1)),
+            Err(StreamError::Unsupported(_))
         ));
     }
 }

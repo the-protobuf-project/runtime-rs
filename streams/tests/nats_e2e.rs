@@ -60,6 +60,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload for `user`.
 fn event(user: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -68,10 +69,13 @@ fn event(user: &str) -> Payload {
     .unwrap()
 }
 
+/// The secure server's client URL, `NATS_E2E_URL` or the compose default.
 fn url() -> String {
     std::env::var("NATS_E2E_URL").unwrap_or_else(|_| "tls://127.0.0.1:14223".into())
 }
 
+/// The listener that maps a client certificate to a user, `NATS_E2E_CERTMAP_URL`
+/// or the compose default.
 fn certmap_url() -> String {
     std::env::var("NATS_E2E_CERTMAP_URL").unwrap_or_else(|_| "tls://127.0.0.1:14224".into())
 }
@@ -84,6 +88,7 @@ fn host_port() -> String {
         .to_owned()
 }
 
+/// The test certificate directory, `NATS_E2E_CERTS` or docker/tls/out.
 fn certs() -> PathBuf {
     std::env::var("NATS_E2E_CERTS").map_or_else(
         |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"),
@@ -106,6 +111,7 @@ fn mtls() -> ConnectOptions {
     trusting().add_client_certificate(dir.join("client.crt"), dir.join("client.key"))
 }
 
+/// Adds the test-only password user's credentials to `options`.
 fn with_password(options: ConnectOptions) -> ConnectOptions {
     options.user_and_password(PASSWORD_USER.into(), PASSWORD.into())
 }
@@ -123,6 +129,7 @@ fn seed() -> String {
         .to_owned()
 }
 
+/// Connects `options` to `url`, failing with how to start the server when it cannot.
 async fn connect(options: ConnectOptions, url: String) -> async_nats::Client {
     options.connect(&url).await.unwrap_or_else(|error| {
         panic!("no NATS over mTLS at {url} ({error}); see docker/compose.nats.secure.yaml")
@@ -158,10 +165,12 @@ async fn unauthorized(options: ConnectOptions) {
     }
 }
 
+/// A JetStream provider with the default config.
 async fn jetstream(nc: async_nats::Client) -> JetStreamProvider {
     jetstream_with(nc, NatsConfig::default()).await
 }
 
+/// A JetStream provider with `config`, failing if the server lacks JetStream.
 async fn jetstream_with(nc: async_nats::Client, config: NatsConfig) -> JetStreamProvider {
     JetStreamProvider::new(nc, config)
         .await
@@ -173,14 +182,17 @@ fn unique(prefix: &str) -> String {
     format!("e2e.{prefix}.{}", provider::new_id())
 }
 
+/// Owned subjects for a stream declaration.
 fn subjects(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
+/// The next item within [`WITHIN`].
 async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
     next_within(stream, WITHIN).await
 }
 
+/// The next item within `within`, panicking on a timeout or an ended stream.
 async fn next_within<S: futures::Stream + Unpin>(stream: &mut S, within: Duration) -> S::Item {
     tokio::time::timeout(within, stream.next())
         .await
@@ -188,12 +200,14 @@ async fn next_within<S: futures::Stream + Unpin>(stream: &mut S, within: Duratio
         .expect("the stream ended")
 }
 
+/// Asserts nothing arrives within `within`; an ended stream also passes.
 async fn nothing<S: futures::Stream + Unpin>(stream: &mut S, within: Duration) {
     if let Ok(Some(_)) = tokio::time::timeout(within, stream.next()).await {
         panic!("something arrived that should not have");
     }
 }
 
+/// Asserts `result` failed with an error `want` accepts.
 fn is<T: std::fmt::Debug>(result: &streams::Result<T>, want: fn(&StreamError) -> bool) {
     match result {
         Err(error) if want(error) => {}
@@ -201,14 +215,17 @@ fn is<T: std::fmt::Debug>(result: &streams::Result<T>, want: fn(&StreamError) ->
     }
 }
 
+/// Matches [`StreamError::NotFound`], for [`is`].
 fn not_found(e: &StreamError) -> bool {
     matches!(e, StreamError::NotFound(_))
 }
 
+/// Matches [`StreamError::Unsupported`], for [`is`].
 fn unsupported(e: &StreamError) -> bool {
     matches!(e, StreamError::Unsupported(_))
 }
 
+/// Matches [`StreamError::UnknownSubject`], for [`is`].
 fn unknown_subject(e: &StreamError) -> bool {
     matches!(e, StreamError::UnknownSubject { .. })
 }
@@ -637,6 +654,8 @@ async fn jetstream_full_lifecycle_as_a_certificate_mapped_user() {
     jetstream_lifecycle(certmap_client().await).await;
 }
 
+/// The full JetStream stream and consumer lifecycle, checked against the
+/// server's own view; run once per way of authenticating.
 async fn jetstream_lifecycle(nc: async_nats::Client) {
     let js = async_nats::jetstream::new(nc.clone());
     let p = jetstream(nc.clone()).await;
@@ -916,12 +935,14 @@ async fn default_settings_are_the_servers() {
     p.delete(&s.id).await.unwrap();
 }
 
+/// Every consumer the server holds on `raw`.
 async fn consumers(
     raw: &async_nats::jetstream::stream::Stream,
 ) -> Vec<async_nats::jetstream::consumer::Info> {
     raw.consumers().map(Result::unwrap).collect().await
 }
 
+/// The one consumer on `raw`, failing if there are none or several.
 async fn only_consumer(
     raw: &async_nats::jetstream::stream::Stream,
 ) -> async_nats::jetstream::consumer::Info {
@@ -1041,8 +1062,160 @@ async fn a_dropped_subscription_releases_its_ordered_consumer() {
     p.delete(&s.id).await.unwrap();
 }
 
+// ---------------------------------------------------------------- headers
+
+/// Matches [`StreamError::InvalidHeader`], for [`is`].
+fn invalid_header(e: &StreamError) -> bool {
+    matches!(e, StreamError::InvalidHeader(_))
+}
+
+/// A stream over `subject` declaring default headers `lang` and `site`.
+fn headed(subject: &str) -> Stream {
+    Stream::named("headed")
+        .subjects([subject])
+        .header("lang", "rust")
+        .header("site", "plant-3")
+}
+
+/// Core NATS over mTLS: stream defaults and publish overrides arrive as NATS
+/// headers another client reads; reserved keys, expiry and retain are refused
+/// by name.
+#[tokio::test]
+async fn core_headers_over_tls() {
+    let _gate = GATE.read().await;
+    let nc = client().await;
+    let p = NatsProvider::new(nc.clone(), NatsConfig::default());
+    let subject = unique("headers.core");
+    is(
+        &p.create(headed(&subject).header("Nats-Msg-Id", "x")).await,
+        invalid_header,
+    );
+    let s = p.create(headed(&subject)).await.unwrap();
+    let m = p.bind(&s.id).await.unwrap();
+    let mut raw = nc.subscribe(subject.clone()).await.unwrap();
+    let mut sub = m.subscribe(&subject, &Options::default()).await.unwrap();
+
+    let id = m
+        .publish(
+            &subject,
+            event("ada"),
+            &Options::default().header("site", "plant-4"),
+        )
+        .await
+        .unwrap();
+    let got = next(&mut sub).await;
+    assert_eq!(got.id(), id);
+    assert_eq!(got.headers().get("lang"), Some("rust"));
+    assert_eq!(got.headers().get("site"), Some("plant-4"));
+    let native = next(&mut raw).await.headers.expect("NATS headers");
+    assert_eq!(native.get("site").map(|v| v.as_str()), Some("plant-4"));
+
+    is(
+        &m.publish(
+            &subject,
+            event("a"),
+            &Options::default().header("Nats-TTL", "1"),
+        )
+        .await,
+        invalid_header,
+    );
+    let expiring = Options::default().with_expiry(Duration::from_secs(5));
+    is(
+        &m.publish(&subject, event("a"), &expiring).await,
+        unsupported,
+    );
+    is(
+        &m.publish(&subject, event("a"), &Options::default().with_retain())
+            .await,
+        unsupported,
+    );
+    p.delete(&s.id).await.unwrap();
+}
+
+/// JetStream over mTLS: headers stored with the stream and on every message,
+/// carried through a redelivery; expiry removes a message; a delayed nak is
+/// held back by the server; retain and reserved keys are refused.
+#[tokio::test]
+async fn jetstream_headers_expiry_and_delayed_nak_over_tls() {
+    let _gate = GATE.read().await;
+    let nc = client().await;
+    let p = jetstream_with(nc.clone(), NatsConfig::default().with_ack_wait(ACK_WAIT)).await;
+    let subject = unique("headers.js");
+    is(
+        &p.create(headed(&subject).header("Nats-TTL", "1")).await,
+        invalid_header,
+    );
+    let s = p.create(headed(&subject)).await.unwrap();
+    assert_eq!(p.get(&s.id).await.unwrap().headers, s.headers);
+    let m = p.bind(&s.id).await.unwrap();
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(&subject, "headed", &Options::default())
+        .await
+        .unwrap();
+
+    let opts = Options::default().header("site", "plant-4");
+    let id = m.publish(&subject, event("ada"), &opts).await.unwrap();
+    let first = next(&mut deliveries).await;
+    assert_eq!(first.headers().get("lang"), Some("rust"));
+    assert_eq!(first.headers().get("site"), Some("plant-4"));
+    assert!(first.can_delay_redelivery());
+    let naked = Instant::now();
+    first.nak_after(Duration::from_secs(2)).await.unwrap();
+    nothing(&mut deliveries, Duration::from_millis(1500)).await;
+    let second = next(&mut deliveries).await;
+    assert!(naked.elapsed() >= Duration::from_secs(2));
+    assert_eq!((second.id(), second.attempt()), (id.as_str(), 2));
+    assert_eq!(second.headers().get("site"), Some("plant-4"));
+    second.ack().await.unwrap();
+
+    let ids = as_batch(m.as_ref())
+        .unwrap()
+        .publish_batch(&subject, vec![event("a"), event("b")], &opts)
+        .await
+        .unwrap();
+    for id in &ids {
+        let d = next(&mut deliveries).await;
+        assert_eq!(
+            (d.id(), d.headers().get("site")),
+            (id.as_str(), Some("plant-4"))
+        );
+        d.ack().await.unwrap();
+    }
+    drop(deliveries);
+
+    is(
+        &m.publish(
+            &subject,
+            event("a"),
+            &Options::default().header("Nats-Msg-Id", "x"),
+        )
+        .await,
+        invalid_header,
+    );
+    is(
+        &m.publish(&subject, event("a"), &Options::default().with_retain())
+            .await,
+        unsupported,
+    );
+    let expiring = Options::default().with_expiry(Duration::from_secs(1));
+    m.publish(&subject, event("late"), &expiring).await.unwrap();
+    let js = async_nats::jetstream::new(nc);
+    let deadline = Instant::now() + WITHIN;
+    loop {
+        let mut handle = js.get_stream(&s.id).await.unwrap();
+        if handle.info().await.unwrap().state.messages == 3 {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the message did not expire");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    p.delete(&s.id).await.unwrap();
+}
+
 // ---------------------------------------------------------------- restart
 
+/// Runs `docker` with `args`, failing on a non-zero exit, and returns its trimmed stdout.
 fn docker(args: &[&str]) -> String {
     let out = Command::new("docker")
         .args(args)
@@ -1056,6 +1229,7 @@ fn docker(args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+/// Waits up to 60s for the server container to report healthy.
 async fn wait_healthy() {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
@@ -1086,11 +1260,14 @@ async fn jetstream_survives_a_broker_restart() {
         let nc = client().await;
         let p = jetstream_with(nc.clone(), fast()).await;
         let s = p
-            .create(Stream {
-                name: "durable".into(),
-                subjects: subjects(&[&subject]),
-                ..Stream::default()
-            })
+            .create(
+                Stream {
+                    name: "durable".into(),
+                    subjects: subjects(&[&subject]),
+                    ..Stream::default()
+                }
+                .header("lang", "rust"),
+            )
             .await
             .unwrap();
         let m = p.bind(&s.id).await.unwrap();
@@ -1110,7 +1287,11 @@ async fn jetstream_survives_a_broker_restart() {
 
         // Delivered and left unsettled when the broker goes down.
         let inflight = m
-            .publish(&subject, event("inflight"), &Options::default())
+            .publish(
+                &subject,
+                event("inflight"),
+                &Options::default().header("site", "plant-4"),
+            )
             .await
             .unwrap();
         let d = next(&mut deliveries).await;
@@ -1137,6 +1318,11 @@ async fn jetstream_survives_a_broker_restart() {
     let p = jetstream_with(nc.clone(), fast()).await;
     let s = p.get(&stream_id).await.expect("the stream survived");
     assert_eq!(s.name, "durable");
+    assert_eq!(
+        s.headers.get("lang"),
+        Some("rust"),
+        "stream headers survived"
+    );
     let m = p.bind(&stream_id).await.unwrap();
     let mut deliveries = as_durable(m.as_ref())
         .unwrap()
@@ -1159,8 +1345,10 @@ async fn jetstream_survives_a_broker_restart() {
     while seen.len() < 2 {
         let d = next_within(&mut deliveries, ACK_WAIT + WITHIN).await;
         assert_ne!(d.id(), acked, "an acked message was redelivered");
+        assert_eq!(d.headers().get("lang"), Some("rust"), "{d:?}");
         if d.id() == inflight {
             assert!(d.attempt() >= 2, "{d:?}");
+            assert_eq!(d.headers().get("site"), Some("plant-4"), "{d:?}");
         } else {
             assert_eq!(d.id(), queued);
         }

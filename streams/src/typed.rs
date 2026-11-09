@@ -20,6 +20,7 @@ pub struct Typed<T, C = Json> {
 }
 
 impl<T, C: Clone> Clone for Typed<T, C> {
+    /// Written by hand so cloning needs only `C: Clone`, not `T: Clone`.
     fn clone(&self) -> Self {
         Self {
             publisher: self.publisher.clone(),

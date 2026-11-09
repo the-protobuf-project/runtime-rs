@@ -1,0 +1,21 @@
+{
+  "Folder": "TppStreams",
+  "NodeList": [
+    { "NodeId": "Temperature", "Name": "Temperature", "DataType": "Double", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite", "Description": "A writable Double" },
+    { "NodeId": "Count", "Name": "Count", "DataType": "Int32", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite", "Description": "A writable Int32" },
+    { "NodeId": "Running", "Name": "Running", "DataType": "Boolean", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite", "Description": "A writable Boolean" },
+    { "NodeId": "Mode", "Name": "Mode", "DataType": "String", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite", "Description": "A writable String" },
+    { "NodeId": "Sequence", "Name": "Sequence", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite", "Description": "A writable Int64" },
+    { "NodeId": "Serial", "Name": "Serial", "DataType": "String", "ValueRank": -1, "AccessLevel": "CurrentRead", "Description": "A read-only String" },
+    { "NodeId": "bench.s00", "Name": "bench.s00", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s01", "Name": "bench.s01", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s02", "Name": "bench.s02", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s03", "Name": "bench.s03", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s04", "Name": "bench.s04", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s05", "Name": "bench.s05", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s06", "Name": "bench.s06", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s07", "Name": "bench.s07", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s08", "Name": "bench.s08", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" },
+    { "NodeId": "bench.s09", "Name": "bench.s09", "DataType": "Int64", "ValueRank": -1, "AccessLevel": "CurrentReadOrWrite" }
+  ]
+}

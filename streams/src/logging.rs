@@ -29,6 +29,7 @@ pub fn with_logging_middleware() -> Middleware {
 
 #[async_trait::async_trait]
 impl Publisher for LoggingPublisher {
+    /// Logs after the inner publish returns and hands its result back untouched.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let start = Instant::now();
         let codec = payload.codec().to_owned();
@@ -67,6 +68,7 @@ struct Closed {
 }
 
 impl Drop for Closed {
+    /// Fires once, when the subscription stream that owns this guard is dropped.
     fn drop(&mut self) {
         tracing::info!(
             subject = self.subject,
@@ -78,6 +80,7 @@ impl Drop for Closed {
 
 #[async_trait::async_trait]
 impl Subscriber for LoggingSubscriber {
+    /// Wraps the inner stream so each delivery is counted and logged at debug.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         let messages = match self.next.subscribe(subject, opts).await {
             Ok(messages) => messages,

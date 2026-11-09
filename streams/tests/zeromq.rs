@@ -11,7 +11,7 @@ use bytes::Bytes;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use streams::{
-    Manager, Options, Payload, Stream, StreamError, Streams, Subscription,
+    Headers, Manager, Options, Payload, Stream, StreamError, Streams, Subscription,
     drivers::zeromq::{ZmqConfig, ZmqProvider},
     provider,
 };
@@ -31,6 +31,7 @@ const SETTLE: Duration = Duration::from_millis(150);
 /// How long a test waits for a delivery before calling it lost.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// A JSON `Event` payload for `user`.
 fn event(user: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -48,6 +49,8 @@ struct Pair {
     sm: Arc<dyn Manager>,
 }
 
+/// A connected pair on an ephemeral loopback port, both sides declaring
+/// stream [`STREAM`] over `subjects` and bound to it.
 async fn pair(subjects: &[&str]) -> Pair {
     pair_on("tcp://127.0.0.1:0").await.declare(subjects).await
 }
@@ -57,6 +60,8 @@ struct Unbound {
     subscriber: ZmqProvider,
 }
 
+/// A publisher bound at `endpoint` and a subscriber connected to wherever it
+/// actually bound, before either declares a stream.
 async fn pair_on(endpoint: &str) -> Unbound {
     let publisher = ZmqProvider::publisher(ZmqConfig::new(endpoint).with_settle(SETTLE))
         .await
@@ -70,6 +75,7 @@ async fn pair_on(endpoint: &str) -> Unbound {
 }
 
 impl Unbound {
+    /// Declares the same stream, with the same id, on both sides and binds each.
     async fn declare(self, subjects: &[&str]) -> Pair {
         // The same id on both sides, because the id is part of the wire topic
         // and two processes would have agreed on it.
@@ -90,6 +96,7 @@ impl Unbound {
     }
 }
 
+/// The next message within [`WAIT`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> streams::Message {
     tokio::time::timeout(WAIT, subscription.next())
         .await
@@ -436,4 +443,159 @@ async fn reads_the_go_wire_layout() {
     let message = next(&mut sub).await;
     assert_eq!(message.id(), "id");
     assert_eq!(message.json::<String>().unwrap(), "x");
+}
+
+// --- headers, expiry, retain ---------------------------------------------------
+
+/// Headers from literal pairs, for comparing with what arrives.
+fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
+    pairs.into_iter().collect()
+}
+
+/// A pair whose declarations both stamp `lang` and `site`, as two processes
+/// that agreed on the stream would.
+async fn headed_pair() -> Pair {
+    let unbound = pair_on("tcp://127.0.0.1:0").await;
+    let declaration = Stream::named("test")
+        .with_id(STREAM)
+        .subject(SUBJECT)
+        .header("lang", "rust")
+        .header("site", "plant-3");
+    unbound.publisher.create(declaration.clone()).await.unwrap();
+    unbound.subscriber.create(declaration).await.unwrap();
+    Pair {
+        pm: unbound.publisher.bind(STREAM).await.unwrap(),
+        sm: unbound.subscriber.bind(STREAM).await.unwrap(),
+        publisher: unbound.publisher,
+        subscriber: unbound.subscriber,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stream_and_publish_headers_arrive() {
+    let p = headed_pair().await;
+    assert_eq!(
+        p.publisher.get(STREAM).await.unwrap().headers,
+        headers([("lang", "rust"), ("site", "plant-3")])
+    );
+    let mut sub = p.sm.subscribe(SUBJECT, &Options::default()).await.unwrap();
+
+    p.pm.publish(SUBJECT, event("ada"), &Options::default())
+        .await
+        .unwrap();
+    let got = next(&mut sub).await;
+    assert_eq!(
+        got.headers(),
+        &headers([("lang", "rust"), ("site", "plant-3")])
+    );
+    assert_eq!(got.json::<Event>().unwrap().user, "ada");
+
+    let opts = Options::default()
+        .header("site", "plant-9")
+        .header("trace", "t-1");
+    let want = headers([("lang", "rust"), ("site", "plant-9"), ("trace", "t-1")]);
+    p.pm.publish(SUBJECT, event("grace"), &opts).await.unwrap();
+    assert_eq!(next(&mut sub).await.headers(), &want);
+
+    let ids = streams::as_batch(p.pm.as_ref())
+        .unwrap()
+        .publish_batch(SUBJECT, vec![event("a"), event("b")], &opts)
+        .await
+        .unwrap();
+    for id in ids {
+        let got = next(&mut sub).await;
+        assert_eq!(got.id(), id);
+        assert_eq!(got.headers(), &want);
+    }
+}
+
+/// Headers ride in a version-2 frame; without them the frame is still the
+/// version-1 one runtime-go reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_ride_in_frame_version_2() {
+    let p = pair(&[SUBJECT]).await;
+    let mut raw = zeromq::SubSocket::new();
+    raw.connect(p.publisher.endpoint()).await.unwrap();
+    raw.subscribe("").await.unwrap();
+    tokio::time::sleep(SETTLE).await;
+
+    let payload = event("ada");
+    let opts = Options::default().with_id("msg-1").header("lang", "rust");
+    p.pm.publish(SUBJECT, payload.clone(), &opts).await.unwrap();
+    let frames = tokio::time::timeout(WAIT, raw.recv())
+        .await
+        .unwrap()
+        .unwrap()
+        .into_vec();
+    assert_eq!(frames[0], Bytes::from(format!("{STREAM}|{SUBJECT}")));
+    assert_eq!(frames[1][1], 2);
+    assert_eq!(
+        frames[1],
+        Bytes::from(provider::pack_with("msg-1", &payload, &opts.headers))
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn invalid_headers_are_refused_where_they_are_set() {
+    let invalid = |result: streams::Result<Stream>| {
+        assert!(
+            matches!(result, Err(StreamError::InvalidHeader(_))),
+            "{result:?}"
+        );
+    };
+    let p = pair(&[SUBJECT]).await;
+    invalid(
+        p.publisher
+            .create(Stream::named("x").subject(SUBJECT).header("a:b", "1"))
+            .await,
+    );
+    invalid(
+        p.subscriber
+            .create(Stream::named("x").subject(SUBJECT).header("", "1"))
+            .await,
+    );
+    invalid(
+        p.publisher
+            .update(STREAM, Stream::named("x").header("bad key", "1"))
+            .await,
+    );
+    let bad = Options::default().header("k", "line\nbreak");
+    let publish = p.pm.publish(SUBJECT, event("ada"), &bad).await;
+    assert!(
+        matches!(publish, Err(StreamError::InvalidHeader(_))),
+        "{publish:?}"
+    );
+    let batch = streams::as_batch(p.pm.as_ref())
+        .unwrap()
+        .publish_batch(SUBJECT, vec![event("ada")], &bad)
+        .await;
+    assert!(
+        matches!(batch, Err(StreamError::InvalidHeader(_))),
+        "{batch:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expiry_and_retain_are_refused() {
+    let p = pair(&[SUBJECT]).await;
+    let batch = streams::as_batch(p.pm.as_ref()).unwrap();
+    for opts in [
+        Options::default().with_expiry(Duration::from_secs(5)),
+        Options::default().with_retain(),
+    ] {
+        let one = p.pm.publish(SUBJECT, event("ada"), &opts).await;
+        assert!(matches!(one, Err(StreamError::Unsupported(_))), "{one:?}");
+        let many = batch
+            .publish_batch(SUBJECT, vec![event("ada")], &opts)
+            .await;
+        assert!(matches!(many, Err(StreamError::Unsupported(_))), "{many:?}");
+    }
+    // A zero expiry is no expiry.
+    p.pm.publish(
+        SUBJECT,
+        event("ada"),
+        &Options::default().with_expiry(Duration::ZERO),
+    )
+    .await
+    .unwrap();
 }

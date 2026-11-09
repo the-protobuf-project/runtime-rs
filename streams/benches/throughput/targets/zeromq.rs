@@ -9,6 +9,8 @@ use streams::{
 
 use super::{Conn, Error, unknown_profile};
 
+/// Binds a publisher on an ephemeral loopback port and connects a subscriber
+/// to it; only `plain` exists.
 pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     if profile != "plain" {
         return Err(unknown_profile("zeromq", profile));
@@ -26,5 +28,6 @@ pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     Ok(Conn {
         publisher: Box::new(publisher),
         subscriber: Some(Box::new(subscriber)),
+        flush: None,
     })
 }

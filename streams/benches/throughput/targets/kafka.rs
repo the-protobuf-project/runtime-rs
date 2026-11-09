@@ -12,6 +12,7 @@ use streams::{
 
 use super::{Conn, Error, env, unknown_profile};
 
+/// Path of a test certificate, from `STREAMS_E2E_TLS_DIR` or docker/tls/out.
 fn cert(name: &str) -> String {
     let dir = std::env::var("STREAMS_E2E_TLS_DIR").map_or_else(
         |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"),
@@ -20,6 +21,8 @@ fn cert(name: &str) -> String {
     dir.join(name).to_string_lossy().into_owned()
 }
 
+/// Connects `plain` or mutual-TLS `tls` with ten partitions per topic, so
+/// subjects spread across partitions; `KAFKA_PRODUCERS` sets the producer pool.
 pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     let mut client = ClientConfig::new();
     match profile {
@@ -44,6 +47,9 @@ pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
         prefix: "bench".into(),
         partitions: 10,
         registry,
+        producers: env("KAFKA_PRODUCERS", "8")
+            .parse()
+            .expect("KAFKA_PRODUCERS"),
         ..KafkaConfig::default()
     };
     Ok(Conn::one(KafkaProvider::connect(client, config).await?))

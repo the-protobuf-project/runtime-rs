@@ -1,0 +1,45 @@
+# Microsoft's OPC PLC simulator, the industry's standard OPC UA test server,
+# for tests/opcua_live.rs, examples/opcua.rs and the throughput bench.
+#
+#   docker compose -f docker/compose.opcua.yaml up -d --wait
+#   cargo test -p tpp-streams --features opcua,live-tests --test opcua_live
+#
+# tests/opcua.rs does not need it: it starts an async-opcua server in-process.
+# This is a second, independent OPC UA stack (the OPC Foundation's .NET one).
+#
+# Plain: SecurityPolicy None (`--ut`) and anonymous users, on 127.0.0.1:14840.
+# The server listens on 14840 inside the container too: a client connects to
+# the endpoint URL the server advertises, with only its host swapped for the
+# one the client dialed (async-opcua does that), so the port must match.
+# opc-plc binds the address its hostname resolves to, so the hostname is left
+# as the container's own; `--ph=127.0.0.1` would bind the container's
+# loopback, which a published port cannot reach.
+# compose.opcua.nodes.json adds the writable typed nodes the tests and the
+# bench write to, under the folder TppStreams; the simulated PLC nodes are
+# turned down to one of each so the server stays small.
+name: tpp-streams-live-opcua
+services:
+  opc-plc:
+    image: mcr.microsoft.com/iotedge/opc-plc:2.12.48
+    container_name: tpp-streams-opcua
+    hostname: tpp-streams-opcua
+    command:
+      - --pn=14840
+      - --ut
+      - --nf=/nodes/nodes.json
+      - --sn=1
+      - --fn=1
+      - --gn=0
+      - --vfbs=0
+      - --loglevel=warn
+    ports:
+      - "127.0.0.1:14840:14840"
+    volumes:
+      - ./compose.opcua.nodes.json:/nodes/nodes.json:ro
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/14840' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: "no"

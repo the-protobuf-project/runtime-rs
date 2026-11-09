@@ -10,8 +10,8 @@ use zeromq::{Socket, SocketRecv, SocketSend, SubSocket, ZmqMessage};
 
 use super::{Role, Shared};
 use crate::{
-    Batch, Manager, Message, Options, Payload, Publisher, Registry, Result, Stream, StreamError,
-    Subscriber, Subscription, provider,
+    Batch, Headers, Manager, Message, Options, Payload, Publisher, Registry, Result, Stream,
+    StreamError, Subscriber, Subscription, provider,
 };
 
 /// Publishes to and subscribes from one declared stream.
@@ -21,6 +21,7 @@ pub(crate) struct ZmqManager {
 }
 
 impl ZmqManager {
+    /// Binds `stream` as it was declared; later updates to it are not seen here.
     pub(crate) fn new(shared: Arc<Shared>, stream: Stream) -> Self {
         Self { shared, stream }
     }
@@ -54,19 +55,16 @@ impl ZmqManager {
         format!("{}|{subject}", self.stream.id)
     }
 
+    /// The error every call after [`Streams::close`](crate::Streams::close) reports.
     fn closed() -> StreamError {
         StreamError::Internal("zeromq: the provider is closed".into())
     }
 }
 
-#[async_trait::async_trait]
-impl Publisher for ZmqManager {
-    /// Sends a payload as a topic frame and a packed frame.
-    ///
-    /// Fails with [`StreamError::Unsupported`] on a provider built as a
-    /// subscriber, with a TTL (ZeroMQ delivers on send and cannot schedule),
-    /// and with a group (PUB/SUB fans out to every subscriber).
-    async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
+impl ZmqManager {
+    /// Checks everything a publish or batch on `subject` with `opts` depends
+    /// on, and returns the publishing socket and the headers to send.
+    fn prepare(&self, subject: &str, opts: &Options) -> Result<(&PubSlot, Headers)> {
         self.check_subject(subject)?;
         let Role::Publisher(socket) = &self.shared.role else {
             return Err(StreamError::Unsupported(
@@ -87,9 +85,33 @@ impl Publisher for ZmqManager {
                 "ZeroMQ PUB/SUB fans out to every subscriber and cannot share a subject".into(),
             ));
         }
+        if let Some(expires) = opts.expiry() {
+            return Err(StreamError::Unsupported(format!(
+                "ZeroMQ has no queue: a message reaches the subscribers connected when it is \
+                 sent or nobody, so there is nothing to expire ({expires:?})"
+            )));
+        }
+        if opts.retain {
+            return Err(StreamError::Unsupported(
+                "ZeroMQ keeps nothing once a message is sent, so it cannot retain a last value \
+                 for later subscribers"
+                    .into(),
+            ));
+        }
+        Ok((socket, provider::outgoing(&self.stream, opts)?))
+    }
 
-        let id = provider::publish_id(opts);
-        let body = provider::pack(&id, &payload);
+    /// Sends one payload as a topic frame and a packed frame: version 1, as
+    /// runtime-go writes, unless there are headers to carry.
+    async fn send(
+        &self,
+        socket: &PubSlot,
+        subject: &str,
+        id: &str,
+        payload: &Payload,
+        headers: &Headers,
+    ) -> Result<()> {
+        let body = provider::pack_with(id, payload, headers);
         let len = body.len();
         let frames = vec![Bytes::from(self.topic(subject)), Bytes::from(body)];
         let message = ZmqMessage::try_from(frames)
@@ -105,6 +127,26 @@ impl Publisher for ZmqManager {
             ));
         }
         tracing::debug!(subject, id, bytes = len, "zeromq: published");
+        Ok(())
+    }
+}
+
+/// The publisher's socket, taken on close.
+type PubSlot = tokio::sync::Mutex<Option<zeromq::PubSocket>>;
+
+#[async_trait::async_trait]
+impl Publisher for ZmqManager {
+    /// Sends a payload as a topic frame and a packed frame, with the headers
+    /// in the frame (version 2) when there are any.
+    ///
+    /// Fails with [`StreamError::Unsupported`] on a provider built as a
+    /// subscriber, with a TTL (ZeroMQ delivers on send and cannot schedule),
+    /// with a group (PUB/SUB fans out to every subscriber), and with an expiry
+    /// or retain (there is no queue to hold a message in).
+    async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
+        let (socket, headers) = self.prepare(subject, opts)?;
+        let id = provider::publish_id(opts);
+        self.send(socket, subject, &id, &payload, &headers).await?;
         Ok(id)
     }
 }
@@ -165,19 +207,30 @@ impl Subscriber for ZmqManager {
 
 #[async_trait::async_trait]
 impl Batch for ZmqManager {
-    /// Publishes each payload in turn. ZeroMQ sends without waiting for a
-    /// subscriber, so this does not block per message.
+    /// Publishes each payload in turn, after checking the options and
+    /// headers once. ZeroMQ sends without waiting for a subscriber, so this
+    /// does not block per message.
     async fn publish_batch(
         &self,
         subject: &str,
         payloads: Vec<Payload>,
         opts: &Options,
     ) -> Result<Vec<String>> {
-        provider::publish_each(self, subject, payloads, opts).await
+        provider::check_batch(opts)?;
+        let (socket, headers) = self.prepare(subject, opts)?;
+        let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
+        let mut failures = Vec::new();
+        for (index, (payload, id)) in payloads.iter().zip(&ids).enumerate() {
+            if let Err(error) = self.send(socket, subject, id, payload, &headers).await {
+                failures.push((index, error));
+            }
+        }
+        provider::batch_result(subject, ids, failures)
     }
 }
 
 impl Manager for ZmqManager {
+    /// Batches are sent frame by frame on the one socket; there is no durable side.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -198,6 +251,7 @@ struct Receive {
 }
 
 impl Receive {
+    /// Forwards messages until the subscriber goes away or the provider closes.
     async fn run(mut self) {
         let subject = self.subject.clone();
         let mut delivered = 0usize;

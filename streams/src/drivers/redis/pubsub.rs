@@ -11,10 +11,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{
     Batch, Manager, Message, Options, Payload, Publisher, Result, Stream, StreamError, Subscriber,
     Subscription,
-    provider::{batch_result, check_batch, new_id, pack, prefetch, publish_id, unpack},
+    provider::{
+        batch_result, check_batch, new_id, outgoing, pack_with, prefetch, publish_id, unpack,
+    },
 };
 
-use super::{Inner, Replay, fail, keys::Kind};
+use super::{Inner, Replay, fail, keys::Kind, refuse_unhonoured};
 
 /// Publishes to and subscribes from one immediate or scheduled stream.
 ///
@@ -27,10 +29,12 @@ pub struct PubSubManager {
 }
 
 impl PubSubManager {
+    /// A manager over `stream`; nothing is read or subscribed until it is used.
     pub(super) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         Self { inner, stream }
     }
 
+    /// Whether this manager delivers on TTL expiry rather than immediately.
     fn scheduled(&self) -> bool {
         self.inner.kind == Kind::Notify
     }
@@ -210,11 +214,17 @@ pub(super) fn capacity(opts: &Options) -> usize {
 
 #[async_trait::async_trait]
 impl Publisher for PubSubManager {
+    /// A PUBLISH on an immediate stream; on a scheduled one, the payload and a
+    /// timer key set in one transaction. Neither is retried, since a repeat would
+    /// deliver or schedule the message twice.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.inner.declares(&self.stream, subject)?;
         let delay = self.delay(opts)?;
+        refuse_unhonoured(opts)?;
+        let headers = outgoing(&self.stream, opts)?;
         let id = publish_id(opts);
-        let frame = pack(&id, &payload);
+        // Version 1 when there are no headers, so runtime-go reads it.
+        let frame = pack_with(&id, &payload, &headers);
 
         if let Some(ttl) = delay {
             let mut pipe = redis::pipe();
@@ -250,6 +260,8 @@ impl Publisher for PubSubManager {
 
 #[async_trait::async_trait]
 impl Subscriber for PubSubManager {
+    /// Confirms the subscription before returning, so a publish made after this
+    /// returns is delivered. Refuses a group: pub/sub has no way to share one.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         self.inner.declares(&self.stream, subject)?;
         refuse_group(opts)?;
@@ -290,6 +302,8 @@ impl Subscriber for PubSubManager {
 /// scheduled whole or not at all.
 #[async_trait::async_trait]
 impl Batch for PubSubManager {
+    /// One pipeline for the batch, transactional on a scheduled stream. A
+    /// failure is reported against every index, as Redis does not say which landed.
     async fn publish_batch(
         &self,
         subject: &str,
@@ -299,6 +313,8 @@ impl Batch for PubSubManager {
         check_batch(opts)?;
         self.inner.declares(&self.stream, subject)?;
         let delay = self.delay(opts)?;
+        refuse_unhonoured(opts)?;
+        let headers = outgoing(&self.stream, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| new_id()).collect();
         if ids.is_empty() {
             return Ok(ids);
@@ -310,7 +326,7 @@ impl Batch for PubSubManager {
             pipe.atomic();
         }
         for (id, payload) in ids.iter().zip(&payloads) {
-            let frame = pack(id, payload);
+            let frame = pack_with(id, payload, &headers);
             match delay {
                 Some(ttl) => self.queue_schedule(&mut pipe, subject, id, frame, ttl),
                 None => {
@@ -337,6 +353,7 @@ impl Batch for PubSubManager {
 }
 
 impl Manager for PubSubManager {
+    /// Only [`Batch`]: pub/sub keeps nothing to resume from or replay.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }

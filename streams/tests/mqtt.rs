@@ -73,15 +73,27 @@ fn broker() -> u16 {
     port
 }
 
+/// A template for the in-process broker on `port`; the provider sets each
+/// connection's client id.
 fn options(port: u16) -> MqttOptions {
     MqttOptions::new("template", "127.0.0.1", port)
 }
 
+/// A default provider on a broker of its own.
 async fn provider() -> MqttProvider {
-    let port = broker();
+    provider_on(broker()).await
+}
+
+/// A default provider on the broker at `port`.
+async fn provider_on(port: u16) -> MqttProvider {
+    provider_with(port, MqttConfig::default()).await
+}
+
+/// Connects with `config`, retrying for about 2.5s while the broker thread starts listening.
+async fn provider_with(port: u16, config: MqttConfig) -> MqttProvider {
     let mut last = None;
     for _ in 0..50 {
-        match MqttProvider::connect(options(port), MqttConfig::default()).await {
+        match MqttProvider::connect(options(port), config.clone()).await {
             Ok(provider) => return provider,
             Err(error) => last = Some(error),
         }
@@ -90,6 +102,7 @@ async fn provider() -> MqttProvider {
     panic!("broker never came up: {last:?}");
 }
 
+/// Declares a stream over `subjects` and binds a manager to it.
 async fn declare(streams: &MqttProvider, subjects: &[&str]) -> Arc<dyn Manager> {
     let stream = streams
         .create(Stream {
@@ -102,6 +115,7 @@ async fn declare(streams: &MqttProvider, subjects: &[&str]) -> Arc<dyn Manager> 
     streams.bind(&stream.id).await.expect("bind")
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -110,6 +124,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> streams::Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -117,6 +132,7 @@ async fn next(subscription: &mut Subscription) -> streams::Message {
         .expect("subscription ended before a message arrived")
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next_delivery(deliveries: &mut Deliveries) -> streams::Delivery {
     timeout(WITHIN, deliveries.next())
         .await
@@ -452,6 +468,46 @@ async fn publish_batch_publishes_each() {
     ));
 }
 
+/// Publishes on one topic, sent concurrently over several connections, reach
+/// a subscriber in the order they were sent: the topic takes one connection.
+#[tokio::test]
+async fn concurrent_publishes_on_a_topic_keep_their_order_over_several_connections() {
+    let config = MqttConfig {
+        publish_connections: 4,
+        ..MqttConfig::default()
+    };
+    let streams = provider_with(broker(), config).await;
+    let manager = declare(&streams, &[SUBJECT]).await;
+    let mut subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+
+    const COUNT: usize = 200;
+    let sent: Vec<String> = (0..COUNT).map(|n| format!("m{n:04}")).collect();
+    // join_all polls in order, so each publish is handed to its connection
+    // before the next, and none waits for the one before it to be acked.
+    let opts: Vec<Options> = sent
+        .iter()
+        .map(|id| Options::default().with_id(id))
+        .collect();
+    let outcomes = futures::future::join_all(
+        sent.iter()
+            .zip(&opts)
+            .map(|(id, opts)| manager.publish(SUBJECT, event(id, ""), opts)),
+    )
+    .await;
+    for outcome in outcomes {
+        outcome.unwrap();
+    }
+    let mut received = Vec::with_capacity(COUNT);
+    for _ in 0..COUNT {
+        received.push(next(&mut subscription).await.id().to_owned());
+    }
+    assert_eq!(received, sent);
+    streams.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn publish_rejects_an_undeclared_subject() {
     let streams = provider().await;
@@ -510,5 +566,366 @@ async fn connect_rejects_an_empty_address() {
         MqttProvider::connect(options, MqttConfig::default())
             .await
             .is_err()
+    );
+}
+
+// Headers, expiry, retain and delayed nak.
+
+/// A raw MQTT 5 client subscribed to `filter`, reading the wire as another
+/// tool on the broker would.
+async fn raw(port: u16, filter: &str) -> (rumqttc::v5::AsyncClient, rumqttc::v5::EventLoop) {
+    use rumqttc::v5::{Event as Ev, Incoming, mqttbytes::QoS};
+    let options = MqttOptions::new(format!("raw-{}", ulid_ish()), "127.0.0.1", port);
+    let (client, mut events) = rumqttc::v5::AsyncClient::new(options, 16);
+    client.subscribe(filter, QoS::AtLeastOnce).await.unwrap();
+    loop {
+        if let Ev::Incoming(Incoming::SubAck(_)) =
+            timeout(WITHIN, events.poll()).await.unwrap().unwrap()
+        {
+            return (client, events);
+        }
+    }
+}
+
+/// Nanoseconds since the epoch: unique enough for a raw client's id.
+fn ulid_ish() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+}
+
+/// The next PUBLISH the raw client receives, skipping other packets; each
+/// poll must arrive within [`WITHIN`].
+async fn raw_next(events: &mut rumqttc::v5::EventLoop) -> rumqttc::v5::mqttbytes::v5::Publish {
+    use rumqttc::v5::{Event as Ev, Incoming};
+    loop {
+        if let Ev::Incoming(Incoming::Publish(publish)) =
+            timeout(WITHIN, events.poll()).await.unwrap().unwrap()
+        {
+            return publish;
+        }
+    }
+}
+
+/// Creates `stream` as given and binds a manager, returning the assigned id with it.
+async fn declare_with(streams: &MqttProvider, stream: Stream) -> (String, Arc<dyn Manager>) {
+    let stream = streams.create(stream).await.expect("create");
+    let manager = streams.bind(&stream.id).await.expect("bind");
+    (stream.id, manager)
+}
+
+#[tokio::test]
+async fn headers_travel_as_user_properties() {
+    let port = broker();
+    let streams = provider_on(port).await;
+    let (id, manager) = declare_with(
+        &streams,
+        Stream::named("headers")
+            .subject(SUBJECT)
+            .header("lang", "rust")
+            .header("site", "plant-3"),
+    )
+    .await;
+    let (_raw, mut wire) = raw(port, &format!("{id}/{SUBJECT}")).await;
+    let mut subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+
+    let opts = Options::default()
+        .header("site", "plant-4")
+        .header("traceparent", "00-ab");
+    let sent = manager
+        .publish(SUBJECT, event("ada", "created"), &opts)
+        .await
+        .unwrap();
+
+    let message = next(&mut subscription).await;
+    assert_eq!(message.id(), sent);
+    assert_eq!(
+        message.headers().get("lang"),
+        Some("rust"),
+        "stream default"
+    );
+    assert_eq!(
+        message.headers().get("site"),
+        Some("plant-4"),
+        "publish wins"
+    );
+    assert_eq!(message.headers().get("traceparent"), Some("00-ab"));
+    assert_eq!(message.headers().len(), 3);
+
+    // On the wire: user properties, and a payload a Go reader still reads,
+    // a version-1 frame with nothing of the headers in it.
+    let publish = raw_next(&mut wire).await;
+    let properties = publish.properties.expect("user properties");
+    assert_eq!(
+        properties.user_properties,
+        vec![
+            ("lang".to_owned(), "rust".to_owned()),
+            ("site".to_owned(), "plant-4".to_owned()),
+            ("traceparent".to_owned(), "00-ab".to_owned()),
+        ]
+    );
+    assert_eq!(&publish.payload[..2], &[0xB7, 1], "a version-1 frame");
+    let unframed =
+        streams::provider::unpack(&streams::Registry::new(), SUBJECT, publish.payload).unwrap();
+    assert!(
+        unframed.headers().is_empty(),
+        "no headers inside the payload"
+    );
+}
+
+#[tokio::test]
+async fn a_message_without_headers_is_what_runtime_go_sends() {
+    let port = broker();
+    let streams = provider_on(port).await;
+    let (id, manager) = declare_with(&streams, Stream::named("plain").subject(SUBJECT)).await;
+    let (_raw, mut wire) = raw(port, &format!("{id}/{SUBJECT}")).await;
+    let mut subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    manager
+        .publish(SUBJECT, event("go", ""), &Options::default())
+        .await
+        .unwrap();
+    assert!(next(&mut subscription).await.headers().is_empty());
+    let publish = raw_next(&mut wire).await;
+    assert!(
+        publish
+            .properties
+            .is_none_or(|p| p.user_properties.is_empty() && p.message_expiry_interval.is_none()),
+        "no properties on a header-less publish"
+    );
+
+    // And a message another MQTT 5 client sends, with user properties of
+    // its own, arrives carrying them.
+    let (raw_client, mut raw_events) = raw(port, "unused/topic").await;
+    tokio::spawn(async move { while raw_events.poll().await.is_ok() {} });
+    let frame = streams::provider::pack("from-go", &event("go", ""));
+    raw_client
+        .publish_with_properties(
+            format!("{id}/{SUBJECT}"),
+            rumqttc::v5::mqttbytes::QoS::AtLeastOnce,
+            false,
+            frame,
+            rumqttc::v5::mqttbytes::v5::PublishProperties {
+                user_properties: vec![("lang".into(), "go".into())],
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let message = next(&mut subscription).await;
+    assert_eq!(message.id(), "from-go");
+    assert_eq!(message.headers().get("lang"), Some("go"));
+}
+
+#[tokio::test]
+async fn a_batch_carries_the_headers_on_every_message() {
+    let streams = provider().await;
+    let (_, manager) = declare_with(
+        &streams,
+        Stream::named("batch")
+            .subject(SUBJECT)
+            .header("lang", "rust"),
+    )
+    .await;
+    let batch = as_batch(manager.as_ref()).unwrap();
+    let mut subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    let ids = batch
+        .publish_batch(
+            SUBJECT,
+            vec![event("a", ""), event("b", "")],
+            &Options::default().header("n", "1"),
+        )
+        .await
+        .unwrap();
+    for id in &ids {
+        let message = next(&mut subscription).await;
+        assert_eq!(message.id(), id);
+        assert_eq!(message.headers().get("lang"), Some("rust"));
+        assert_eq!(message.headers().get("n"), Some("1"));
+    }
+}
+
+#[tokio::test]
+async fn headers_survive_a_redelivery() {
+    let streams = provider().await;
+    let (_, manager) = declare_with(
+        &streams,
+        Stream::named("durable")
+            .subject(SUBJECT)
+            .header("lang", "rust"),
+    )
+    .await;
+    let durable = as_durable(manager.as_ref()).unwrap();
+    let mut first = durable
+        .consume(SUBJECT, "headers", &Options::default())
+        .await
+        .unwrap();
+    manager
+        .publish(
+            SUBJECT,
+            event("a", ""),
+            &Options::default().header("try", "1"),
+        )
+        .await
+        .unwrap();
+    let delivery = next_delivery(&mut first).await;
+    assert_eq!(delivery.headers().get("try"), Some("1"));
+    // Not acknowledged: the session keeps it and hands it back on resume.
+    assert!(!delivery.can_delay_redelivery());
+    delivery.nak().await.unwrap();
+    drop(first);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut again = durable
+        .consume(SUBJECT, "headers", &Options::default())
+        .await
+        .unwrap();
+    let redelivered = next_delivery(&mut again).await;
+    assert_eq!(redelivered.headers().get("lang"), Some("rust"));
+    assert_eq!(redelivered.headers().get("try"), Some("1"));
+    redelivered.ack().await.unwrap();
+}
+
+#[tokio::test]
+async fn delayed_nak_is_refused_by_name() {
+    let streams = provider().await;
+    let manager = declare(&streams, &[SUBJECT]).await;
+    let durable = as_durable(manager.as_ref()).unwrap();
+    let mut deliveries = durable
+        .consume(SUBJECT, "delay", &Options::default())
+        .await
+        .unwrap();
+    manager
+        .publish(SUBJECT, event("a", ""), &Options::default())
+        .await
+        .unwrap();
+    let delivery = next_delivery(&mut deliveries).await;
+    assert!(!delivery.can_delay_redelivery());
+    match delivery.nak_after(Duration::from_secs(5)).await {
+        Err(StreamError::Unsupported(why)) => {
+            assert!(why.contains("no negative acknowledgement"), "{why}")
+        }
+        other => panic!("nak_after: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn invalid_headers_are_refused_at_create_update_and_publish() {
+    let streams = provider().await;
+    let error = streams
+        .create(
+            Stream::named("bad")
+                .subject(SUBJECT)
+                .header("has space", "x"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+
+    let (id, manager) = declare_with(&streams, Stream::named("good").subject(SUBJECT)).await;
+    let error = streams
+        .update(
+            &id,
+            Stream::named("good")
+                .subject(SUBJECT)
+                .header("k", "two\nlines"),
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+
+    for opts in [
+        Options::default().header("", "x"),
+        Options::default().header("a:b", "x"),
+        Options::default().header("k", "v".repeat(64 * 1024)),
+    ] {
+        let error = manager
+            .publish(SUBJECT, event("", ""), &opts)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+        assert!(error.is_settled());
+        let error = as_batch(manager.as_ref())
+            .unwrap()
+            .publish_batch(SUBJECT, vec![event("", "")], &opts)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+    }
+}
+
+#[tokio::test]
+async fn expiry_is_the_message_expiry_interval() {
+    let port = broker();
+    let streams = provider_on(port).await;
+    let (id, manager) = declare_with(&streams, Stream::named("expiry").subject(SUBJECT)).await;
+    let (_raw, mut wire) = raw(port, &format!("{id}/{SUBJECT}")).await;
+    manager
+        .publish(
+            SUBJECT,
+            event("", ""),
+            &Options::default().with_expiry(Duration::from_millis(1500)),
+        )
+        .await
+        .unwrap();
+    let publish = raw_next(&mut wire).await;
+    let interval = publish
+        .properties
+        .and_then(|p| p.message_expiry_interval)
+        .expect("an expiry interval");
+    // Rounded up to whole seconds; a broker forwarding it may count down
+    // the time it held the message.
+    assert!((1..=2).contains(&interval), "{interval}");
+}
+
+#[tokio::test]
+async fn a_retained_message_reaches_a_later_subscriber_and_can_be_cleared() {
+    let streams = provider().await;
+    let (id, manager) = declare_with(&streams, Stream::named("retain").subject(SUBJECT)).await;
+    let sent = manager
+        .publish(
+            SUBJECT,
+            event("last", "value"),
+            &Options::default().with_retain().header("lang", "rust"),
+        )
+        .await
+        .unwrap();
+
+    // Subscribed after the publish, and still handed it, decoded.
+    let mut late = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    let message = next(&mut late).await;
+    assert_eq!(message.id(), sent);
+    assert_eq!(message.json::<Event>().unwrap().user, "last");
+    assert_eq!(message.headers().get("lang"), Some("rust"));
+
+    // Cleared: the empty retained publish reaches the live subscriber and
+    // is skipped, and a subscriber joining later gets nothing.
+    streams.clear_retained(&id, SUBJECT).await.unwrap();
+    let after = manager
+        .publish(SUBJECT, event("next", ""), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(next(&mut late).await.id(), after, "the clear was skipped");
+    let mut later = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    assert!(
+        timeout(Duration::from_millis(500), later.next())
+            .await
+            .is_err(),
+        "nothing is retained after the clear"
     );
 }

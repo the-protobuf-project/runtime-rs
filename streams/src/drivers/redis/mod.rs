@@ -65,12 +65,52 @@
 //! must run with `--notify-keyspace-events Ex`. Without it, scheduled messages
 //! never fire.
 //!
+//! # Headers
+//!
+//! A message's [`Headers`](crate::Headers) (the stream's defaults with the
+//! publish's own on top) travel where each mode can carry them:
+//!
+//! - **Durable** (Redis Streams): as fields of the entry beside `msg`, header
+//!   `lang` as the field `h:lang`, so `XRANGE` and any other Redis client sees
+//!   them. The `msg` frame stays version 1, exactly what runtime-go writes. A
+//!   `:` is refused in a header key, so `h:<key>` never collides with the
+//!   driver's own `msg` and `meta` fields. Every delivery reads them back, a
+//!   reclaimed one included.
+//! - **Pub/sub and scheduled**: inside the frame, as version 2 of
+//!   [`provider::pack_with`](crate::provider::pack_with), because a PUBLISH or
+//!   a string key has nowhere else to put them. A message without headers is
+//!   still a version-1 frame, which runtime-go reads; a Go reader refuses a
+//!   version-2 frame with an error naming the version rather than misreading
+//!   it.
+//!
+//! A stream's default headers are stored in its metadata, and checked by
+//! [`Streams::create`](crate::Streams::create) and
+//! [`Streams::update`](crate::Streams::update) so a bad default fails there.
+//!
+//! # Expiry, retain, and delayed redelivery
+//!
+//! [`Options::expires`](crate::Options::expires) and
+//! [`Options::retain`](crate::Options::retain) are refused with
+//! [`StreamError::Unsupported`] in every mode: Redis has no per-entry expiry
+//! in a stream and pub/sub holds nothing to expire, and none of the modes
+//! keeps a last value per subject.
+//!
+//! A durable [`Delivery::nak_after`](crate::Delivery::nak_after) is real: the
+//! entry stays pending and its idle time is set back (XCLAIM to itself with
+//! `IDLE` and `JUSTID`, which leaves the delivery count alone) so that the
+//! group's reclaim, which takes entries idle for
+//! [`RedisConfig::reclaim_after`], reaches it only once the delay has passed.
+//! Redis cannot set an idle time into the future, so the longest delay is
+//! `reclaim_after`; a longer one is refused by name, and with reclaiming off
+//! (`reclaim_after` zero) there is no delayed redelivery at all.
+//! The delay is held by the server and survives a restart.
+//!
 //! # Interoperating with Go
 //!
 //! Keys, fields, and channels are spelled as runtime-go spells them and every
-//! payload is framed with [`provider::pack`](crate::provider::pack), so a Go
-//! service and a Rust one under the same prefix share streams, subjects, and
-//! consumer groups.
+//! payload without headers is framed with
+//! [`provider::pack`](crate::provider::pack), so a Go service and a Rust one
+//! under the same prefix share streams, subjects, and consumer groups.
 
 mod durable;
 mod keys;
@@ -85,7 +125,7 @@ use redis::{
 };
 use tokio::sync::OnceCell;
 
-use crate::{Registry, Result, StreamError, provider::Metrics};
+use crate::{Options, Registry, Result, StreamError, provider::Metrics};
 
 /// The client crate this provider is built on, so callers name the same
 /// version of [`redis::Client`] the constructors take.
@@ -165,6 +205,8 @@ pub struct RedisConfig {
 }
 
 impl Default for RedisConfig {
+    /// No prefix, the client's own database, no length cap, the default reclaim
+    /// interval, and confirmed acks.
     fn default() -> Self {
         Self {
             prefix: String::new(),
@@ -233,6 +275,8 @@ impl RedisProvider {
         Self::build(client, config, Kind::Durable)
     }
 
+    /// The shared state for every constructor. The database is taken from the
+    /// client's connection info unless the config names one.
     fn build(client: redis::Client, config: RedisConfig, kind: Kind) -> Self {
         let database = config
             .database
@@ -383,6 +427,31 @@ impl Inner {
     }
 }
 
+/// Refuses the publish options no Redis mode can honour, by name.
+///
+/// An expiry needs something that holds the message until it is delivered and
+/// drops it when it is not: pub/sub holds nothing (a message reaches whoever is
+/// subscribed at once, or nobody), a scheduled message fires on its own timer,
+/// and Redis has no per-entry expiry inside a stream, only trimming by length
+/// or id, which would drop other messages with it. Retain needs a last value
+/// per subject, which none of the three keeps.
+pub(super) fn refuse_unhonoured(opts: &Options) -> Result<()> {
+    if let Some(expires) = opts.expiry() {
+        return Err(StreamError::Unsupported(format!(
+            "Redis cannot expire one message ({expires:?}): pub/sub holds nothing to \
+             expire, and a Redis stream has no per-entry expiry, only trimming"
+        )));
+    }
+    if opts.retain {
+        return Err(StreamError::Unsupported(
+            "Redis keeps no last value per subject, so a message cannot be retained for \
+             later subscribers; read a durable stream from Position::Earliest instead"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Wraps a Redis failure with what was being attempted.
 fn fail(context: impl AsRef<str>) -> impl FnOnce(redis::RedisError) -> StreamError {
     move |error| StreamError::internal(context.as_ref(), error)
@@ -394,6 +463,7 @@ mod tests {
 
     use super::*;
 
+    /// A Redis error wrapping an I/O error of `kind`, as a dropped connection gives.
     fn io(kind: io::ErrorKind) -> RedisError {
         RedisError::from(io::Error::from(kind))
     }

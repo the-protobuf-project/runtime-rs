@@ -15,8 +15,8 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use futures::StreamExt;
 use streams::{
-    Deliveries, Delivery, Manager, Message, Options, Payload, Position, Stream, StreamError,
-    Streams, Subscription, as_batch, as_durable, as_positioned,
+    Deliveries, Delivery, Headers, Manager, Message, Options, Payload, Position, Stream,
+    StreamError, Streams, Subscription, as_batch, as_durable, as_positioned,
     drivers::redis::{RedisConfig, RedisProvider, redis},
 };
 
@@ -33,6 +33,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -41,6 +42,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The plaintext server, `REDIS_TEST_ADDR` or the compose default.
 fn addr() -> String {
     std::env::var("REDIS_TEST_ADDR").unwrap_or_else(|_| "127.0.0.1:16380".into())
 }
@@ -68,6 +70,8 @@ async fn client() -> redis::Client {
     client
 }
 
+/// A fresh key prefix per call, so tests share no keys, with [`QUICK_RECLAIM`]
+/// so a redelivery happens within a test.
 fn config() -> RedisConfig {
     RedisConfig {
         prefix: format!("t{}", streams::provider::new_id()),
@@ -76,18 +80,23 @@ fn config() -> RedisConfig {
     }
 }
 
+/// A pub/sub provider under a fresh prefix.
 async fn immediate() -> RedisProvider {
     RedisProvider::new(client().await, config())
 }
 
+/// A keyspace-expiry provider under a fresh prefix; [`client`] turns on the
+/// notifications it needs.
 async fn scheduled() -> RedisProvider {
     RedisProvider::scheduled(client().await, config())
 }
 
+/// A Streams provider with `config`.
 async fn durable_with(config: RedisConfig) -> RedisProvider {
     RedisProvider::durable(client().await, config)
 }
 
+/// A Streams provider under a fresh prefix.
 async fn durable() -> RedisProvider {
     durable_with(config()).await
 }
@@ -106,6 +115,7 @@ async fn bind(provider: &RedisProvider, subjects: &[&str]) -> (Stream, Arc<dyn M
     (stream, manager)
 }
 
+/// The next message within `within`, panicking on a timeout or an ended subscription.
 async fn recv(messages: &mut Subscription, within: Duration) -> Message {
     tokio::time::timeout(within, messages.next())
         .await
@@ -113,6 +123,7 @@ async fn recv(messages: &mut Subscription, within: Duration) -> Message {
         .expect("the subscription ended before a message arrived")
 }
 
+/// The next delivery within `within`, panicking on a timeout or an ended consumer.
 async fn recv_delivery(deliveries: &mut Deliveries, within: Duration) -> Delivery {
     tokio::time::timeout(within, deliveries.next())
         .await
@@ -130,6 +141,7 @@ where
     }
 }
 
+/// Runs `cmd` on a connection of its own, to look at the server behind the provider.
 async fn command<T: redis::FromRedisValue>(cmd: &redis::Cmd) -> T {
     let mut conn = client()
         .await
@@ -455,6 +467,7 @@ async fn delivery_survives_a_late_reader() {
 
 // --- scheduled -------------------------------------------------------------
 
+/// Options scheduling delivery `ms` milliseconds from now, through the TTL.
 fn after(ms: u64) -> Options {
     Options::default().with_ttl(Duration::from_millis(ms))
 }
@@ -736,6 +749,43 @@ async fn a_consumer_resumes_where_the_name_left_off() {
     assert_eq!(resumed.json::<Event>().unwrap().user, "second");
 }
 
+/// A consumer dropped while its read is blocked must not strand a message
+/// published in that moment: the read it abandoned would otherwise leave the
+/// entry pending with a consumer that no longer exists until the reclaim
+/// interval (30 s here) passes.
+#[tokio::test]
+async fn a_message_published_as_a_consumer_drops_is_not_stranded() {
+    let provider = durable_with(RedisConfig {
+        reclaim_after: Duration::from_secs(30),
+        ..config()
+    })
+    .await;
+    for round in 0..20 {
+        let (_, m) = bind(&provider, &[SUBJECT]).await;
+        let d = as_durable(m.as_ref()).unwrap();
+        let blocked = d
+            .consume(SUBJECT, "workers", &Options::default())
+            .await
+            .unwrap();
+        // Let the loop reach its blocking read before the reader goes.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        drop(blocked);
+        m.publish(SUBJECT, event("racing", ""), &Options::default())
+            .await
+            .unwrap();
+        let mut next = d
+            .consume(SUBJECT, "workers", &Options::default())
+            .await
+            .unwrap();
+        let got = tokio::time::timeout(Duration::from_secs(5), next.next())
+            .await
+            .unwrap_or_else(|_| panic!("round {round}: the message was stranded"))
+            .expect("the consumer ended");
+        assert_eq!(got.json::<Event>().unwrap().user, "racing");
+        got.ack().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn consume_from_earliest_replays_history() {
     let (_, m) = bind(&durable().await, &[SUBJECT]).await;
@@ -915,4 +965,387 @@ async fn max_len_caps_the_log() {
         command(redis::cmd("KEYS").arg(format!("*durable:s:{}:{SUBJECT}", stream.id))).await;
     let len: u64 = command(redis::cmd("XLEN").arg(&keys[0])).await;
     assert!(len < 1000, "the log kept {len} entries");
+}
+
+// --- headers, expiry, retain, delayed nak ------------------------------------
+
+/// Headers from literal pairs, for comparing with what arrives.
+fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
+    pairs.into_iter().collect()
+}
+
+/// A stream on SUBJECT stamping `lang` and `site` on everything.
+fn with_defaults() -> Stream {
+    Stream::named("headers")
+        .subject(SUBJECT)
+        .header("lang", "rust")
+        .header("site", "plant-3")
+}
+
+/// Creates `stream` as given and binds a manager to it.
+async fn bind_stream(provider: &RedisProvider, stream: Stream) -> (Stream, Arc<dyn Manager>) {
+    let stream = provider.create(stream).await.unwrap();
+    let manager = provider.bind(&stream.id).await.unwrap();
+    (stream, manager)
+}
+
+/// What a publish that overrides `site` and adds `trace` should arrive with.
+fn overridden() -> Headers {
+    headers([("lang", "rust"), ("site", "plant-9"), ("trace", "t-1")])
+}
+
+/// A publish overriding `site` and adding `trace` on top of the stream's defaults.
+fn override_opts() -> Options {
+    Options::default()
+        .header("site", "plant-9")
+        .header("trace", "t-1")
+}
+
+#[tokio::test]
+async fn pubsub_carries_stream_and_publish_headers() {
+    let (_, m) = bind_stream(&immediate().await, with_defaults()).await;
+    let mut messages = m.subscribe(SUBJECT, &Options::default()).await.unwrap();
+
+    m.publish(SUBJECT, event("a", ""), &Options::default())
+        .await
+        .unwrap();
+    let got = recv(&mut messages, WITHIN).await;
+    assert_eq!(
+        got.headers(),
+        &headers([("lang", "rust"), ("site", "plant-3")])
+    );
+    assert_eq!(got.json::<Event>().unwrap().user, "a");
+
+    m.publish(SUBJECT, event("b", ""), &override_opts())
+        .await
+        .unwrap();
+    assert_eq!(recv(&mut messages, WITHIN).await.headers(), &overridden());
+
+    let batch = as_batch(m.as_ref()).unwrap();
+    batch
+        .publish_batch(
+            SUBJECT,
+            vec![event("c", ""), event("d", "")],
+            &override_opts(),
+        )
+        .await
+        .unwrap();
+    for _ in 0..2 {
+        assert_eq!(recv(&mut messages, WITHIN).await.headers(), &overridden());
+    }
+}
+
+/// A message without headers is the version-1 frame runtime-go writes and
+/// reads, byte for byte; one with headers is version 2.
+#[tokio::test]
+async fn pubsub_frames_stay_version_1_without_headers() {
+    let (stream, m) = bind(&immediate().await, &[SUBJECT]).await;
+    let channel = config_channel(&m, &stream).await;
+    let mut raw = client().await.get_async_pubsub().await.unwrap();
+    raw.subscribe(&channel).await.unwrap();
+    let mut raw = raw.into_on_message();
+
+    let payload = event("go", "");
+    let id = m
+        .publish(SUBJECT, payload.clone(), &Options::default())
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(WITHIN, raw.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .get_payload_bytes()
+        .to_vec();
+    assert_eq!(frame[1], 1, "a header-less frame must stay version 1");
+    assert_eq!(frame, streams::provider::pack(&id, &payload));
+
+    m.publish(SUBJECT, payload, &Options::default().header("lang", "rust"))
+        .await
+        .unwrap();
+    let frame = tokio::time::timeout(WITHIN, raw.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .get_payload_bytes()
+        .to_vec();
+    assert_eq!(frame[1], 2);
+}
+
+#[tokio::test]
+async fn scheduled_carries_headers() {
+    let (_, m) = bind_stream(&scheduled().await, with_defaults()).await;
+    let mut messages = m.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    m.publish(
+        SUBJECT,
+        event("later", ""),
+        &override_opts().with_ttl(Duration::from_millis(200)),
+    )
+    .await
+    .unwrap();
+    let got = recv(&mut messages, WITHIN).await;
+    assert_eq!(got.headers(), &overridden());
+    assert_eq!(got.json::<Event>().unwrap().user, "later");
+}
+
+/// Durable headers are fields of the entry, beside an unchanged version-1
+/// `msg` frame, and every delivery reads them back, a redelivery included.
+#[tokio::test]
+async fn durable_headers_are_entry_fields() {
+    let config = config();
+    let prefix = config.prefix.clone();
+    let (stream, m) = bind_stream(&durable_with(config).await, with_defaults()).await;
+    let d = as_durable(m.as_ref()).unwrap();
+    let mut tail = m.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    let mut deliveries = d
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    let id = m
+        .publish(SUBJECT, event("d", ""), &override_opts())
+        .await
+        .unwrap();
+
+    let key = format!("{prefix}:durable:s:{}:{SUBJECT}", stream.id);
+    let entries: redis::streams::StreamRangeReply =
+        command(redis::cmd("XRANGE").arg(&key).arg("-").arg("+")).await;
+    let entry = &entries.ids[0];
+    let mut fields: Vec<&str> = entry.map.keys().map(String::as_str).collect();
+    fields.sort_unstable();
+    assert_eq!(fields, ["h:lang", "h:site", "h:trace", "msg"]);
+    assert_eq!(entry.get::<String>("h:site").as_deref(), Some("plant-9"));
+    let frame: Vec<u8> = entry.get("msg").unwrap();
+    assert_eq!(frame[1], 1, "the payload frame stays the one Go reads");
+
+    assert_eq!(recv(&mut tail, WITHIN).await.headers(), &overridden());
+
+    let first = recv_delivery(&mut deliveries, WITHIN).await;
+    assert_eq!(first.id(), id);
+    assert_eq!(first.headers(), &overridden());
+    first.nak().await.unwrap();
+    let again = recv_delivery(&mut deliveries, Duration::from_secs(10)).await;
+    assert_eq!(again.id(), id);
+    assert!(again.attempt() >= 2);
+    assert_eq!(
+        again.headers(),
+        &overridden(),
+        "a redelivery lost its headers"
+    );
+    again.ack().await.unwrap();
+
+    let batch = as_batch(m.as_ref()).unwrap();
+    batch
+        .publish_batch(SUBJECT, vec![event("e", "")], &Options::default())
+        .await
+        .unwrap();
+    let next = recv_delivery(&mut deliveries, WITHIN).await;
+    assert_eq!(
+        next.headers(),
+        &headers([("lang", "rust"), ("site", "plant-3")])
+    );
+    next.ack().await.unwrap();
+}
+
+/// Stream headers are stored with the metadata; a stream without them is
+/// stored exactly as runtime-go stores it, with no `headers` field.
+#[tokio::test]
+async fn stream_headers_are_stored_and_omitted_when_empty() {
+    for provider in [immediate().await, scheduled().await, durable().await] {
+        let created = provider.create(with_defaults()).await.unwrap();
+        let read = provider.get(&created.id).await.unwrap();
+        assert_eq!(
+            read.headers,
+            headers([("lang", "rust"), ("site", "plant-3")])
+        );
+        let updated = provider
+            .update(&created.id, with_defaults().header("team", "billing"))
+            .await
+            .unwrap();
+        assert_eq!(provider.get(&created.id).await.unwrap(), updated);
+        assert_eq!(updated.headers.get("team"), Some("billing"));
+        provider.delete(&created.id).await.unwrap();
+    }
+
+    let config = config();
+    let prefix = config.prefix.clone();
+    let provider = durable_with(config).await;
+    let (stream, _) = bind(&provider, &[SUBJECT]).await;
+    let meta: redis::streams::StreamRangeReply = command(
+        redis::cmd("XRANGE")
+            .arg(format!("{prefix}:durable:meta:{}", stream.id))
+            .arg("-")
+            .arg("+"),
+    )
+    .await;
+    let json: String = meta.ids[0].get("meta").unwrap();
+    assert!(!json.contains("headers"), "{json}");
+}
+
+/// Asserts `result` is [`StreamError::InvalidHeader`].
+fn invalid<T: std::fmt::Debug>(result: streams::Result<T>) {
+    assert!(
+        matches!(result, Err(StreamError::InvalidHeader(_))),
+        "expected InvalidHeader, got {result:?}"
+    );
+}
+
+/// Asserts `result` is [`StreamError::Unsupported`].
+fn unsupported<T: std::fmt::Debug>(result: streams::Result<T>) {
+    assert!(
+        matches!(result, Err(StreamError::Unsupported(_))),
+        "expected Unsupported, got {result:?}"
+    );
+}
+
+/// The three modes, each with the publish options it otherwise accepts: a
+/// scheduled stream needs a TTL.
+async fn every_mode() -> Vec<(RedisProvider, Options)> {
+    vec![
+        (immediate().await, Options::default()),
+        (scheduled().await, after(200)),
+        (durable().await, Options::default()),
+    ]
+}
+
+#[tokio::test]
+async fn invalid_headers_are_refused_where_they_are_set() {
+    for (provider, base) in every_mode().await {
+        invalid(
+            provider
+                .create(Stream::named("x").subject(SUBJECT).header("a:b", "1"))
+                .await,
+        );
+        invalid(
+            provider
+                .create(Stream::named("x").subject(SUBJECT).header("", "1"))
+                .await,
+        );
+        let (stream, m) = bind(&provider, &[SUBJECT]).await;
+        invalid(
+            provider
+                .update(&stream.id, Stream::named("x").header("bad key", "1"))
+                .await,
+        );
+        let bad = base.clone().header("ok", "line\nbreak");
+        invalid(m.publish(SUBJECT, event("", ""), &bad).await);
+        invalid(
+            as_batch(m.as_ref())
+                .unwrap()
+                .publish_batch(SUBJECT, vec![event("", "")], &bad)
+                .await,
+        );
+        // Nothing reserved: a header may even be called `msg` or `meta`.
+        m.publish(SUBJECT, event("", ""), &base.clone().header("msg", "fine"))
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn expiry_and_retain_are_refused_in_every_mode() {
+    for (provider, base) in every_mode().await {
+        let (_, m) = bind(&provider, &[SUBJECT]).await;
+        let batch = as_batch(m.as_ref()).unwrap();
+        for opts in [
+            base.clone().with_expiry(Duration::from_secs(5)),
+            base.clone().with_retain(),
+        ] {
+            unsupported(m.publish(SUBJECT, event("", ""), &opts).await);
+            unsupported(
+                batch
+                    .publish_batch(SUBJECT, vec![event("", "")], &opts)
+                    .await,
+            );
+        }
+        // A zero expiry is no expiry, as a zero TTL is no TTL.
+        m.publish(
+            SUBJECT,
+            event("", ""),
+            &base.clone().with_expiry(Duration::ZERO),
+        )
+        .await
+        .unwrap();
+    }
+}
+
+/// A delayed nak holds the redelivery back for the delay and no longer: well
+/// before a plain nak's reclaim interval, never before the delay, and with the
+/// attempt count of one redelivery.
+#[tokio::test]
+async fn a_delayed_nak_waits_for_its_delay() {
+    let reclaim = Duration::from_secs(8);
+    let delay = Duration::from_millis(1500);
+    let provider = durable_with(RedisConfig {
+        reclaim_after: reclaim,
+        ..config()
+    })
+    .await;
+    let (_, m) = bind_stream(&provider, with_defaults()).await;
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    let id = m
+        .publish(SUBJECT, event("busy", ""), &Options::default())
+        .await
+        .unwrap();
+
+    let first = recv_delivery(&mut deliveries, WITHIN).await;
+    assert!(first.can_delay_redelivery());
+    let naked_at = tokio::time::Instant::now();
+    first.nak_after(delay).await.unwrap();
+
+    silent(&mut deliveries, delay - Duration::from_millis(100)).await;
+    let again = recv_delivery(&mut deliveries, WITHIN).await;
+    let waited = naked_at.elapsed();
+    assert_eq!(again.id(), id);
+    assert!(waited >= delay, "redelivered after {waited:?}");
+    assert!(
+        waited < reclaim - Duration::from_secs(2),
+        "redelivered after {waited:?}, no sooner than a plain nak"
+    );
+    assert_eq!(again.attempt(), 2);
+    assert_eq!(
+        again.headers(),
+        &headers([("lang", "rust"), ("site", "plant-3")])
+    );
+    again.ack().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_delayed_nak_beyond_the_reclaim_interval_is_refused() {
+    let (_, m) = bind(&durable().await, &[SUBJECT]).await;
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    m.publish(SUBJECT, event("", ""), &Options::default())
+        .await
+        .unwrap();
+    let first = recv_delivery(&mut deliveries, WITHIN).await;
+    unsupported(first.nak_after(QUICK_RECLAIM * 2).await);
+    // It stays pending and comes back as a plain nak's would.
+    let again = recv_delivery(&mut deliveries, WITHIN).await;
+    assert!(again.attempt() >= 2);
+    again.ack().await.unwrap();
+
+    // With reclaiming off, nothing would redeliver: no delayed nak at all.
+    let off = durable_with(RedisConfig {
+        reclaim_after: Duration::ZERO,
+        ..config()
+    })
+    .await;
+    let (_, m) = bind(&off, &[SUBJECT]).await;
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+    m.publish(SUBJECT, event("", ""), &Options::default())
+        .await
+        .unwrap();
+    let first = recv_delivery(&mut deliveries, WITHIN).await;
+    assert!(!first.can_delay_redelivery());
+    unsupported(first.nak_after(Duration::from_millis(10)).await);
 }

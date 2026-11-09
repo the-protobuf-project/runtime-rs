@@ -20,6 +20,7 @@ struct Reading {
     value: f64,
 }
 
+/// A JSON-encoded reading.
 fn reading(device: &str, value: f64) -> streams::Result<Payload> {
     Payload::json(&Reading {
         device: device.into(),
@@ -27,6 +28,7 @@ fn reading(device: &str, value: f64) -> streams::Result<Payload> {
     })
 }
 
+/// The next delivery, or an error after 15s or if the session's stream ends.
 async fn receive(deliveries: &mut Deliveries) -> Result<Delivery, Box<dyn std::error::Error>> {
     match tokio::time::timeout(Duration::from_secs(15), deliveries.next()).await {
         Ok(Some(delivery)) => Ok(delivery),
@@ -35,6 +37,8 @@ async fn receive(deliveries: &mut Deliveries) -> Result<Delivery, Box<dyn std::e
     }
 }
 
+/// Shows a named session keeping a message published while its consumer was
+/// offline, and that MQTT refuses positioned reads.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let host = std::env::var("MQTT_HOST").unwrap_or_else(|_| "127.0.0.1".into());

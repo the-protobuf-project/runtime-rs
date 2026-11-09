@@ -11,6 +11,8 @@ pub mod kafka;
 pub mod mqtt;
 #[cfg(feature = "nats")]
 pub mod nats;
+#[cfg(feature = "opcua")]
+pub mod opcua;
 #[cfg(feature = "rabbitmq")]
 pub mod rabbitmq;
 #[cfg(feature = "redis")]

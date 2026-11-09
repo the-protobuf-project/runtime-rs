@@ -21,6 +21,8 @@ use streams::{
 
 use super::{Conn, Error, env, unknown_profile};
 
+/// Pub/sub, or Streams when `durable`. `tls` (feature `tls`) prefixes keys
+/// `e2ebench` to stay inside the ACL user's key space.
 pub async fn connect(durable: bool, profile: &str, registry: Registry) -> Result<Conn, Error> {
     let (client, prefix) = match profile {
         "plain" => (

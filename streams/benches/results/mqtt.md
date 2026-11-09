@@ -112,3 +112,118 @@ so I ran it paced only up to 75k.
 - `cargo clippy -p tpp-streams --all-targets --features mqtt,protobuf,live-tests,tls -- -D warnings`: clean.
 - `rustfmt --edition 2024 --check` on every file I changed: clean.
 - `cargo tree -p tpp-streams --all-features -i aws-lc-rs`: no match.
+
+## Round 5: against the official tool
+
+The baseline is EMQX's open-source load tool, `emqx/emqtt-bench` 0.6.3, in a
+container reaching the plaintext Mosquitto (`docker/compose.mqtt.yaml`) at
+`host.docker.internal:11883`. It therefore crosses Docker Desktop's port
+forward just as the Rust driver does. The runs use MQTT 5 and 256-byte
+payloads. `streams/benches/native-baseline.sh mqtt` runs it, capped at 500k
+messages.
+
+**Steady state.** emqtt-bench prints each counter's rate once a second. The
+script drops the first sample (connecting and ramping up) and the last (a
+partial second), then reports the median of the rest. A QoS 0 run that ends in
+under three seconds has no steady state, so its best second is reported as
+"peak". The publish rate is `pub_succ` (PUBACKed), and delivery is `recv`.
+
+**What the tool can and cannot do.** At `-I 0` (unpaced), emqtt-bench keeps
+**one** QoS 1 publish outstanding per connection. Its `-F` in-flight option
+made no difference between 1 and 1000, both through the forward and inside
+Docker's network. Its QoS 1 rate is therefore set by its connection count,
+each connection waiting for its PUBACK. That is the shape of the harness's
+single-publish scenarios, where each publisher awaits one PUBACK. The tool
+cannot pipeline the way `publish_batch` does. Its QoS 0 runs are the only
+pipelined figure, and they serve as the broker's raw ceiling.
+
+Measured back to back with the driver runs below (round 2 of this session):
+
+| baseline (emqtt-bench, through the forward) | publish | delivery |
+|---|---|---|
+| (a) QoS 1, 1 publisher → 1 subscriber, 1 topic | 2.5k/s | 2.5k/s |
+| (b) QoS 1, 1000 publishers over 10 topics, 1 subscriber each | 45.6k/s | 45.1k/s |
+| (b) same, 512 / 2000 / 4000 publishers (other runs) | 20.7k / 39.7k / 50.2k | 20.9k / 41.0k / 50.5k |
+| (c) QoS 0, 1 → 1 (raw ceiling) | 200k/s | 105k/s |
+| (c) QoS 0, 10 publishers over 10 topics (raw ceiling) | 893k/s peak | 238k/s peak (366k in a quieter run) |
+
+(a) is pure round-trip latency: one message per round trip, about 0.4 ms.
+The tool's QoS 1 fanout plateaus at roughly 40–50k/s. At that point it uses
+about 2.7 cores, while Mosquitto runs at about half a core. The limit is the
+Erlang client, not the broker.
+
+Driver, unpaced, plaintext, 300k messages. Each pair was measured in the same
+minutes as the baseline. `before` is HEAD's driver, and `after` is this
+round's. Run 1 had heavy load from other agents and run 2 was calmer:
+
+| scenario | round 4 | before (run 1 / run 2) | after (run 1 / run 2) | after ÷ tool's (b) delivery |
+|---|---|---|---|---|
+| fanout, 512 publishers | 109k | 81–122k / 89–91k | 86–146k / 89–92k | **~2.0×** |
+| batch, 32 × 100 | 230k | 184–222k / 208–230k | 250–260k / 244–249k | **~5.4×** (≈ 100% of the QoS 0 10-publisher peak) |
+| durable, 512 publishers, 1 consumer | 84k | 82–144k / 86–90k | 128–145k / 86–99k | **~2.0×** |
+| group, 512 publishers, 2 per subject | — | 84–139k / 83k | 143–147k / 82–146k | **~1.8–3.2×** |
+
+Every run reports `ok`: nothing lost, duplicated or undecodable. Absolute
+figures drifted by 2× within the hour (one 500k fanout ran at 168k/s, and
+another at 82k/s minutes later). Only the same-minute comparisons count.
+
+### What changed
+
+1. **A pool of publishing connections** (`MqttConfig::publish_connections`,
+   `DEFAULT_PUBLISH_CONNECTIONS`). This round measured it at 4; the default was
+   then set to 1, because with more than one connection publishes sent
+   concurrently without awaiting can reach the broker out of order, and
+   Mosquitto's single thread is the limit anyway. Raise it for batch speed. After this round a review
+   changed the choice from taking the connections in turn to hashing the topic,
+   so each topic stays on one connection and keeps its order at any count;
+   concurrent publishes to a single subject therefore no longer spread over the
+   connections, and the batch gain measured here applies across subjects. Each connection keeps its own waiter table, event-loop task, and
+   the broker's Receive Maximum (1000), so a batch can have 4000 in flight
+   instead of 1000. A batch stays on one connection, in order. A publish still
+   returns only after its PUBACK, and nothing on the wire changed. With
+   `client_id` set, extra connections append `-1`, `-2`, and so on.
+   `MQTT_PUBLISH_CONNECTIONS` overrides the count in the bench target. Batch
+   gained 10–35%. Single publishes at 512 publishers are within noise when the
+   machine is calm. They are limited by round trips (512 in flight ÷ about
+   5 ms) and by Mosquitto's thread, not by one connection.
+2. **Receive path uses `provider::unpack_shared`**. A subscription to an
+   exact subject shares one `Arc<str>` subject with every message, where
+   before it allocated a `String` and then an `Arc` per message. Wildcard
+   subscriptions still build the subject from the topic.
+3. **Baseline script**: `mqtt()` in `native-baseline.sh`, as above.
+
+One thing I tried and did not adopt: `set_tcp_nodelay true` on Mosquitto. It
+took the tool's latency-bound (a) from about 1k to 2.5k/s in one A/B. It did
+not change the driver's 512-publisher fanout (64k vs 74k, 59k vs 63k,
+alternating), so the config is unchanged.
+
+### What limits it
+
+- **Mosquitto's single thread.** At about 90k/s QoS 1 fanout, `top` inside the
+  container shows it at 70–85% of one core: four packets per message, and the
+  forward on both sides of it. The driver process stays below 1.5 cores, and
+  its tokio workers are mostly parked. More publishers past 512 add latency,
+  not throughput (1000: 48k, 2000: 55k, in a loaded minute).
+- **Docker Desktop's forward** (`com.docker.backend` at 2.6 cores during a
+  loaded run). It is shared with every other agent's broker.
+- **The native tool is the weaker client here.** It cannot keep more than one
+  QoS 1 publish in flight per connection, so the 80% target is met by a wide
+  margin. The useful ceiling is its QoS 0 rate, which `batch` now matches.
+
+### Tests (this round)
+
+- `mqtt_e2e`, `STREAMS_E2E_RESTART=1`, strict: 10/10, three runs in a row.
+- `tests/mqtt.rs` (in-process rumqttd): 15/15. Driver unit tests: 6/6.
+  `examples/mqtt.rs` against the plaintext broker: ok.
+- `cargo clippy -p tpp-streams --all-targets --features mqtt,protobuf,live-tests,tls -- -D warnings`: clean.
+- `rustfmt --edition 2024 --check` on the changed files: clean.
+- `cargo tree -p tpp-streams --all-features -i aws-lc-rs`: no match.
+
+## Headers
+
+A header-less publish sends no PUBLISH properties, exactly what it sent before
+headers existed; the only extra work is merging two empty header maps. One
+check after the change, plaintext, unpaced, 200k messages, while other agents'
+brokers shared the Docker VM: fanout with 512 publishers 86.5k/s (the earlier
+same-hour range was 81–122k/s), batch of 100 212k/s (230k/s before). Both are
+ok with nothing lost, and both are within the run-to-run drift noted above.

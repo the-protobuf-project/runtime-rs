@@ -5,7 +5,7 @@
 //! travels in the frame so a message decodes the way it was written rather than
 //! the way the receiving program happens to be configured.
 
-use std::{borrow::Cow, collections::BTreeSet};
+use std::{borrow::Cow, collections::BTreeSet, sync::Arc};
 
 use bytes::Bytes;
 use serde::{Serialize, de::DeserializeOwned};
@@ -33,15 +33,18 @@ pub trait Codec<T>: Send + Sync {
 pub struct Json;
 
 impl<T: Serialize + DeserializeOwned> Codec<T> for Json {
+    /// Always `"json"`, the name a Go peer writes for the same encoding.
     fn name(&self) -> &'static str {
         "json"
     }
 
+    /// Serialises with `serde_json`; a failure is a [`StreamError::Codec`].
     fn encode(&self, value: &T) -> Result<Vec<u8>> {
         serde_json::to_vec(value)
             .map_err(|error| StreamError::Codec(format!("cannot encode value as JSON: {error}")))
     }
 
+    /// Bytes that are not valid JSON for `T` are a [`StreamError::Codec`].
     fn decode(&self, data: &[u8]) -> Result<T> {
         serde_json::from_slice(data)
             .map_err(|error| StreamError::Codec(format!("cannot decode message as JSON: {error}")))
@@ -55,14 +58,17 @@ pub struct Protobuf;
 
 #[cfg(feature = "protobuf")]
 impl<T: prost::Message + Default> Codec<T> for Protobuf {
+    /// Always `"protobuf"`, matching Go's `codec/protobuf` name.
     fn name(&self) -> &'static str {
         "protobuf"
     }
 
+    /// Infallible: prost encodes any message into a fresh buffer.
     fn encode(&self, value: &T) -> Result<Vec<u8>> {
         Ok(value.encode_to_vec())
     }
 
+    /// Bytes that do not parse as `T` are a [`StreamError::Codec`].
     fn decode(&self, data: &[u8]) -> Result<T> {
         T::decode(data).map_err(|error| {
             StreamError::Codec(format!("cannot decode message as protobuf: {error}"))
@@ -121,10 +127,13 @@ impl Payload {
 /// bytes nobody can read. JSON is always present.
 #[derive(Clone, Debug)]
 pub struct Registry {
-    names: BTreeSet<Cow<'static, str>>,
+    // Shared names, so a received message points at the registry's copy of
+    // its codec name instead of allocating one.
+    names: BTreeSet<Arc<str>>,
 }
 
 impl Default for Registry {
+    /// The same as [`Registry::new`]: JSON is always accepted.
     fn default() -> Self {
         Self::new()
     }
@@ -134,20 +143,26 @@ impl Registry {
     /// A registry accepting JSON only.
     pub fn new() -> Self {
         Self {
-            names: BTreeSet::from([Cow::Borrowed("json")]),
+            names: BTreeSet::from([Arc::from("json")]),
         }
     }
 
     /// Accepts frames written by a codec with this name as well.
     pub fn with(mut self, name: impl Into<Cow<'static, str>>) -> Self {
-        self.names.insert(name.into());
+        self.names.insert(Arc::from(name.into().as_ref()));
         self
     }
 
     /// Checks that a frame's codec is one this program can decode.
     pub fn lookup(&self, name: &str) -> Result<()> {
-        if self.names.contains(name) {
-            return Ok(());
+        self.resolve(name).map(|_| ())
+    }
+
+    /// The registry's shared copy of a codec name, or the refusal
+    /// [`Registry::lookup`] gives.
+    pub(crate) fn resolve(&self, name: &str) -> Result<Arc<str>> {
+        if let Some(found) = self.names.get(name) {
+            return Ok(found.clone());
         }
         Err(StreamError::Unsupported(format!(
             "this message was encoded with the {name:?} codec, which this program does not have; \

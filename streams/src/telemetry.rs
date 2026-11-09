@@ -45,6 +45,7 @@ pub fn with_telemetry_middleware(meter: Meter) -> Middleware {
 
 #[async_trait::async_trait]
 impl Publisher for TelemetryPublisher {
+    /// Records one count and one latency per publish, failures included.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let start = Instant::now();
         let result = self.next.publish(subject, payload, opts).await;

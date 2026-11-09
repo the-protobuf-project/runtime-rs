@@ -35,20 +35,59 @@
 //! fields its config has no room for under runtime-go's metadata keys. A Go
 //! service and a Rust one share a server, a stream, and a durable consumer.
 //!
+//! # Headers
+//!
+//! [`Headers`] travel as NATS headers, on core publishes and JetStream ones
+//! alike, so `nats sub --headers-only` and `nats stream view` show them and a
+//! Go peer still reads the payload untouched. A message without headers goes
+//! out exactly as before: a plain `PUB` on core NATS, and only `Nats-Msg-Id`
+//! on JetStream. The `Nats-` prefix is the server's (`Nats-Msg-Id`,
+//! `Nats-TTL`, `Nats-Expected-*` change what it does with a message), so a
+//! key starting with it is refused with
+//! [`InvalidHeader`](crate::StreamError::InvalidHeader) at
+//! [`create`](crate::Streams::create), [`update`](crate::Streams::update),
+//! and every publish, and `Nats-` headers on a received message are left
+//! off [`Message::headers`](crate::Message::headers).
+//!
+//! A stream's default headers live where the rest of its declaration does:
+//! in the process for core NATS, and in the JetStream stream's metadata under
+//! [`META_HEADERS`] as a JSON object, so they survive a server restart and
+//! another process binding the stream stamps the same ones.
+//!
+//! # Expiry, retain, and delayed redelivery
+//!
+//! - [`Options::expires`](crate::Options::expires): JetStream sends it as the
+//!   per-message `Nats-TTL` header, which the server (2.11 or later) honours
+//!   on a stream with `allow_msg_ttl`, which every stream this provider
+//!   creates or updates has. The server counts it in whole seconds, so an
+//!   expiry is rounded up to the next second and one under a second is
+//!   refused. Core NATS refuses it: nothing is held, so nothing can expire.
+//! - [`Options::retain`](crate::Options::retain) is refused on both. Core
+//!   NATS keeps nothing; JetStream's only last-value form is a stream capped
+//!   at one message per subject, which would discard the log every durable
+//!   consumer is reading.
+//! - [`Delivery::nak_after`](crate::Delivery::nak_after) on JetStream is a
+//!   `-NAK` with a delay: the server holds the redelivery back. Core NATS has
+//!   no deliveries to settle.
+//!
 //! [`as_durable`]: crate::as_durable
+//! [`Headers`]: crate::Headers
 
+mod acks;
 mod jetstream;
 mod plain;
 
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use opentelemetry::metrics::Meter;
 use tracing::error;
 
-use crate::{Registry, Result, Stream, provider};
+use async_nats::HeaderMap;
+
+use crate::{Headers, Options, Registry, Result, Stream, StreamError, provider};
 
 pub use jetstream::{
-    JetStreamManager, JetStreamProvider, META_ACTIVE, META_NAME, META_USER, safe_name,
+    JetStreamManager, JetStreamProvider, META_ACTIVE, META_HEADERS, META_NAME, META_USER, safe_name,
 };
 pub use plain::{NatsManager, NatsProvider};
 
@@ -153,6 +192,24 @@ impl NatsConfig {
     }
 }
 
+/// The subject of the messages a subscription receives, held once.
+///
+/// A subscription to a literal subject sees the same subject on every message,
+/// and one to a pattern usually sees a few. Each message is unpacked against
+/// the last one seen, so it shares that copy instead of allocating its own.
+#[derive(Default)]
+struct LastSubject(Option<Arc<str>>);
+
+impl LastSubject {
+    /// The shared copy of `subject`, replacing the held one when it differs.
+    fn of(&mut self, subject: &str) -> &Arc<str> {
+        if self.0.as_deref() != Some(subject) {
+            self.0 = Some(Arc::from(subject));
+        }
+        self.0.as_ref().expect("just set")
+    }
+}
+
 /// Rejects a subject `stream` does not declare.
 ///
 /// A NATS subject is a pattern, so a stream declaring `orders.*` accepts
@@ -196,6 +253,64 @@ fn check_concrete(stream: &Stream, subject: &str) -> Result<()> {
     ))
 }
 
+/// The header prefix the NATS server keeps for itself.
+const RESERVED: &[&str] = &["Nats-"];
+
+/// Refuses stream headers that are invalid or use the server's prefix, so a
+/// bad default fails at the call that set it.
+fn check_stream_headers(stream: &Stream) -> Result<()> {
+    stream.headers.validate()?;
+    stream.headers.reject_reserved("NATS", RESERVED)
+}
+
+/// The headers a publish sends, validated, with the server's prefix refused.
+fn outgoing(stream: &Stream, opts: &Options) -> Result<Headers> {
+    let headers = provider::outgoing(stream, opts)?;
+    headers.reject_reserved("NATS", RESERVED)?;
+    Ok(headers)
+}
+
+/// Refuses [`Options::retain`]: neither form of NATS has a last value that
+/// would not change what the stream is.
+fn refuse_retain(opts: &Options, why: &str) -> Result<()> {
+    if opts.retain {
+        return Err(StreamError::Unsupported(format!(
+            "NATS cannot retain a message as its subject's last value: {why}"
+        )));
+    }
+    Ok(())
+}
+
+/// `headers` as a NATS header map. Every key has passed
+/// [`Headers::validate`], whose rules are the client's own, so none panics.
+fn to_header_map(headers: &Headers) -> HeaderMap {
+    let mut map = HeaderMap::new();
+    for (key, value) in headers.iter() {
+        map.insert(key, value);
+    }
+    map
+}
+
+/// The headers a message arrived with, without the server's own `Nats-` ones.
+/// A key sent more than once keeps its first value.
+fn from_header_map(map: Option<&HeaderMap>) -> Headers {
+    let Some(map) = map else {
+        return Headers::new();
+    };
+    map.iter()
+        .filter(|(name, _)| {
+            let name: &str = name.as_ref();
+            !RESERVED.iter().any(|p| name.starts_with(p))
+        })
+        .filter_map(|(name, values)| {
+            let name: &str = name.as_ref();
+            values
+                .first()
+                .map(|v| (name.to_owned(), v.as_str().to_owned()))
+        })
+        .collect()
+}
+
 /// Whether `subject` contains a NATS wildcard token.
 fn is_wildcard(subject: &str) -> bool {
     subject.contains(['*', '>'])
@@ -206,6 +321,7 @@ mod tests {
     use super::*;
     use crate::StreamError;
 
+    /// A declaration with the given subjects and nothing else set.
     fn stream(subjects: &[&str]) -> Stream {
         Stream {
             id: "s-1".into(),
@@ -238,6 +354,58 @@ mod tests {
                 "{subject}"
             );
         }
+    }
+
+    #[test]
+    fn last_subject_is_shared_until_it_changes() {
+        let mut last = LastSubject::default();
+        let a = last.of("orders.placed").clone();
+        assert!(Arc::ptr_eq(&a, last.of("orders.placed")));
+        assert_eq!(&**last.of("orders.shipped"), "orders.shipped");
+        assert!(!Arc::ptr_eq(&a, last.of("orders.placed")));
+    }
+
+    #[test]
+    fn headers_map_both_ways_without_the_servers_own() {
+        let headers: Headers = [("lang", "rust"), ("traceparent", "00-ab")]
+            .into_iter()
+            .collect();
+        let mut map = to_header_map(&headers);
+        assert_eq!(map.get("lang").map(|v| v.as_str()), Some("rust"));
+        map.insert("Nats-Msg-Id", "m-1");
+        map.insert("Nats-TTL", "5");
+        assert_eq!(from_header_map(Some(&map)), headers);
+        assert!(from_header_map(None).is_empty());
+    }
+
+    #[test]
+    fn the_nats_prefix_is_reserved() {
+        let s = Stream::named("s")
+            .subjects(["a"])
+            .header("Nats-Msg-Id", "x");
+        let error = check_stream_headers(&s).unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+        let s = Stream::named("s").subjects(["a"]).header("bad key", "x");
+        assert!(matches!(
+            check_stream_headers(&s),
+            Err(StreamError::InvalidHeader(_))
+        ));
+        let s = Stream::named("s").subjects(["a"]).header("lang", "rust");
+        assert!(check_stream_headers(&s).is_ok());
+        let error = outgoing(&s, &Options::default().header("Nats-TTL", "1")).unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+        let sent = outgoing(&s, &Options::default().header("lang", "go")).unwrap();
+        assert_eq!(sent.get("lang"), Some("go"));
+    }
+
+    #[test]
+    fn retain_is_refused_by_name() {
+        assert!(refuse_retain(&Options::default(), "x").is_ok());
+        let error = refuse_retain(&Options::default().with_retain(), "why").unwrap_err();
+        assert!(
+            matches!(&error, StreamError::Unsupported(e) if e.contains("retain") && e.contains("why")),
+            "{error}"
+        );
     }
 
     #[test]

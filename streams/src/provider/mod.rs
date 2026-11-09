@@ -10,11 +10,11 @@ mod metrics;
 mod subject;
 
 pub use batch::{batch_result, check_batch, publish_each};
-pub use envelope::{pack, unpack};
+pub use envelope::{pack, pack_with, unpack, unpack_shared};
 pub use metrics::Metrics;
 pub use subject::{declares, declares_pattern, matches, unknown_subject};
 
-use crate::Options;
+use crate::{Headers, Options, Result, Stream};
 
 /// How many messages a provider holds ahead of the reader when the caller does
 /// not say.
@@ -45,4 +45,12 @@ pub fn new_stream_id(name: &str) -> String {
 /// The id a publish should go out under: the caller's, or a new one.
 pub fn publish_id(opts: &Options) -> String {
     opts.id.clone().unwrap_or_else(new_id)
+}
+
+/// The headers a publish sends: `stream`'s defaults with `opts`' own on top,
+/// validated. Every publish and batch path calls this once per call.
+pub fn outgoing(stream: &Stream, opts: &Options) -> Result<Headers> {
+    let headers = stream.headers.merged(&opts.headers);
+    headers.validate()?;
+    Ok(headers)
 }

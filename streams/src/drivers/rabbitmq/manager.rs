@@ -1,7 +1,7 @@
 //! A stream bound to its exchange: publishing, subscribing, and durable
 //! consumers.
 
-use std::{sync::Arc, task::Poll};
+use std::{sync::Arc, task::Poll, time::Duration};
 
 use futures::StreamExt;
 use lapin::{
@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    Shared, queue_name, short,
+    Shared, headers, queue_name, short,
     topic::{declares, has_wildcard, safe_name},
 };
 
@@ -49,6 +49,7 @@ enum Attach<'a> {
 }
 
 impl RabbitManager {
+    /// Works out the stream's exchange name once, rather than on every publish.
     pub(crate) fn new(shared: Arc<Shared>, stream: Stream) -> Self {
         let exchange = shared.exchange(&stream.id);
         Self {
@@ -183,17 +184,21 @@ impl Publisher for RabbitManager {
     /// is for.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let id = provider::publish_id(opts);
-        self.check_publish(subject, opts)?;
+        let properties = self.check_publish(subject, opts)?;
         let channel = self.shared.publish_channel().await?;
-        let pending = self.send(&channel, subject, &id, &payload).await?;
+        let pending = self
+            .send(&channel, subject, &id, &payload, properties)
+            .await?;
         confirmed(subject, &id, pending).await?;
         Ok(id)
     }
 }
 
 impl RabbitManager {
-    /// Refuses what a publish cannot honour, before anything is sent.
-    fn check_publish(&self, subject: &str, opts: &Options) -> Result<()> {
+    /// Refuses what a publish cannot honour, before anything is sent, and
+    /// returns the properties every message of the call goes out with: the
+    /// stream's and the publish's headers, and the expiry.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<BasicProperties> {
         self.check_subject(subject)?;
         if has_wildcard(subject) {
             // A binding key routes nothing when published on; it is declared
@@ -211,13 +216,32 @@ impl RabbitManager {
                     .into(),
             ));
         }
-        Ok(())
+        if opts.retain {
+            return Err(StreamError::Unsupported(
+                "RabbitMQ has no last value per routing key: a queue hands each message to \
+                 one consumer and then forgets it, and a subscriber that binds later starts \
+                 empty"
+                    .into(),
+            ));
+        }
+        let outgoing = provider::outgoing(&self.stream, opts)?;
+        headers::check(&outgoing)?;
+        let mut properties = BasicProperties::default()
+            .with_delivery_mode(PERSISTENT)
+            .with_content_type(CONTENT_TYPE.into());
+        if let Some(table) = headers::table(&outgoing) {
+            properties = properties.with_headers(table);
+        }
+        if let Some(expires) = opts.expiry() {
+            properties = properties.with_expiration(headers::expiration(expires)?);
+        }
+        Ok(properties)
     }
 
-    /// Hands one persistent message to `channel` and returns its pending
-    /// confirmation without waiting for it, so a batch can send everything
-    /// before awaiting anything. The caller has run
-    /// [`check_publish`](Self::check_publish).
+    /// Hands one persistent message to `channel` under `properties`, from
+    /// [`check_publish`](Self::check_publish), with its id added, and returns
+    /// its pending confirmation without waiting for it, so a batch can send
+    /// everything before awaiting anything.
     ///
     /// Nothing is sent until the returned future is first polled; that poll
     /// numbers the message for confirmation and queues its frames, so futures
@@ -228,12 +252,12 @@ impl RabbitManager {
         subject: &str,
         id: &str,
         payload: &Payload,
+        properties: BasicProperties,
     ) -> Result<PublisherConfirm> {
+        // Headers travel in the properties, never in the frame, so the body is
+        // runtime-go's version-1 frame whatever the headers.
         let body = provider::pack(id, payload);
-        let properties = BasicProperties::default()
-            .with_message_id(short("message id", id)?)
-            .with_delivery_mode(PERSISTENT)
-            .with_content_type(CONTENT_TYPE.into());
+        let properties = properties.with_message_id(short("message id", id)?);
         let exchange = short("exchange name", self.exchange.as_str())?;
         let routing_key = short("routing key", subject)?;
         channel
@@ -331,9 +355,11 @@ impl Subscriber for RabbitManager {
 
         let registry = self.shared.config.registry.clone();
         let wanted = subject.to_owned();
+        let mut last = LastSubject::default();
         let messages = consumer.filter_map(move |delivery| {
             let message = match delivery {
-                Ok(d) => provider::unpack(&registry, d.routing_key.as_str(), d.data)
+                Ok(d) => provider::unpack_shared(&registry, last.of(d.routing_key.as_str()), d.data)
+                    .map(|message| message.with_headers(headers::received(&d.properties)))
                     .inspect_err(|e| {
                         tracing::warn!(subject = %wanted, error = %e, "rabbitmq: dropping a malformed message");
                     })
@@ -384,48 +410,60 @@ impl Durable for RabbitManager {
 
         let registry = self.shared.config.registry.clone();
         let metrics = self.shared.config.metrics.clone();
-        let subject = subject.to_owned();
-        let consumer = consumer.to_owned();
+        // Shared by every delivery and its acker, so a message costs no copies
+        // of these names.
+        let subject: Arc<str> = subject.into();
+        let consumer: Arc<str> = consumer.into();
+        let mut last = LastSubject::default();
         let deliveries = amqp.filter_map(move |delivery| {
-            let registry = registry.clone();
-            let metrics = metrics.clone();
-            let subject = subject.clone();
-            let consumer = consumer.clone();
+            // Decoding happens here, synchronously; only rejecting a malformed
+            // message needs to await.
+            let outcome = match delivery {
+                Ok(d) => {
+                    let attempt = attempt(&d);
+                    let AmqpDelivery {
+                        routing_key,
+                        data,
+                        acker,
+                        properties,
+                        ..
+                    } = d;
+                    match provider::unpack_shared(&registry, last.of(routing_key.as_str()), data) {
+                        Ok(message) => {
+                            let message = message.with_headers(headers::received(&properties));
+                            metrics.delivered(&subject, &consumer);
+                            let acker = AmqpAck {
+                                acker,
+                                metrics: metrics.clone(),
+                                subject: subject.clone(),
+                                consumer: consumer.clone(),
+                            };
+                            Ok(Delivery::new(message, attempt, Box::new(acker)))
+                        }
+                        Err(e) => {
+                            tracing::warn!(%subject, error = %e, "rabbitmq: rejecting a malformed message");
+                            Err(Some(acker))
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(%subject, %consumer, error = %e, "rabbitmq: consumer failed");
+                    Err(None)
+                }
+            };
             async move {
-                let d = match delivery {
-                    Ok(d) => d,
-                    Err(e) => {
-                        tracing::warn!(%subject, %consumer, error = %e, "rabbitmq: consumer failed");
-                        return None;
-                    }
-                };
-                let attempt = attempt(&d);
-                let AmqpDelivery {
-                    routing_key,
-                    data,
-                    acker,
-                    ..
-                } = d;
-                match provider::unpack(&registry, routing_key.as_str(), data) {
-                    Ok(message) => {
-                        metrics.delivered(&subject, &consumer);
-                        let acker = AmqpAck {
-                            acker,
-                            metrics,
-                            subject,
-                            consumer,
-                        };
-                        Some(Delivery::new(message, attempt, Box::new(acker)))
-                    }
-                    Err(e) => {
-                        // Nothing will ever decode this, so no handler will ever
-                        // acknowledge it. Reject it without requeueing, the one
-                        // case where discarding is right: requeueing would hand
-                        // the same undecodable bytes to the next consumer forever.
-                        tracing::warn!(%subject, error = %e, "rabbitmq: rejecting a malformed message");
+                match outcome {
+                    Ok(delivery) => Some(delivery),
+                    Err(Some(acker)) => {
+                        // Nothing will ever decode this, so no handler will
+                        // ever acknowledge it. Reject it without requeueing,
+                        // the one case where discarding is right: requeueing
+                        // would hand the same undecodable bytes to the next
+                        // consumer forever.
                         let _ = acker.reject(BasicRejectOptions { requeue: false }).await;
                         None
                     }
+                    Err(None) => None,
                 }
             }
         });
@@ -448,13 +486,13 @@ impl Batch for RabbitManager {
         opts: &Options,
     ) -> Result<Vec<String>> {
         provider::check_batch(opts)?;
-        self.check_publish(subject, opts)?;
+        let properties = self.check_publish(subject, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
         let channel = self.shared.publish_channel().await?;
         let sends = payloads
             .iter()
             .zip(&ids)
-            .map(|(payload, id)| self.send(&channel, subject, id, payload));
+            .map(|(payload, id)| self.send(&channel, subject, id, payload, properties.clone()));
         let pending = in_order(sends).await;
         let mut failures = Vec::new();
         for (index, (sent, id)) in pending.into_iter().zip(&ids).enumerate() {
@@ -471,10 +509,14 @@ impl Batch for RabbitManager {
 }
 
 impl Manager for RabbitManager {
+    /// Some: a named consumer is a durable queue bound to the exchange, so it
+    /// outlives the process and redelivers what was not acknowledged.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some: a batch is sent in order on one confirmed channel, then its
+    /// confirms are collected.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -514,13 +556,28 @@ fn delivery_count(value: &AMQPValue) -> Option<u64> {
     }
 }
 
+/// The last routing key a consumer saw, shared, so a run of deliveries on one
+/// subject points at one copy of it rather than each allocating its own.
+#[derive(Default)]
+struct LastSubject(Option<Arc<str>>);
+
+impl LastSubject {
+    /// The shared copy of `subject`, replacing the held one when it differs.
+    fn of(&mut self, subject: &str) -> &Arc<str> {
+        if self.0.as_deref() != Some(subject) {
+            self.0 = Some(Arc::from(subject));
+        }
+        self.0.as_ref().expect("just set")
+    }
+}
+
 /// Settles one delivery. RabbitMQ has a true negative acknowledgement, so nak
 /// requeues immediately rather than waiting out a visibility timeout.
 struct AmqpAck {
     acker: lapin::Acker,
     metrics: Metrics,
-    subject: String,
-    consumer: String,
+    subject: Arc<str>,
+    consumer: Arc<str>,
 }
 
 impl AmqpAck {
@@ -544,11 +601,15 @@ impl AmqpAck {
 
 #[async_trait::async_trait]
 impl Acker for AmqpAck {
+    /// A `basic.ack`; fails if the channel closed, since the broker has then
+    /// already requeued the message.
     async fn ack(self: Box<Self>) -> Result<()> {
         let sent = self.acker.ack(BasicAckOptions::default()).await;
         self.settled(sent, "acknowledge", "ack")
     }
 
+    /// A `basic.nack` with requeue, so the message goes back for any consumer
+    /// at once rather than being discarded.
     async fn nak(self: Box<Self>) -> Result<()> {
         // Requeue, so it goes back for another consumer rather than being
         // discarded.
@@ -561,6 +622,32 @@ impl Acker for AmqpAck {
             .await;
         self.settled(sent, "return the message", "nak")
     }
+
+    /// Refused: RabbitMQ cannot hold a requeued message back.
+    ///
+    /// A nack requeues at once, and the two ways to wait need what this
+    /// provider does not assume: the delayed-message exchange plugin, or a
+    /// dead-letter exchange with a TTL'd retry queue per consumer, which adds
+    /// queues runtime-go does not know and lets the retried message overtake or
+    /// fall behind the rest. The message is requeued now rather than left
+    /// unsettled, where it would hold a prefetch slot until the consumer
+    /// closed, and RabbitMQ's delivery timeout would close the consumer's
+    /// channel. The error says so.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        let sent = self
+            .acker
+            .nack(BasicNackOptions {
+                requeue: true,
+                ..Default::default()
+            })
+            .await;
+        self.settled(sent, "return the message", "nak")?;
+        Err(StreamError::Unsupported(format!(
+            "RabbitMQ cannot hold a redelivery back for {delay:?} without the \
+             delayed-message plugin or a dead-letter retry queue; the message was requeued \
+             for immediate redelivery"
+        )))
+    }
 }
 
 #[cfg(test)]
@@ -571,6 +658,8 @@ mod tests {
 
     use super::*;
 
+    /// A mock delivery with the given redelivered flag and, if any, an
+    /// `x-delivery-count` header.
     fn delivery(redelivered: bool, count: Option<AMQPValue>) -> AmqpDelivery {
         let mut d = AmqpDelivery::mock(1, "x".into(), "k".into(), redelivered, Vec::new());
         if let Some(count) = count {
@@ -590,6 +679,15 @@ mod tests {
             attempt(&delivery(true, Some(AMQPValue::LongString("x".into())))),
             2
         );
+    }
+
+    #[test]
+    fn last_subject_is_shared_until_it_changes() {
+        let mut last = LastSubject::default();
+        let a = last.of("user.created").clone();
+        assert!(Arc::ptr_eq(&a, last.of("user.created")));
+        assert_eq!(&**last.of("user.deleted"), "user.deleted");
+        assert!(!Arc::ptr_eq(&a, last.of("user.created")));
     }
 
     #[test]

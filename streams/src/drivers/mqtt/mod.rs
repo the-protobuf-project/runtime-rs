@@ -48,12 +48,46 @@
 //! process holds: two processes each declare their own, and a restart forgets.
 //! What it buys is the subject check, so publishing to a topic the stream never
 //! declared fails at the call that made the typo.
+//!
+//! # Headers, expiry, retain
+//!
+//! - **Headers** travel as MQTT 5 user properties on the PUBLISH, one per
+//!   header in key order, the stream's [`Stream::headers`] with the
+//!   publish's own [`Options::headers`](crate::Options::headers) on top; a
+//!   batch stamps them on every message. The payload stays runtime-go's
+//!   version-1 frame, so a Go peer reads it unchanged, and any MQTT 5 tool
+//!   sees the headers (`mosquitto_sub -V mqttv5 -F '%P %t'`). Subscriptions
+//!   and durable consumers put a message's user properties back on it as
+//!   [`Message::headers`](crate::Message::headers), including on a
+//!   redelivery after a restart, since the broker stores the properties with
+//!   the queued message. MQTT reserves no user property names, so no key is
+//!   refused beyond [`Headers::validate`]; a key repeated by another
+//!   publisher keeps its last value. `create` and `update` refuse invalid
+//!   stream headers.
+//! - **Expiry** ([`Options::with_expiry`](crate::Options::with_expiry)) is
+//!   the MQTT 5 Message Expiry Interval, in whole seconds, rounded up: a
+//!   sub-second expiry is one second, never zero, so a message is never
+//!   dropped sooner than asked. The broker discards the message once it has
+//!   waited that long in a session's queue or as a retained value; a message
+//!   handed to a connected subscriber at once is delivered whatever its
+//!   expiry.
+//! - **Retain** ([`Options::with_retain`](crate::Options::with_retain)) is
+//!   the retain flag: the broker keeps the message as the topic's last value
+//!   and hands it to every subscriber that joins later, framed as any other
+//!   message, so it decodes. A durable consumer is handed it when its
+//!   subscription is new, not again on each resume.
+//!   [`MqttProvider::clear_retained`] clears it with MQTT's own empty
+//!   retained publish; subscriptions skip that empty message.
+//! - **Delayed nak** ([`Delivery::nak_after`](crate::Delivery::nak_after)) is
+//!   refused: MQTT has no negative acknowledgement and no redelivery delay,
+//!   and a client-side sleep would be a lie about where the message is.
 
 mod manager;
 mod topic;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
     sync::{
         Arc, Mutex, MutexGuard, RwLock,
         atomic::{AtomicBool, Ordering},
@@ -66,12 +100,14 @@ use rumqttc::{
     Outgoing,
     v5::{
         AsyncClient, ConnectionError, Event, EventLoop, Incoming,
-        mqttbytes::v5::{PubAckReason, PubRecReason},
+        mqttbytes::v5::{
+            Filter, PubAckReason, PubRecReason, Publish, PublishProperties, SubscribeReasonCode,
+        },
     },
 };
 use tokio::{sync::oneshot, task::JoinHandle, time::Instant};
 
-use crate::{Manager, Registry, Result, Stream, StreamError, Streams, provider::Metrics};
+use crate::{Headers, Manager, Registry, Result, Stream, StreamError, Streams, provider::Metrics};
 
 use manager::MqttManager;
 
@@ -95,12 +131,22 @@ pub const DEFAULT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
 /// publish back off and retry, which costs a millisecond each time.
 const REQUEST_CAPACITY: usize = 8192;
 
+/// Publishing connections a provider opens when
+/// [`MqttConfig::publish_connections`] is not changed.
+///
+/// One, because one connection is all most brokers need: Mosquitto's single
+/// thread is the limit well before the connection is. Raising it speeds up
+/// publishing across many topics when the broker is not the limit; order on
+/// a topic is kept either way, since a topic always takes the same
+/// connection.
+pub const DEFAULT_PUBLISH_CONNECTIONS: usize = 1;
+
 /// How long the publishing connection waits before redialing a lost broker,
 /// so an outage is a retry a second rather than a spin.
 const RECONNECT_DELAY: Duration = Duration::from_secs(1);
 
 /// How long a closing connection is given to put its DISCONNECT on the wire.
-const LINGER: Duration = Duration::from_secs(1);
+pub(crate) const LINGER: Duration = Duration::from_secs(1);
 
 /// Settings for an [`MqttProvider`], beyond the connection itself.
 #[derive(Clone)]
@@ -143,9 +189,33 @@ pub struct MqttConfig {
     /// message before failing. At QoS 0 there is no acknowledgement and it
     /// bounds only the hand-off to the connection.
     pub publish_timeout: Duration,
+
+    /// How many connections publishes are spread over, by topic. At least
+    /// one.
+    ///
+    /// Every QoS 1 publish waits for its PUBACK, and one connection carries
+    /// every request through one event loop and one socket in turn, so with
+    /// many concurrent publishers it becomes the queue they all wait in.
+    /// Several connections share the load and the broker acknowledges each
+    /// one independently. A publish goes out whole on one connection and still
+    /// returns only once the broker has it, and a batch stays on one
+    /// connection, in order.
+    ///
+    /// Each topic always takes the same connection, chosen by a hash of the
+    /// topic. MQTT orders messages per connection, so this is what keeps
+    /// publishes on a topic in the order they were sent, concurrent ones
+    /// included, whatever this is. The cost is that the spread is across
+    /// topics: publishers all on one topic share one connection, and only
+    /// publishing to several topics gains from more than one.
+    ///
+    /// With [`client_id`](Self::client_id) set, the first connection uses it
+    /// and the others append `-1`, `-2`, and so on, since a broker gives a
+    /// client id to one connection at a time.
+    pub publish_connections: usize,
 }
 
 impl Default for MqttConfig {
+    /// At-least-once QoS, no topic prefix, and a generated client id.
     fn default() -> Self {
         Self {
             prefix: String::new(),
@@ -155,6 +225,7 @@ impl Default for MqttConfig {
             registry: Registry::new(),
             metrics: Metrics::default(),
             publish_timeout: DEFAULT_PUBLISH_TIMEOUT,
+            publish_connections: DEFAULT_PUBLISH_CONNECTIONS,
         }
     }
 }
@@ -173,7 +244,7 @@ pub struct MqttProvider {
 pub(crate) struct Inner {
     options: MqttOptions,
     config: MqttConfig,
-    publisher: PublishLink,
+    publisher: PublishPool,
     declared: RwLock<BTreeMap<String, Stream>>,
 }
 
@@ -194,10 +265,15 @@ impl MqttProvider {
             .clone()
             .unwrap_or_else(|| format!("runtime-rs-{}", crate::provider::new_id()));
 
-        // One connection for publishing. Subscriptions get their own, because a
+        // Connections for publishing. Subscriptions get their own, because a
         // session's identity is its client id and is fixed when it connects.
-        let (client, events, _) = dial(&options, &client_id, Session::Clean).await?;
-        let publisher = PublishLink::spawn(client, events, config.publish_timeout);
+        let publisher = PublishPool::connect(
+            &options,
+            &client_id,
+            config.publish_connections,
+            config.publish_timeout,
+        )
+        .await?;
         Ok(Self {
             inner: Arc::new(Inner {
                 options,
@@ -206,6 +282,35 @@ impl MqttProvider {
                 declared: RwLock::new(BTreeMap::new()),
             }),
         })
+    }
+}
+
+impl MqttProvider {
+    /// Clears the value retained on `subject` of stream `stream`, so a
+    /// subscriber that joins later is handed nothing there.
+    ///
+    /// A message published with [`Options::with_retain`](crate::Options::with_retain)
+    /// stays the topic's retained value until another retained publish
+    /// replaces it or this clears it. Clearing is MQTT's own way: a retained
+    /// publish with an empty payload, which the broker takes as "retain
+    /// nothing" and forwards to current subscribers as an empty message.
+    /// This provider's subscriptions skip that empty message rather than
+    /// failing to decode it, since it carries no frame.
+    pub async fn clear_retained(&self, stream: &str, subject: &str) -> Result<()> {
+        let declared = self.get(stream).await?;
+        let manager = MqttManager::new(self.inner.clone(), declared);
+        let topic = manager.publish_topic(subject, &crate::Options::default())?;
+        self.inner
+            .publisher
+            .link(&topic)
+            .send(&topic, self.inner.config.qos, true, None, Bytes::new())
+            .await
+            .map_err(|error| {
+                StreamError::internal(
+                    &format!("mqtt: cannot clear the retained value on {subject:?}"),
+                    error,
+                )
+            })
     }
 }
 
@@ -219,10 +324,12 @@ impl Inner {
         }
     }
 
+    /// Reads the declared streams, recovering from a poisoned lock.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Stream>> {
         self.declared.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Writes the declared streams, recovering from a poisoned lock.
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Stream>> {
         self.declared.write().unwrap_or_else(|e| e.into_inner())
     }
@@ -245,7 +352,11 @@ fn declaration(id: String, stream: Stream) -> Stream {
 
 #[async_trait::async_trait]
 impl Streams for MqttProvider {
+    /// Declares the stream, refusing [`Stream::headers`] that fail
+    /// [`Headers::validate`], so a bad default fails here rather than at the
+    /// first publish.
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let id = if stream.id.is_empty() {
             safe_name(&crate::provider::new_stream_id(&stream.name))
         } else {
@@ -257,6 +368,7 @@ impl Streams for MqttProvider {
         Ok(out)
     }
 
+    /// Reads the in-process declaration; MQTT brokers keep no stream catalogue.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.inner
             .read()
@@ -265,18 +377,22 @@ impl Streams for MqttProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// The manager keeps a copy of the declaration taken now.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.get(id).await?;
         Ok(Arc::new(MqttManager::new(self.inner.clone(), stream)))
     }
 
+    /// Replaces the whole declaration; managers already bound keep the old one.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let mut declared = self.inner.write();
         let slot = declared.get_mut(id).ok_or_else(|| not_found(id))?;
         *slot = declaration(id.to_owned(), stream);
         Ok(slot.clone())
     }
 
+    /// Forgets the declaration; managers already bound and their sessions are untouched.
     async fn delete(&self, id: &str) -> Result<()> {
         self.inner
             .write()
@@ -285,12 +401,13 @@ impl Streams for MqttProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// Lists only the streams this process declared, in id order.
     async fn list(&self) -> Result<Vec<Stream>> {
         // A BTreeMap lists in id order, the order runtime-go sorts into.
         Ok(self.inner.read().values().cloned().collect())
     }
 
-    /// Disconnects the publishing connection.
+    /// Disconnects the publishing connections.
     ///
     /// Subscriptions hold connections of their own and end when their streams
     /// are dropped, so drop those first or their sessions stay attached until
@@ -414,6 +531,7 @@ struct Waiters {
 }
 
 impl Waiters {
+    /// Fails every queued and in-flight publish, used when the connection drops.
     fn fail_all(&mut self, error: &StreamError) {
         for waiter in self
             .queued
@@ -424,6 +542,7 @@ impl Waiters {
         }
     }
 
+    /// Hands `outcome` to the publish that went out as `pkid`; an unknown id is ignored.
     fn settle(&mut self, pkid: u16, outcome: Result<()>) {
         if let Some(waiter) = self.inflight.remove(&pkid) {
             let _ = waiter.send(outcome);
@@ -431,8 +550,188 @@ impl Waiters {
     }
 }
 
-/// The publishing connection and the task driving its event loop.
-struct PublishLink {
+/// The longest Message Expiry Interval MQTT 5 can carry, in seconds.
+const MAX_EXPIRY_SECS: u64 = u32::MAX as u64;
+
+/// A [`Duration`] as MQTT 5's Message Expiry Interval: whole seconds,
+/// rounded up, so a message is never dropped sooner than asked. A
+/// sub-second expiry is one second, never zero; an expiry beyond
+/// `u32::MAX` seconds (136 years) is capped there.
+pub(crate) fn expiry_interval(expires: Duration) -> u32 {
+    let mut secs = expires.as_secs();
+    if expires.subsec_nanos() > 0 {
+        secs += 1;
+    }
+    secs.clamp(1, MAX_EXPIRY_SECS) as u32
+}
+
+/// The PUBLISH properties for `headers` and `expires`: the headers as MQTT 5
+/// user properties, in key order, and the expiry as the Message Expiry
+/// Interval. `None` when there is neither, so a header-less publish is
+/// byte for byte what runtime-go sends.
+pub(crate) fn publish_properties(
+    headers: Headers,
+    expires: Option<Duration>,
+) -> Option<PublishProperties> {
+    if headers.is_empty() && expires.is_none() {
+        return None;
+    }
+    Some(PublishProperties {
+        user_properties: headers.into_iter().collect(),
+        message_expiry_interval: expires.map(expiry_interval),
+        ..PublishProperties::default()
+    })
+}
+
+/// The headers a PUBLISH arrived with: its MQTT 5 user properties. MQTT
+/// allows a key more than once, which [`Headers`] does not; the last one
+/// wins, as it does for a key a publish sets over its stream's.
+pub(crate) fn headers_of(publish: &Publish) -> Headers {
+    match &publish.properties {
+        Some(properties) if !properties.user_properties.is_empty() => properties
+            .user_properties
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect(),
+        _ => Headers::new(),
+    }
+}
+
+/// A connection subscribed and acknowledged, not yet routing.
+pub(crate) struct Subscribed {
+    pub(crate) client: AsyncClient,
+    pub(crate) events: EventLoop,
+    /// Publishes that arrived before the SUBACK, in order, held rather than
+    /// dropped.
+    pub(crate) early: Vec<Publish>,
+    /// Whether the broker resumed a session it kept under this client id.
+    pub(crate) resumed: bool,
+}
+
+/// Opens a connection under `client_id`, subscribes it to `filters`, and
+/// returns once the broker has granted every one, as the contract promises
+/// before a subscribe returns.
+///
+/// Errors read `<context>: <why>`, with the broker's reason codes when it
+/// refused, which is the difference between a refused filter and a quota.
+pub(crate) async fn subscribe(
+    template: &MqttOptions,
+    client_id: &str,
+    session: Session,
+    filters: Vec<Filter>,
+    context: &str,
+) -> Result<Subscribed> {
+    let failed = |error: &dyn std::fmt::Display| StreamError::internal(context, error);
+    let (client, mut events, resumed) = dial(template, client_id, session).await?;
+    let wanted = filters.len();
+    client
+        .subscribe_many(filters)
+        .await
+        .map_err(|e| failed(&e))?;
+    let mut early = Vec::new();
+    loop {
+        match events.poll().await.map_err(|e| failed(&e))? {
+            Event::Incoming(Incoming::SubAck(ack)) => {
+                if ack.return_codes.len() == wanted
+                    && ack
+                        .return_codes
+                        .iter()
+                        .all(|c| matches!(c, SubscribeReasonCode::Success(_)))
+                {
+                    break;
+                }
+                let _ = client.try_disconnect();
+                return Err(failed(&format_args!(
+                    "broker reasons {:?}",
+                    ack.return_codes
+                )));
+            }
+            Event::Incoming(Incoming::Publish(publish)) => early.push(publish),
+            _ => {}
+        }
+    }
+    Ok(Subscribed {
+        client,
+        events,
+        early,
+        resumed,
+    })
+}
+
+/// The publishing connections, one per topic.
+pub(crate) struct PublishPool {
+    links: Vec<PublishLink>,
+}
+
+impl PublishPool {
+    /// Opens `count` (at least one) clean connections under `client_id`,
+    /// `client_id-1`, `client_id-2`, ..., each acknowledging within
+    /// `timeout`.
+    pub(crate) async fn connect(
+        options: &MqttOptions,
+        client_id: &str,
+        count: usize,
+        timeout: Duration,
+    ) -> Result<Self> {
+        let mut links = Vec::new();
+        for n in 0..count.max(1) {
+            let id = if n == 0 {
+                client_id.to_owned()
+            } else {
+                format!("{client_id}-{n}")
+            };
+            match dial(options, &id, Session::Clean).await {
+                Ok((client, events, _)) => {
+                    links.push(PublishLink::spawn(client, events, timeout));
+                }
+                Err(error) => {
+                    for link in &links {
+                        link.close().await;
+                    }
+                    return Err(error);
+                }
+            }
+        }
+        Ok(Self { links })
+    }
+
+    /// The connection publishes on `topic` go out on: always the same one,
+    /// because MQTT orders messages per connection and two publishes on a
+    /// topic sent concurrently over different connections could reach the
+    /// broker in either order. Different topics spread by hash.
+    pub(crate) fn link(&self, topic: &str) -> &PublishLink {
+        &self.links[slot(topic, self.links.len())]
+    }
+
+    /// Disconnects every connection.
+    pub(crate) async fn close(&self) {
+        futures::future::join_all(self.links.iter().map(PublishLink::close)).await;
+    }
+}
+
+/// Which of `count` connections `topic` takes. The hasher is unseeded, so
+/// the choice is the same for every publish and every clone of a provider.
+fn slot(topic: &str, count: usize) -> usize {
+    if count <= 1 {
+        return 0;
+    }
+    let hash = BuildHasherDefault::<DefaultHasher>::default().hash_one(topic);
+    (hash % count as u64) as usize
+}
+
+/// One publish as it goes on the wire: the body is sent as given, unframed,
+/// so a caller with a format of its own (OPC UA PubSub's Part 14 JSON) and
+/// one writing runtime-go's frame share the connection and its PUBACK
+/// pairing.
+pub(crate) struct Unframed {
+    pub(crate) topic: String,
+    pub(crate) retain: bool,
+    pub(crate) properties: Option<PublishProperties>,
+    pub(crate) body: Bytes,
+}
+
+/// A publishing connection and the task driving its event loop.
+pub(crate) struct PublishLink {
     client: AsyncClient,
     waiters: Arc<Mutex<Waiters>>,
     closed: Arc<AtomicBool>,
@@ -441,6 +740,7 @@ struct PublishLink {
 }
 
 impl PublishLink {
+    /// Starts the task that drives `events` and settles waiters as the broker answers.
     fn spawn(client: AsyncClient, events: EventLoop, timeout: Duration) -> Self {
         let waiters = Arc::new(Mutex::new(Waiters::default()));
         let closed = Arc::new(AtomicBool::new(false));
@@ -454,22 +754,36 @@ impl PublishLink {
         }
     }
 
-    /// Publishes `body` on `topic` and waits for the broker to take it.
-    async fn publish(&self, topic: &str, qos: QoS, body: Bytes) -> Result<()> {
+    /// Publishes `body`, unframed, on `topic` with the `retain` flag and
+    /// `properties` (user properties, expiry, content type) as given, and
+    /// waits for the broker to take it.
+    pub(crate) async fn send(
+        &self,
+        topic: &str,
+        qos: QoS,
+        retain: bool,
+        properties: Option<PublishProperties>,
+        body: Bytes,
+    ) -> Result<()> {
         let deadline = Instant::now() + self.timeout;
-        let settled = self.enqueue(topic, qos, body, deadline).await?;
+        let settled = self
+            .enqueue(topic, qos, retain, &properties, &body, deadline)
+            .await?;
         self.settled(settled, deadline).await
     }
 
-    /// Publishes every body on `topic`, all in flight at once, and waits for
-    /// the broker to take each: one round trip for the batch rather than one
-    /// per message. Outcomes are in `bodies` order; the messages go on the
+    /// Publishes every message, all in flight at once, and waits for the
+    /// broker to take each: one round trip for the batch rather than one per
+    /// message. Outcomes are in `messages` order; the messages go on the
     /// wire in that order too, since one caller queues them back to back.
-    async fn publish_all(&self, topic: &str, qos: QoS, bodies: Vec<Bytes>) -> Vec<Result<()>> {
+    pub(crate) async fn send_all(&self, qos: QoS, messages: Vec<Unframed>) -> Vec<Result<()>> {
         let deadline = Instant::now() + self.timeout;
-        let mut pending = Vec::with_capacity(bodies.len());
-        for body in bodies {
-            pending.push(self.enqueue(topic, qos, body, deadline).await);
+        let mut pending = Vec::with_capacity(messages.len());
+        for m in messages {
+            pending.push(
+                self.enqueue(&m.topic, qos, m.retain, &m.properties, &m.body, deadline)
+                    .await,
+            );
         }
         futures::future::join_all(pending.into_iter().map(|queued| async move {
             match queued {
@@ -480,13 +794,15 @@ impl PublishLink {
         .await
     }
 
-    /// Hands `body` to the connection and lines up its waiter, returning what
-    /// will hear the broker's answer.
+    /// Hands a publish to the connection and lines up its waiter, returning
+    /// what will hear the broker's answer.
     async fn enqueue(
         &self,
         topic: &str,
         qos: QoS,
-        body: Bytes,
+        retain: bool,
+        properties: &Option<PublishProperties>,
+        body: &Bytes,
         deadline: Instant,
     ) -> Result<oneshot::Receiver<Result<()>>> {
         let (tx, rx) = oneshot::channel();
@@ -499,11 +815,17 @@ impl PublishLink {
                 // Queued and registered under one lock, so the event loop
                 // cannot report this request before its waiter is in line.
                 let mut waiters = lock(&self.waiters);
-                if self
-                    .client
-                    .try_publish(topic, qos, false, body.clone())
-                    .is_ok()
-                {
+                let queued = match properties {
+                    None => self.client.try_publish(topic, qos, retain, body.clone()),
+                    Some(properties) => self.client.try_publish_with_properties(
+                        topic,
+                        qos,
+                        retain,
+                        body.clone(),
+                        properties.clone(),
+                    ),
+                };
+                if queued.is_ok() {
                     waiters.queued.push_back(tx.take().expect("queued once"));
                     return Ok(rx);
                 }
@@ -529,6 +851,7 @@ impl PublishLink {
         }
     }
 
+    /// The error a publish gets when no acknowledgement arrives within the timeout.
     fn timed_out(&self) -> StreamError {
         StreamError::Internal(format!(
             "mqtt: the broker did not acknowledge within {:?}",
@@ -536,6 +859,7 @@ impl PublishLink {
         ))
     }
 
+    /// Disconnects once, then gives the driver task [`LINGER`] to finish before aborting it.
     async fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -624,6 +948,7 @@ async fn drive_publisher(
     }
 }
 
+/// The error for a publish the broker answered with a failure reason code.
 fn refused(reason: String) -> StreamError {
     StreamError::Internal(format!("mqtt: the broker refused the publish: {reason}"))
 }
@@ -631,6 +956,72 @@ fn refused(reason: String) -> StreamError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expiry_rounds_up_to_whole_seconds() {
+        assert_eq!(expiry_interval(Duration::from_millis(1)), 1);
+        assert_eq!(expiry_interval(Duration::from_millis(999)), 1);
+        assert_eq!(expiry_interval(Duration::from_secs(1)), 1);
+        assert_eq!(expiry_interval(Duration::from_millis(1001)), 2);
+        assert_eq!(expiry_interval(Duration::from_secs(90)), 90);
+        assert_eq!(expiry_interval(Duration::from_secs(u64::MAX)), u32::MAX);
+    }
+
+    #[test]
+    fn properties_carry_headers_and_expiry_only_when_set() {
+        assert!(publish_properties(Headers::new(), None).is_none());
+        let headers: Headers = [("site", "plant-3"), ("lang", "rust")]
+            .into_iter()
+            .collect();
+        let p = publish_properties(headers.clone(), Some(Duration::from_millis(1500))).unwrap();
+        assert_eq!(
+            p.user_properties,
+            vec![
+                ("lang".to_owned(), "rust".to_owned()),
+                ("site".to_owned(), "plant-3".to_owned())
+            ],
+            "user properties in key order"
+        );
+        assert_eq!(p.message_expiry_interval, Some(2));
+        assert!(p.content_type.is_none());
+        let p = publish_properties(Headers::new(), Some(Duration::from_secs(5))).unwrap();
+        assert!(p.user_properties.is_empty());
+        assert_eq!(p.message_expiry_interval, Some(5));
+
+        let publish = Publish::new("t", QoS::AtLeastOnce, "x", Some(p));
+        assert!(headers_of(&publish).is_empty());
+        let publish = Publish::new(
+            "t",
+            QoS::AtLeastOnce,
+            "x",
+            publish_properties(headers.clone(), None),
+        );
+        assert_eq!(headers_of(&publish), headers);
+        assert!(headers_of(&Publish::new("t", QoS::AtLeastOnce, "x", None)).is_empty());
+    }
+
+    #[test]
+    fn a_repeated_user_property_keeps_the_last() {
+        let properties = PublishProperties {
+            user_properties: vec![("k".into(), "1".into()), ("k".into(), "2".into())],
+            ..PublishProperties::default()
+        };
+        let publish = Publish::new("t", QoS::AtLeastOnce, "x", Some(properties));
+        assert_eq!(headers_of(&publish).get("k"), Some("2"));
+    }
+
+    #[test]
+    fn a_topic_always_takes_the_same_connection() {
+        assert_eq!(slot("any", 1), 0);
+        assert_eq!(slot("any", 0), 0);
+        let topics: Vec<String> = (0..64).map(|n| format!("plant/{n}/temp")).collect();
+        for topic in &topics {
+            assert_eq!(slot(topic, 4), slot(topic, 4), "{topic}");
+            assert!(slot(topic, 4) < 4);
+        }
+        let used: std::collections::BTreeSet<usize> = topics.iter().map(|t| slot(t, 4)).collect();
+        assert_eq!(used.len(), 4, "topics spread over every connection");
+    }
 
     #[test]
     fn safe_name_strips_topic_structure() {

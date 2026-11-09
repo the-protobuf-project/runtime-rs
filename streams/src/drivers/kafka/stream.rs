@@ -102,8 +102,9 @@ impl KafkaProvider {
         if let Some(body) = &body {
             record = record.payload(body);
         }
+        // Keyed by the stream id, so declarations of one stream stay in order.
         self.inner
-            .producer
+            .producer(Some(id))
             .send(record, DIAL_TIMEOUT)
             .await
             .map_err(|(error, _)| {
@@ -213,12 +214,18 @@ fn declaration(id: String, stream: Stream) -> Stream {
         subjects: stream.subjects,
         user_id: stream.user_id,
         active: true,
+        headers: stream.headers,
     }
 }
 
 #[async_trait::async_trait]
 impl Streams for KafkaProvider {
+    /// Declares a stream: its subjects' topics, then its declaration.
+    ///
+    /// Default headers are checked first, so a bad one fails here rather than
+    /// at every publish. Kafka reserves no header names.
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -234,6 +241,8 @@ impl Streams for KafkaProvider {
         Ok(out)
     }
 
+    /// Answers from the metadata topic, read whole, so a stream declared by
+    /// another process is found.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.read_meta()
             .await?
@@ -241,6 +250,8 @@ impl Streams for KafkaProvider {
             .ok_or_else(|| StreamError::NotFound(format!("stream {id}")))
     }
 
+    /// Reads the declaration here so an unknown id fails at bind rather than at
+    /// the first publish. The manager shares the provider's producers.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.get(id).await?;
         tracing::debug!(id = %stream.id, subjects = ?stream.subjects, "bound to stream");
@@ -253,6 +264,7 @@ impl Streams for KafkaProvider {
     /// left in place, because deleting them would discard a log the
     /// declaration never owned exclusively.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let name = safe_name(id);
         self.get(&name).await?;
         let out = declaration(name, stream);
@@ -292,6 +304,8 @@ impl Streams for KafkaProvider {
         Ok(())
     }
 
+    /// Every declaration in the metadata topic, ordered by id as runtime-go
+    /// orders them; topics created outside this runtime are not listed.
     async fn list(&self) -> Result<Vec<Stream>> {
         // A BTreeMap is already ordered by id, which is the order Go sorts into.
         let out: Vec<Stream> = self.read_meta().await?.into_values().collect();
@@ -299,13 +313,20 @@ impl Streams for KafkaProvider {
         Ok(out)
     }
 
-    /// Flushes what the producer still holds. The caller's config is not a
+    /// Flushes what the producers still hold. The caller's config is not a
     /// connection, so there is nothing of theirs to close.
+    ///
+    /// Every producer is flushed even when an earlier one fails, so one stuck
+    /// connection does not strand what the others hold; the first failure is
+    /// the one reported.
     async fn close(&self) -> Result<()> {
-        let producer = self.inner.producer.clone();
+        let producers = self.inner.producers.clone();
         blocking(move || {
             use rdkafka::producer::Producer as _;
-            producer.flush(DIAL_TIMEOUT)
+            producers
+                .iter()
+                .map(|producer| producer.flush(DIAL_TIMEOUT))
+                .fold(Ok(()), std::result::Result::and)
         })
         .await?
         .map_err(|error| StreamError::internal("kafka: cannot flush the producer", error))
@@ -327,11 +348,38 @@ mod tests {
                 subjects: vec!["a".into()],
                 user_id: "u".into(),
                 active: false,
+                ..Stream::default()
             },
         );
         assert_eq!(out.id, "s-1");
         assert!(out.active);
         assert_eq!((out.name.as_str(), out.user_id.as_str()), ("users", "u"));
+    }
+
+    #[test]
+    fn a_declaration_keeps_its_headers_and_leaves_none_out_of_the_json() {
+        let with = declaration("s".into(), Stream::named("n").header("lang", "rust"));
+        assert_eq!(with.headers.get("lang"), Some("rust"));
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["headers"]["lang"], "rust");
+        let back: Stream = serde_json::from_value(json).unwrap();
+        assert_eq!(back.headers, with.headers);
+
+        let without = serde_json::to_value(declaration("s".into(), Stream::default())).unwrap();
+        assert!(without.get("headers").is_none(), "{without}");
+    }
+
+    #[tokio::test]
+    async fn create_and_update_refuse_a_bad_default_header() {
+        let mut client = rdkafka::ClientConfig::new();
+        client.set("bootstrap.servers", "127.0.0.1:1");
+        let provider = KafkaProvider::build(client, super::super::KafkaConfig::default()).unwrap();
+        let bad = || Stream::named("n").subject("a").header("has space", "x");
+        // Refused before any network I/O: the broker here is unreachable.
+        let error = provider.create(bad()).await.unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+        let error = provider.update("s", bad()).await.unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
     }
 
     #[test]

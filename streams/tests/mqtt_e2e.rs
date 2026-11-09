@@ -63,6 +63,7 @@ struct Event2 {
 const APP: (&str, &str) = ("e2e-app", "e2e-app-secret");
 const OTHER: (&str, &str) = ("e2e-other", "e2e-other-secret");
 
+/// Splits the `host:port` in `var` (or `default`), panicking on a malformed one.
 fn parse_addr(var: &str, default: &str) -> (String, u16) {
     let addr = std::env::var(var).unwrap_or_else(|_| default.into());
     let (host, port) = addr
@@ -81,12 +82,14 @@ fn password_addr() -> (String, u16) {
     parse_addr("MQTT_E2E_PASSWORD_ADDR", "127.0.0.1:18884")
 }
 
+/// The test certificate directory, `STREAMS_E2E_TLS_DIR` or docker/tls/out.
 fn tls_dir() -> PathBuf {
     std::env::var("STREAMS_E2E_TLS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/docker/tls/out")))
 }
 
+/// The secure broker's container name, for tests that restart it.
 fn container() -> String {
     std::env::var("MQTT_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-mqtt-secure".into())
 }
@@ -129,6 +132,8 @@ fn options(tls: Option<Arc<ClientConfig>>) -> MqttOptions {
     options_at(addr(), tls)
 }
 
+/// A template for the listener at `host:port`, with a 5s connect timeout and
+/// TLS when given. The client id is replaced per connection by the provider.
 fn options_at((host, port): (String, u16), tls: Option<Arc<ClientConfig>>) -> MqttOptions {
     let mut options = MqttOptions::new("template", host, port);
     options.set_connection_timeout(5);
@@ -138,6 +143,8 @@ fn options_at((host, port): (String, u16), tls: Option<Arc<ClientConfig>>) -> Mq
     options
 }
 
+/// QoS 1 under `prefix`, with sessions expiring after [`SESSION_EXPIRY`] so
+/// leftovers do not pile up on the broker.
 fn config(prefix: &str) -> MqttConfig {
     MqttConfig {
         prefix: prefix.into(),
@@ -153,6 +160,7 @@ fn fresh(tag: &str) -> String {
     format!("e2e-{tag}-{}", ulid::Ulid::new().to_string().to_lowercase())
 }
 
+/// A provider on the certificate-identity listener over mutual TLS.
 async fn connect(prefix: &str) -> MqttProvider {
     MqttProvider::connect(options(Some(tls(true, true))), config(prefix))
         .await
@@ -183,6 +191,7 @@ fn fresh_for((user, _): (&str, &str), tag: &str) -> String {
     format!("{user}/{}", fresh(tag))
 }
 
+/// Declares a stream with a fixed `id` over `subjects` and binds a manager to it.
 async fn declare(streams: &MqttProvider, id: &str, subjects: &[&str]) -> Arc<dyn Manager> {
     let stream = streams
         .create(Stream {
@@ -196,6 +205,7 @@ async fn declare(streams: &MqttProvider, id: &str, subjects: &[&str]) -> Arc<dyn
     streams.bind(&stream.id).await.expect("bind")
 }
 
+/// A JSON payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event2 {
         user: user.into(),
@@ -204,6 +214,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -211,6 +222,7 @@ async fn next(subscription: &mut Subscription) -> Message {
         .expect("subscription ended before a message arrived")
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next_delivery(deliveries: &mut Deliveries) -> Delivery {
     timeout(WITHIN, deliveries.next())
         .await
@@ -226,6 +238,19 @@ async fn drain(deliveries: &mut Deliveries, window: Duration) -> Vec<String> {
         delivery.ack().await.unwrap();
     }
     ids
+}
+
+/// [`drain`], keeping each delivery's headers.
+async fn drain_with_headers(
+    deliveries: &mut Deliveries,
+    window: Duration,
+) -> Vec<(String, streams::Headers)> {
+    let mut got = Vec::new();
+    while let Ok(Some(delivery)) = timeout(window, deliveries.next()).await {
+        got.push((delivery.id().to_owned(), delivery.headers().clone()));
+        delivery.ack().await.unwrap();
+    }
+    got
 }
 
 /// An acknowledgement is a packet on the wire; give it time to leave before
@@ -861,6 +886,8 @@ const CONNECTED: &str = "$SYS/broker/clients/connected";
 const SUBSCRIPTIONS: &str = "$SYS/broker/subscriptions/count";
 
 impl SysWatch {
+    /// Subscribes to the connected-clients and subscription-count counters and
+    /// keeps the latest value of each in the background until dropped.
     async fn start() -> Self {
         let mut options = options(Some(tls(true, true)));
         options.set_client_id(format!("e2e-sys-{}", ulid::Ulid::new()));
@@ -889,6 +916,7 @@ impl SysWatch {
         Self { latest, task }
     }
 
+    /// The last value the broker published for `topic`, if any yet.
     fn get(&self, topic: &str) -> Option<u64> {
         self.latest.lock().unwrap().get(topic).copied()
     }
@@ -906,6 +934,7 @@ impl SysWatch {
         least.unwrap_or_else(|| panic!("the broker never published {topic}"))
     }
 
+    /// Waits up to 15s for `topic` to read exactly `want`; an error names the last value seen.
     async fn reaches(&self, topic: &str, want: u64) -> Result<(), String> {
         let mut last = None;
         for _ in 0..150 {
@@ -920,6 +949,7 @@ impl SysWatch {
 }
 
 impl SysWatch {
+    /// Waits up to 15s for `topic` to drop to `most` or below, panicking otherwise.
     async fn falls_to(&self, topic: &str, most: u64) {
         let mut last = None;
         for _ in 0..150 {
@@ -934,6 +964,7 @@ impl SysWatch {
 }
 
 impl Drop for SysWatch {
+    /// Stops the background reader, which drops its client connection.
     fn drop(&mut self) {
         self.task.abort();
     }
@@ -1065,7 +1096,11 @@ async fn a_session_survives_a_broker_restart() {
         .await
         .unwrap();
     let unacked = manager
-        .publish(SUBJECT, event("unacked", ""), &Options::default())
+        .publish(
+            SUBJECT,
+            event("unacked", ""),
+            &Options::default().header("phase", "in-flight"),
+        )
         .await
         .unwrap();
     let first = next_delivery(&mut deliveries).await;
@@ -1079,7 +1114,11 @@ async fn a_session_survives_a_broker_restart() {
     settle().await;
 
     let queued = manager
-        .publish(SUBJECT, event("queued", ""), &Options::default())
+        .publish(
+            SUBJECT,
+            event("queued", ""),
+            &Options::default().header("phase", "queued"),
+        )
         .await
         .unwrap();
     // Past the autosave interval, though shutdown saves too.
@@ -1112,10 +1151,22 @@ async fn a_session_survives_a_broker_restart() {
         .consume(SUBJECT, &consumer, &Options::default())
         .await
         .unwrap();
-    let ids = drain(&mut resumed, Duration::from_secs(3)).await;
+    let got = drain_with_headers(&mut resumed, Duration::from_secs(3)).await;
+    let ids: Vec<String> = got.iter().map(|(id, _)| id.clone()).collect();
     assert!(
         !ids.contains(&acked),
         "the acked message came back: {ids:?}"
+    );
+    // The headers are user properties the broker stored with each queued
+    // message, so they come back across the restart too.
+    let phases: Vec<Option<String>> = got
+        .iter()
+        .map(|(_, h)| h.get("phase").map(str::to_owned))
+        .collect();
+    assert_eq!(
+        phases,
+        vec![Some("in-flight".into()), Some("queued".into()), None],
+        "headers after the restart"
     );
     assert_eq!(
         ids,
@@ -1124,5 +1175,327 @@ async fn a_session_survives_a_broker_restart() {
     );
     settle().await;
     drop(resumed);
+    streams.close().await.unwrap();
+}
+
+// Headers, expiry, retain and delayed nak against Mosquitto.
+
+/// `mosquitto_sub` inside the broker's container, on the certificate-identity
+/// listener, as MQTT 5, printing each message's user properties and topic:
+/// another tool on the broker reading what the provider wrote.
+fn mosquitto_sub(topic: &str) -> Command {
+    let mut command = Command::new("docker");
+    command.args([
+        "exec",
+        &container(),
+        "mosquitto_sub",
+        "-h",
+        "localhost",
+        "-p",
+        "8883",
+        "--cafile",
+        "/certs/ca.crt",
+        "--cert",
+        "/certs/client.crt",
+        "--key",
+        "/certs/client.key",
+        "-V",
+        "mqttv5",
+        "-F",
+        "%P %t",
+        "-t",
+        topic,
+        "-C",
+        "1",
+        "-W",
+        "15",
+    ]);
+    command
+}
+
+#[tokio::test]
+async fn mosquitto_sub_sees_the_headers() {
+    let _serial = SERIAL.lock().await;
+    let prefix = fresh("native");
+    let streams = connect(&prefix).await;
+    let stream = streams
+        .create(
+            Stream::named("native")
+                .with_id("native")
+                .subject(SUBJECT)
+                .header("lang", "rust"),
+        )
+        .await
+        .unwrap();
+    let manager = streams.bind(&stream.id).await.unwrap();
+    let topic = format!("{prefix}/native/{SUBJECT}");
+
+    // Retained, so the tool started afterwards is handed it at once.
+    manager
+        .publish(
+            SUBJECT,
+            event("ada", ""),
+            &Options::default().with_retain().header("site", "plant-3"),
+        )
+        .await
+        .unwrap();
+    let out = mosquitto_sub(&topic).output().expect("run mosquitto_sub");
+    let line = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        line.trim(),
+        format!("lang:rust site:plant-3 {topic}"),
+        "mosquitto_sub: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    streams.clear_retained(&stream.id, SUBJECT).await.unwrap();
+
+    // Live, not retained: the tool subscribes first, and the provider
+    // publishes until it has heard one.
+    let mut child = mosquitto_sub(&topic)
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn mosquitto_sub");
+    let opts = Options::default().header("traceparent", "00-ab");
+    for _ in 0..50 {
+        manager
+            .publish(SUBJECT, event("grace", ""), &opts)
+            .await
+            .unwrap();
+        if child.try_wait().unwrap().is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout).trim(),
+        format!("lang:rust traceparent:00-ab {topic}")
+    );
+    streams.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn headers_override_survive_redelivery_and_refuse_what_is_invalid() {
+    let _serial = SERIAL.lock().await;
+    let prefix = fresh_for(APP, "headers");
+    let streams = connect_as(APP, &prefix).await;
+    let stream = streams
+        .create(
+            Stream::named("h")
+                .with_id("h")
+                .subject(SUBJECT)
+                .headers([("lang", "rust"), ("site", "plant-3")]),
+        )
+        .await
+        .unwrap();
+    let manager = streams.bind(&stream.id).await.unwrap();
+    let durable = as_durable(manager.as_ref()).unwrap();
+    let consumer = fresh("hdr");
+
+    let mut deliveries = durable
+        .consume(SUBJECT, &consumer, &Options::default())
+        .await
+        .unwrap();
+    let sent = manager
+        .publish(
+            SUBJECT,
+            event("a", ""),
+            &Options::default().header("site", "plant-4"),
+        )
+        .await
+        .unwrap();
+    let delivery = next_delivery(&mut deliveries).await;
+    assert_eq!(delivery.id(), sent);
+    assert_eq!(delivery.headers().get("lang"), Some("rust"));
+    assert_eq!(delivery.headers().get("site"), Some("plant-4"));
+    assert!(!delivery.can_delay_redelivery());
+    match delivery.nak_after(Duration::from_secs(1)).await {
+        Err(StreamError::Unsupported(why)) => assert!(why.contains("mqtt"), "{why}"),
+        other => panic!("nak_after: {other:?}"),
+    }
+    settle().await;
+    drop(deliveries);
+    settle().await;
+    // Refused nak_after left it outstanding: the session hands it back on
+    // resume, headers and all.
+    let mut again = durable
+        .consume(SUBJECT, &consumer, &Options::default())
+        .await
+        .unwrap();
+    let redelivered = next_delivery(&mut again).await;
+    assert_eq!(redelivered.id(), sent);
+    assert_eq!(redelivered.headers().get("site"), Some("plant-4"));
+    redelivered.ack().await.unwrap();
+    settle().await;
+    drop(again);
+
+    // A runtime-go-shaped message, no headers, still round-trips.
+    let plain = Stream::named("plain").with_id("plain").subject(SUBJECT);
+    streams.create(plain).await.unwrap();
+    let go = streams.bind("plain").await.unwrap();
+    let mut go_sub = go.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    let id = go
+        .publish(SUBJECT, event("go", ""), &Options::default())
+        .await
+        .unwrap();
+    let message = next(&mut go_sub).await;
+    assert_eq!(message.id(), id);
+    assert!(message.headers().is_empty());
+    drop(go_sub);
+
+    // Invalid headers fail at the call that set them.
+    let error = streams
+        .create(Stream::named("bad").subject(SUBJECT).header("a:b", "x"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+    let error = streams
+        .update("h", Stream::named("h").subject(SUBJECT).header("k", "a\rb"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+    let error = manager
+        .publish(SUBJECT, event("", ""), &Options::default().header("", "x"))
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+    streams.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn expiry_drops_what_waited_too_long() {
+    let _serial = SERIAL.lock().await;
+    let prefix = fresh_for(APP, "expiry");
+    let streams = connect_as(APP, &prefix).await;
+    let manager = declare(&streams, "x", &[SUBJECT]).await;
+    let durable = as_durable(manager.as_ref()).unwrap();
+    let consumer = fresh("exp");
+
+    // The session exists, and nobody is attached to it.
+    drop(
+        durable
+            .consume(SUBJECT, &consumer, &Options::default())
+            .await
+            .unwrap(),
+    );
+    settle().await;
+    let short = manager
+        .publish(
+            SUBJECT,
+            event("short", ""),
+            // Sub-second: rounded up to one second.
+            &Options::default().with_expiry(Duration::from_millis(400)),
+        )
+        .await
+        .unwrap();
+    let long = manager
+        .publish(
+            SUBJECT,
+            event("long", ""),
+            &Options::default().with_expiry(Duration::from_secs(120)),
+        )
+        .await
+        .unwrap();
+    let forever = manager
+        .publish(SUBJECT, event("forever", ""), &Options::default())
+        .await
+        .unwrap();
+    // A retained value with an expiry is gone for later subscribers too.
+    manager
+        .publish(
+            SUBJECT,
+            event("retained", ""),
+            &Options::default()
+                .with_retain()
+                .with_expiry(Duration::from_secs(1)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+
+    let mut resumed = durable
+        .consume(SUBJECT, &consumer, &Options::default())
+        .await
+        .unwrap();
+    let ids = drain(&mut resumed, Duration::from_secs(2)).await;
+    assert!(!ids.contains(&short), "the expired message was delivered");
+    assert_eq!(&ids[..2], &[long, forever], "{ids:?}");
+    let mut late = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+    hears_nothing(
+        &mut late,
+        Duration::from_secs(1),
+        "an expired retained value",
+    )
+    .await;
+    settle().await;
+    drop(resumed);
+    streams.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn retain_reaches_later_subscribers_once_and_clears() {
+    let _serial = SERIAL.lock().await;
+    let prefix = fresh_for(APP, "retain");
+    let streams = connect_as(APP, &prefix).await;
+    let manager = declare(&streams, "r", &[SUBJECT]).await;
+    let durable = as_durable(manager.as_ref()).unwrap();
+    let sent = manager
+        .publish(
+            SUBJECT,
+            event("last", ""),
+            &Options::default().with_retain().header("lang", "rust"),
+        )
+        .await
+        .unwrap();
+
+    // Another process joins later and is handed it, framed and decoded.
+    let other = connect_as(APP, &prefix).await;
+    let late = declare(&other, "r", &[SUBJECT]).await;
+    let mut subscription = late.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    let message = next(&mut subscription).await;
+    assert_eq!(message.id(), sent);
+    assert_eq!(message.json::<Event2>().unwrap().user, "last");
+    assert_eq!(message.headers().get("lang"), Some("rust"));
+
+    // A durable consumer gets it when its subscription is new, and not
+    // again when it resumes.
+    let consumer = fresh("ret");
+    let mut first = durable
+        .consume(SUBJECT, &consumer, &Options::default())
+        .await
+        .unwrap();
+    let delivery = next_delivery(&mut first).await;
+    assert_eq!(delivery.id(), sent);
+    delivery.ack().await.unwrap();
+    settle().await;
+    drop(first);
+    settle().await;
+    let mut resumed = durable
+        .consume(SUBJECT, &consumer, &Options::default())
+        .await
+        .unwrap();
+    assert!(
+        drain(&mut resumed, Duration::from_secs(1)).await.is_empty(),
+        "the retained value came back on resume"
+    );
+    drop(resumed);
+
+    // Cleared: the live subscriber skips the empty message, and the next
+    // subscriber is handed nothing.
+    streams.clear_retained("r", SUBJECT).await.unwrap();
+    hears_nothing(&mut subscription, Duration::from_millis(500), "the clear").await;
+    let mut later = late.subscribe(SUBJECT, &Options::default()).await.unwrap();
+    hears_nothing(
+        &mut later,
+        Duration::from_secs(1),
+        "a cleared retained value",
+    )
+    .await;
+    drop(subscription);
+    drop(later);
+    other.close().await.unwrap();
     streams.close().await.unwrap();
 }

@@ -27,6 +27,7 @@ struct Job {
 
 const SUBJECT: &str = "job.queued";
 
+/// Queues a job, naks it straight back, and acks the redelivery.
 #[tokio::main]
 async fn main() -> streams::Result<()> {
     let url = std::env::var("AMQP_URL")
@@ -98,6 +99,7 @@ async fn main() -> streams::Result<()> {
     Ok(())
 }
 
+/// The next delivery, or an error after 15s or if the consumer ends.
 async fn receive(deliveries: &mut Deliveries) -> streams::Result<Delivery> {
     tokio::time::timeout(Duration::from_secs(15), deliveries.next())
         .await

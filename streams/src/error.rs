@@ -45,6 +45,11 @@ pub enum StreamError {
     #[error("streams: {0}")]
     Codec(String),
 
+    /// A header the contract or the broker refuses: an empty or oversized
+    /// key, a control character, a prefix the broker reserves.
+    #[error("streams: invalid header: {0}")]
+    InvalidHeader(String),
+
     /// A received payload was not a frame this contract wrote.
     #[error("streams: message on {subject:?} {reason}")]
     Frame {
@@ -85,7 +90,10 @@ impl StreamError {
     pub fn is_settled(&self) -> bool {
         matches!(
             self,
-            Self::UnknownSubject { .. } | Self::Unsupported(_) | Self::Codec(_)
+            Self::UnknownSubject { .. }
+                | Self::Unsupported(_)
+                | Self::Codec(_)
+                | Self::InvalidHeader(_)
         )
     }
 

@@ -1,9 +1,10 @@
 //! JetStream: the same subjects as core NATS, backed by a stored log.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, collections::VecDeque, sync::Arc, time::Duration};
 
 use async_nats::{
-    Client,
+    Client, HeaderMap, Subject,
+    header::NATS_MESSAGE_TTL,
     jetstream::{
         self, AckKind, ErrorCode,
         consumer::{
@@ -11,23 +12,24 @@ use async_nats::{
             pull::{self, MessagesErrorKind, OrderedConfig},
         },
         context::{CreateStreamErrorKind, GetStreamErrorKind},
-        message::PublishMessage,
         stream,
     },
 };
-use futures::{
-    FutureExt, StreamExt, TryStreamExt,
-    future::{self, Either},
-    stream::{BoxStream, FuturesOrdered},
-};
+use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    Acker, Batch, Deliveries, Delivery, Durable, Manager, Options, Payload, Position, Positioned,
-    Publisher, Registry, Result, Stream, StreamError, Streams, Subscriber, Subscription, provider,
+    Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Options, Payload, Position,
+    Positioned, Publisher, Registry, Result, Stream, StreamError, Streams, Subscriber,
+    Subscription, provider,
 };
 
-use super::{NatsConfig, check_concrete, check_subject};
+use super::{
+    LastSubject, NatsConfig,
+    acks::{self, AckError, Acks, Credit, Pending},
+    check_concrete, check_stream_headers, check_subject, from_header_map, outgoing, refuse_retain,
+    to_header_map,
+};
 
 /// Metadata key for [`Stream::name`].
 ///
@@ -41,6 +43,12 @@ pub const META_NAME: &str = "runtime-go.name";
 pub const META_USER: &str = "runtime-go.user_id";
 /// Metadata key for [`Stream::active`], stored as `"true"`; see [`META_NAME`].
 pub const META_ACTIVE: &str = "runtime-go.active";
+/// Metadata key for [`Stream::headers`]: the headers as one JSON object, as
+/// [`Stream`] serialises them (`{"lang":"rust"}`), and absent when there are
+/// none, so a stream without headers has exactly the metadata runtime-go
+/// writes. One key rather than one per header keeps the set whole: an update
+/// replaces it, never leaves a removed header behind. See [`META_NAME`].
+pub const META_HEADERS: &str = "runtime-go.headers";
 
 /// A [`Streams`] backed by JetStream, which keeps a log and remembers what each
 /// named consumer has handled.
@@ -51,6 +59,11 @@ pub const META_ACTIVE: &str = "runtime-go.active";
 ///
 /// Streams are real server-side objects here: a stream one process creates,
 /// another binds, and a Go service created it just as well.
+///
+/// Every stream it creates or updates has `allow_msg_ttl` set, so
+/// [`Options::expires`] works on it (NATS 2.11 or later). The server will not
+/// turn that off again, so an update that leaves it unset, from an older
+/// runtime-go for one, is refused by the server.
 ///
 /// Cloning is cheap.
 #[derive(Clone)]
@@ -65,6 +78,11 @@ const ORDERED_INACTIVE_THRESHOLD: Duration = Duration::from_secs(30);
 /// What every manager bound from one provider needs.
 struct Shared {
     context: jetstream::Context,
+    client: Client,
+    /// The PubAck routing for this provider, started by the first publish.
+    /// Its in-flight limit is the provider's, as nats.go's is its JetStream
+    /// context's; see [`acks::MAX_PENDING`].
+    acks: tokio::sync::OnceCell<Acks>,
     registry: Registry,
     metrics: provider::Metrics,
     /// Zero leaves it to the server.
@@ -90,7 +108,7 @@ impl JetStreamProvider {
                     .into(),
             ));
         }
-        let context = jetstream::new(client);
+        let context = jetstream::new(client.clone());
         context
             .query_account()
             .await
@@ -98,6 +116,8 @@ impl JetStreamProvider {
         Ok(Self {
             shared: Arc::new(Shared {
                 context,
+                client,
+                acks: tokio::sync::OnceCell::new(),
                 metrics: config.metrics(),
                 ack_wait: config.ack_wait.unwrap_or_default(),
                 max_deliver: config.max_deliver.map(i64::from).unwrap_or_default(),
@@ -127,13 +147,17 @@ impl JetStreamProvider {
     }
 }
 
+/// The error for an id the server has no stream for.
 fn not_found(id: &str) -> StreamError {
     StreamError::NotFound(format!("stream {id}"))
 }
 
 #[async_trait::async_trait]
 impl Streams for JetStreamProvider {
+    /// Creates the server-side stream; its subjects become the stream's subject
+    /// filter, so the server captures every publish on them.
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        check_stream_headers(&stream)?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -155,6 +179,8 @@ impl Streams for JetStreamProvider {
         Ok(stream_from(id, stream))
     }
 
+    /// Reads the stream's config from the server, so a stream made by another
+    /// process is found; the declaration is rebuilt from that config.
     async fn get(&self, id: &str) -> Result<Stream> {
         let handle = self.handle(id, "read").await?;
         Ok(to_stream(&handle.cached_info().config))
@@ -176,7 +202,10 @@ impl Streams for JetStreamProvider {
         }))
     }
 
+    /// Replaces the server-side config. The server refuses changes it cannot
+    /// make in place, such as the storage type, and that refusal is returned.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        check_stream_headers(&stream)?;
         let name = safe_name(id);
         self.shared
             .context
@@ -190,6 +219,7 @@ impl Streams for JetStreamProvider {
         Ok(stream_from(name, stream))
     }
 
+    /// Deletes the server-side stream and every message it holds.
     async fn delete(&self, id: &str) -> Result<()> {
         self.shared
             .context
@@ -229,15 +259,21 @@ impl Streams for JetStreamProvider {
 
 /// The JetStream config for a declaration.
 fn config_for(name: &str, stream: &Stream) -> stream::Config {
+    let mut metadata = HashMap::from([
+        (META_NAME.to_owned(), stream.name.clone()),
+        (META_USER.to_owned(), stream.user_id.clone()),
+        (META_ACTIVE.to_owned(), "true".to_owned()),
+    ]);
+    if !stream.headers.is_empty() {
+        let json = serde_json::to_string(&stream.headers).expect("a string map serialises");
+        metadata.insert(META_HEADERS.to_owned(), json);
+    }
     stream::Config {
         name: name.to_owned(),
         description: (!stream.description.is_empty()).then(|| stream.description.clone()),
         subjects: stream.subjects.clone(),
-        metadata: HashMap::from([
-            (META_NAME.to_owned(), stream.name.clone()),
-            (META_USER.to_owned(), stream.user_id.clone()),
-            (META_ACTIVE.to_owned(), "true".to_owned()),
-        ]),
+        metadata,
+        allow_message_ttl: true,
         ..stream::Config::default()
     }
 }
@@ -261,7 +297,21 @@ fn to_stream(config: &stream::Config) -> Stream {
         subjects: config.subjects.clone(),
         user_id: meta(META_USER),
         active: meta(META_ACTIVE) == "true",
+        headers: stored_headers(config),
     }
+}
+
+/// The stream headers kept under [`META_HEADERS`]. Ones another tool wrote
+/// that do not parse are left off, with a warning, rather than making the
+/// stream unreadable.
+fn stored_headers(config: &stream::Config) -> Headers {
+    let Some(json) = config.metadata.get(META_HEADERS) else {
+        return Headers::new();
+    };
+    serde_json::from_str(json).unwrap_or_else(|error| {
+        warn!(stream = config.name, %error, "ignoring unreadable stream headers");
+        Headers::new()
+    })
 }
 
 /// Makes an id usable as a JetStream stream or consumer name.
@@ -303,26 +353,43 @@ impl Publisher for JetStreamManager {
     /// The message id goes out as `Nats-Msg-Id`, so a publish retried after an
     /// ambiguous failure is collapsed by the server's duplicate window rather
     /// than appended twice. That is what lets [`with_retry`](crate::with_retry)
-    /// retry safely: the backend recognises the repeat. [`Options::ttl`] is
-    /// refused, because JetStream delivers when it is read, not on a timer.
+    /// retry safely: the backend recognises the repeat. Headers go out as
+    /// NATS headers beside it, and [`Options::expires`] as `Nats-TTL`.
+    /// [`Options::ttl`] is refused, because JetStream delivers when it is
+    /// read, not on a timer, and [`Options::retain`], because its only
+    /// last-value form would cap the stream at one message per subject.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
-        self.check_publish(subject, opts)?;
+        let headers = self.check_publish(subject, opts)?;
         let id = provider::publish_id(opts);
-        self.send(subject, &id, &payload).await?.await?;
-        Ok(id)
+        let target = Subject::from(subject);
+        let acks = self.acks().await?;
+        let mut credit = Credit::new(acks);
+        credit.take(1).await;
+        credit.spend();
+        let stored = match self
+            .send(acks, &target, &id, headers.as_ref(), &payload)
+            .await
+        {
+            Ok(pending) => self.stored(subject, &id, pending).await,
+            Err(error) => Err(error),
+        };
+        // The wait is over, so its permit is free. Only a publish cancelled
+        // mid-wait skips this, and its credit then holds the permit until
+        // the wait has expired.
+        credit.finish();
+        stored.map(|()| id)
     }
 }
 
-/// A sent publish, resolving once the server has stored it.
-type Stored = futures::future::BoxFuture<'static, Result<()>>;
-
-/// How many publishes of one batch are awaiting their acks at once. The
-/// context's own limit (5,000 across the connection) still applies on top.
+/// How many publishes of one batch are awaiting their acks at once, as
+/// nats.go's `PublishAsyncMaxPending` bounds them.
 const BATCH_IN_FLIGHT: usize = 1024;
 
 impl JetStreamManager {
-    /// Refuses what no JetStream publish can do, before anything is sent.
-    fn check_publish(&self, subject: &str, opts: &Options) -> Result<()> {
+    /// Refuses what no JetStream publish can do, before anything is sent,
+    /// and returns the headers to send beside `Nats-Msg-Id`, `None` when
+    /// there are none.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<Option<HeaderMap>> {
         check_subject(&self.stream, subject)?;
         check_concrete(&self.stream, subject)?;
         if opts.delay().is_some() {
@@ -330,39 +397,91 @@ impl JetStreamManager {
                 "JetStream delivers when it is read, not on a timer".into(),
             ));
         }
-        Ok(())
+        refuse_retain(
+            opts,
+            "JetStream's last-per-subject form caps the stream at one message per subject, \
+             which would discard the log durable consumers read",
+        )?;
+        let ttl = match opts.expiry() {
+            Some(expiry) => {
+                if !self.handle.cached_info().config.allow_message_ttl {
+                    return Err(StreamError::Unsupported(format!(
+                        "stream {} was created without allow_msg_ttl, so it cannot expire a \
+                         message; update it through this provider to enable it",
+                        self.stream.id
+                    )));
+                }
+                Some(ttl_seconds(expiry)?)
+            }
+            None => None,
+        };
+        let headers = outgoing(&self.stream, opts)?;
+        if headers.is_empty() && ttl.is_none() {
+            return Ok(None);
+        }
+        let mut map = to_header_map(&headers);
+        if let Some(ttl) = ttl {
+            map.insert(NATS_MESSAGE_TTL, ttl.to_string());
+        }
+        Ok(Some(map))
+    }
+
+    /// The provider's PubAck routing, started on first use.
+    async fn acks(&self) -> Result<&Acks> {
+        self.shared
+            .acks
+            .get_or_try_init(|| Acks::start(self.shared.client.clone()))
+            .await
+            .map_err(|error| {
+                error!(%error, "could not subscribe for PubAcks");
+                StreamError::internal("nats: cannot subscribe for PubAcks", error)
+            })
     }
 
     /// Sends one frame under `id`, returning once it has left for the server.
-    /// The future it returns resolves when the server has stored it.
-    ///
-    /// Sending takes one of the context's in-flight permits, which the returned
-    /// future gives back, so it must be awaited (or dropped) for later sends
-    /// to proceed.
-    async fn send(&self, subject: &str, id: &str, payload: &Payload) -> Result<Stored> {
+    /// What it returns resolves, through [`stored`](Self::stored), once the
+    /// server has stored it.
+    async fn send(
+        &self,
+        acks: &Acks,
+        subject: &Subject,
+        id: &str,
+        headers: Option<&HeaderMap>,
+        payload: &Payload,
+    ) -> Result<Pending> {
         let body = provider::pack(id, payload);
-        let bytes = body.len();
-        let fail = move |subject: &str, id: &str, error: &dyn std::fmt::Display| {
-            warn!(subject, id, %error, "could not publish");
-            StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
-        };
-        let ack = self
-            .shared
-            .context
-            .send_publish(
-                subject.to_owned(),
-                PublishMessage::build().payload(body.into()).message_id(id),
-            )
+        acks.send(subject.clone(), id, headers, body.into())
             .await
-            .map_err(|error| fail(subject, id, &error))?;
-        let (subject, id) = (subject.to_owned(), id.to_owned());
-        Ok(async move {
-            ack.await.map_err(|error| fail(&subject, &id, &error))?;
-            debug!(subject, id, bytes, "published");
-            Ok(())
-        }
-        .boxed())
+            .map_err(|error| publish_failed(subject.as_str(), id, &error))
     }
+
+    /// Waits for the server to store a sent publish.
+    async fn stored(&self, subject: &str, id: &str, pending: Pending) -> Result<()> {
+        acks::stored(pending)
+            .await
+            .map_err(|error| publish_failed(subject, id, &error))?;
+        debug!(subject, id, "published");
+        Ok(())
+    }
+}
+
+/// An expiry as `Nats-TTL` seconds. The server counts whole seconds and
+/// refuses less than one, so a fraction rounds up (the message lives at most
+/// that much longer, never shorter) and under a second is refused here, by
+/// name, rather than by the server.
+fn ttl_seconds(expiry: Duration) -> Result<u64> {
+    if expiry < Duration::from_secs(1) {
+        return Err(StreamError::Unsupported(format!(
+            "JetStream expires messages in whole seconds, at least one; {expiry:?} is shorter"
+        )));
+    }
+    Ok(expiry.as_secs() + u64::from(expiry.subsec_nanos() > 0))
+}
+
+/// Logs a publish that was not stored and wraps the reason with its subject.
+fn publish_failed(subject: &str, id: &str, error: &AckError) -> StreamError {
+    warn!(subject, id, %error, "could not publish");
+    StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
 }
 
 #[async_trait::async_trait]
@@ -403,6 +522,7 @@ impl Subscriber for JetStreamManager {
 
         let registry = self.shared.registry.clone();
         let subject = subject.to_owned();
+        let mut last = LastSubject::default();
         Ok(messages
             // The ordered consumer recreates itself across gaps and reconnects,
             // so an error reaching here is one it gave up on.
@@ -418,11 +538,16 @@ impl Subscriber for JetStreamManager {
             })
             .filter_map(move |item| {
                 let decoded = item.ok().and_then(|message| {
-                    provider::unpack(&registry, message.subject.as_str(), message.payload.clone())
-                        .map_err(|error| {
-                            warn!(subject = %message.subject, %error, "dropping a malformed message");
-                        })
-                        .ok()
+                    provider::unpack_shared(
+                        &registry,
+                        last.of(message.subject.as_str()),
+                        message.payload.clone(),
+                    )
+                    .map(|decoded| decoded.with_headers(from_header_map(message.headers.as_ref())))
+                    .map_err(|error| {
+                        warn!(subject = %message.subject, %error, "dropping a malformed message");
+                    })
+                    .ok()
                 });
                 futures::future::ready(decoded)
             })
@@ -432,6 +557,8 @@ impl Subscriber for JetStreamManager {
 
 #[async_trait::async_trait]
 impl Durable for JetStreamManager {
+    /// Starts a new durable consumer at the end of the stream; an existing one
+    /// resumes where it left off.
     async fn consume(&self, subject: &str, consumer: &str, opts: &Options) -> Result<Deliveries> {
         self.consume_from(subject, consumer, Position::New, opts)
             .await
@@ -567,7 +694,8 @@ type Raw = BoxStream<'static, std::result::Result<jetstream::Message, pull::Mess
 /// pulls; the durable consumer stays on the server with its position, and what
 /// was in flight is redelivered once its ack wait runs out.
 fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
-    futures::stream::unfold((raw, lent), |(mut raw, lent)| async move {
+    let state = (raw, lent, LastSubject::default());
+    futures::stream::unfold(state, |(mut raw, lent, mut last)| async move {
         loop {
             let message = match raw.next().await? {
                 Ok(message) => message,
@@ -583,13 +711,13 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
                 }
             };
 
-            let decoded = provider::unpack(
+            let decoded = provider::unpack_shared(
                 &lent.registry,
-                message.subject.as_str(),
+                last.of(message.subject.as_str()),
                 message.payload.clone(),
             );
             let decoded = match decoded {
-                Ok(decoded) => decoded,
+                Ok(decoded) => decoded.with_headers(from_header_map(message.headers.as_ref())),
                 Err(error) => {
                     // Nothing will ever decode this, so no handler will ever
                     // ack it and it would redeliver forever. Terminate it:
@@ -615,7 +743,7 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
                 consumer: lent.consumer.clone(),
             };
             let delivery = Delivery::new(decoded, attempt, Box::new(acker));
-            return Some((delivery, (raw, lent)));
+            return Some((delivery, (raw, lent, last)));
         }
     })
     .boxed()
@@ -623,7 +751,8 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
 
 /// Settles one JetStream delivery. JetStream has a true negative
 /// acknowledgement, so a nak returns the message at once rather than waiting
-/// out the ack timeout.
+/// out the ack timeout, and a delayed one has the server hold the redelivery
+/// back.
 struct JetStreamAck {
     message: jetstream::Message,
     metrics: provider::Metrics,
@@ -632,6 +761,8 @@ struct JetStreamAck {
 }
 
 impl JetStreamAck {
+    /// Sends `kind` on the message's reply subject. The server does not confirm
+    /// it, so `Ok` means the client took it, not that the server applied it.
     async fn settle(self, kind: AckKind, outcome: &'static str) -> Result<()> {
         self.message
             .ack_with(kind)
@@ -644,12 +775,27 @@ impl JetStreamAck {
 
 #[async_trait::async_trait]
 impl Acker for JetStreamAck {
+    /// A `+ACK`: the server will not redeliver this message to the consumer.
     async fn ack(self: Box<Self>) -> Result<()> {
         self.settle(AckKind::Ack, "ack").await
     }
 
+    /// A `-NAK`: the server redelivers at once rather than after `ack_wait`.
     async fn nak(self: Box<Self>) -> Result<()> {
         self.settle(AckKind::Nak(None), "nak").await
+    }
+
+    /// A `-NAK` carrying the delay: the server redelivers no sooner than
+    /// `delay` from when it reads it. A zero delay is a plain nak.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        let delay = (!delay.is_zero()).then_some(delay);
+        self.settle(AckKind::Nak(delay), "nak").await
+    }
+
+    /// True: the server holds a delayed nak back itself, so
+    /// [`nak_after`](Acker::nak_after) honours its delay.
+    fn delays_nak(&self) -> bool {
+        true
     }
 }
 
@@ -661,11 +807,12 @@ impl Batch for JetStreamManager {
     ///
     /// Frames are sent one after another, in order, so the stream stores them
     /// in order; only the waits for their acks overlap. Up to
-    /// `BATCH_IN_FLIGHT` wait at once. While a send waits for room under the
-    /// context's own in-flight limit, the acks already outstanding keep being
-    /// collected, so a batch larger than that limit makes progress instead of
-    /// holding every permit and waiting on itself. Each message carries its
-    /// own id as `Nats-Msg-Id`, so a retried batch is collapsed by the
+    /// `BATCH_IN_FLIGHT` wait at once, within the provider's own limit of
+    /// `MAX_PENDING` across every publisher. While that limit is reached, the
+    /// batch settles its own oldest waits before it waits on anyone else, so
+    /// it never holds room it is itself waiting for. Each message carries its
+    /// own id as `Nats-Msg-Id`, beside the same headers and expiry as every
+    /// other message of the batch, so a retried batch is collapsed by the
     /// duplicate window just as a retried single publish is. A message that
     /// fails is reported by index in [`StreamError::PartialBatch`]; the others
     /// stand.
@@ -676,31 +823,54 @@ impl Batch for JetStreamManager {
         opts: &Options,
     ) -> Result<Vec<String>> {
         provider::check_batch(opts)?;
-        self.check_publish(subject, opts)?;
+        let headers = self.check_publish(subject, opts)?;
+        let target = Subject::from(subject);
+        let acks = self.acks().await?;
+        let mut credit = Credit::new(acks);
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
         let mut outcomes: Vec<Result<()>> = Vec::with_capacity(ids.len());
-        let mut acks: FuturesOrdered<Stored> = FuturesOrdered::new();
-        for (payload, id) in payloads.iter().zip(&ids) {
-            while acks.len() >= BATCH_IN_FLIGHT {
-                outcomes.extend(acks.next().await);
+        let mut waiting: VecDeque<(usize, Pending)> = VecDeque::with_capacity(BATCH_IN_FLIGHT);
+        for (index, (payload, id)) in payloads.iter().zip(&ids).enumerate() {
+            if waiting.len() >= BATCH_IN_FLIGHT {
+                let (done, pending) = waiting.pop_front().expect("a wait");
+                outcomes.push(self.stored(subject, &ids[done], pending).await);
+                credit.finish();
             }
-            let mut send = std::pin::pin!(self.send(subject, id, payload));
-            let sent = loop {
-                if acks.is_empty() {
-                    break send.as_mut().await;
+            // Room under the provider's in-flight limit: take it without
+            // waiting if there is some, else settle this batch's own oldest
+            // wait, and only wait on other publishers when nothing of ours
+            // is outstanding.
+            let left = payloads.len() - index;
+            while !credit.has_spare() && !credit.try_take(left) {
+                match waiting.pop_front() {
+                    Some((done, pending)) => {
+                        outcomes.push(self.stored(subject, &ids[done], pending).await);
+                        credit.finish();
+                    }
+                    None => credit.take(left).await,
                 }
-                match future::select(send.as_mut(), acks.next()).await {
-                    Either::Left((sent, _)) => break sent,
-                    Either::Right((done, _)) => outcomes.extend(done),
+            }
+            credit.spend();
+            match self
+                .send(acks, &target, id, headers.as_ref(), payload)
+                .await
+            {
+                Ok(pending) => waiting.push_back((index, pending)),
+                Err(error) => {
+                    credit.finish();
+                    // Settle everything sent before it first, so outcomes
+                    // stay in index order.
+                    while let Some((done, pending)) = waiting.pop_front() {
+                        outcomes.push(self.stored(subject, &ids[done], pending).await);
+                        credit.finish();
+                    }
+                    outcomes.push(Err(error));
                 }
-            };
-            acks.push_back(match sent {
-                Ok(stored) => stored,
-                Err(error) => future::ready(Err(error)).boxed(),
-            });
+            }
         }
-        while let Some(done) = acks.next().await {
-            outcomes.push(done);
+        while let Some((done, pending)) = waiting.pop_front() {
+            outcomes.push(self.stored(subject, &ids[done], pending).await);
+            credit.finish();
         }
         let failures = outcomes
             .into_iter()
@@ -712,14 +882,18 @@ impl Batch for JetStreamManager {
 }
 
 impl Manager for JetStreamManager {
+    /// JetStream offers every optional capability: durable consumers live on the
+    /// server, start at either end of the stream, and batches are pipelined.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some: a new durable consumer starts at `New` or `Earliest`.
     fn positioned(&self) -> Option<&dyn Positioned> {
         Some(self)
     }
 
+    /// Some: a batch is pipelined, costing about one round trip.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -747,6 +921,7 @@ mod tests {
             subjects: vec!["orders.*".into()],
             user_id: "ada".into(),
             active: false,
+            ..Stream::default()
         };
         let config = config_for("S-1", &stream);
         assert_eq!(config.name, "S-1");
@@ -756,6 +931,42 @@ mod tests {
 
         let back = to_stream(&config);
         assert_eq!(back, stream_from("S-1".into(), stream));
+    }
+
+    #[test]
+    fn stream_headers_live_in_one_metadata_key() {
+        let plain = config_for("S", &Stream::named("orders"));
+        assert!(
+            !plain.metadata.contains_key(META_HEADERS),
+            "Go's metadata, unchanged"
+        );
+        assert!(plain.allow_message_ttl);
+        assert!(to_stream(&plain).headers.is_empty());
+
+        let stream = Stream::named("orders")
+            .subjects(["orders.*"])
+            .headers([("lang", "rust"), ("site", "plant-3")]);
+        let config = config_for("S", &stream);
+        assert_eq!(
+            config.metadata[META_HEADERS],
+            r#"{"lang":"rust","site":"plant-3"}"#
+        );
+        assert_eq!(to_stream(&config).headers, stream.headers);
+
+        let mut garbled = config;
+        garbled
+            .metadata
+            .insert(META_HEADERS.to_owned(), "not json".to_owned());
+        assert!(to_stream(&garbled).headers.is_empty());
+    }
+
+    #[test]
+    fn expiry_is_whole_seconds_rounded_up() {
+        assert_eq!(ttl_seconds(Duration::from_secs(5)).unwrap(), 5);
+        assert_eq!(ttl_seconds(Duration::from_millis(1500)).unwrap(), 2);
+        assert_eq!(ttl_seconds(Duration::from_secs(1)).unwrap(), 1);
+        let error = ttl_seconds(Duration::from_millis(999)).unwrap_err();
+        assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
     }
 
     #[test]

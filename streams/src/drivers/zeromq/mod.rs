@@ -44,6 +44,23 @@
 //! Two frames, identical to runtime-go: the topic `"<stream id>|<subject>"`,
 //! then the [`pack`](crate::provider::pack)ed payload. The topic is a frame of
 //! its own so a SUB socket filters on it without touching the payload.
+//!
+//! # Headers
+//!
+//! ZeroMQ frames carry bytes and nothing else, so a message's
+//! [`Headers`](crate::Headers) (the stream's defaults with the publish's own
+//! on top) ride inside the payload frame, as version 2 of
+//! [`pack_with`](crate::provider::pack_with). A message without headers is
+//! still a version-1 frame, byte for byte what runtime-go writes; a Go
+//! subscriber refuses a version-2 frame with an error naming the version
+//! rather than misreading it. A stream's default headers live in its
+//! declaration, so each side sees the defaults it declared, and
+//! [`Streams::create`] and [`Streams::update`] refuse invalid ones.
+//!
+//! [`Options::expires`](crate::Options::expires) and
+//! [`Options::retain`](crate::Options::retain) are refused: there is no queue
+//! to expire a message from and nothing kept to hand a later subscriber. With
+//! no deliveries to settle, there is no delayed nak either.
 
 mod manager;
 
@@ -91,6 +108,7 @@ pub struct ZmqConfig {
 }
 
 impl Default for ZmqConfig {
+    /// No endpoint, so it must be set before use; settle and registry at defaults.
     fn default() -> Self {
         Self {
             endpoint: String::new(),
@@ -190,6 +208,7 @@ impl ZmqProvider {
         Ok(Self::build(endpoint, config, Role::Subscriber))
     }
 
+    /// Wraps a socket that is already bound (or a subscriber role) with empty declarations.
     fn build(endpoint: String, config: ZmqConfig, role: Role) -> Self {
         Self {
             shared: Arc::new(Shared {
@@ -209,6 +228,7 @@ impl ZmqProvider {
         &self.shared.endpoint
     }
 
+    /// Reads the declared streams, recovering from a poisoned lock.
     fn declared(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Stream>> {
         // The map is only ever replaced whole-entry, so a writer that panicked
         // cannot have left it half-updated; recovering beats poisoning every
@@ -219,6 +239,7 @@ impl ZmqProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Writes the declared streams, recovering from a poisoned lock for the same reason.
     fn declared_mut(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Stream>> {
         self.shared
             .declared
@@ -228,11 +249,13 @@ impl ZmqProvider {
 }
 
 impl Shared {
+    /// Whether [`Streams::close`] has run; managers check it before every send.
     pub(crate) fn is_closed(&self) -> bool {
         *self.closed.borrow()
     }
 }
 
+/// Refuses an empty endpoint early, before any socket is built.
 fn check_endpoint(endpoint: &str) -> Result<()> {
     if endpoint.is_empty() {
         return Err(StreamError::Internal("zeromq: no endpoint given".into()));
@@ -240,6 +263,7 @@ fn check_endpoint(endpoint: &str) -> Result<()> {
     Ok(())
 }
 
+/// The error for an id this provider never declared or has since deleted.
 fn not_found(id: &str) -> StreamError {
     StreamError::NotFound(format!("stream {id}"))
 }
@@ -256,7 +280,9 @@ fn declaration(id: String, stream: Stream) -> Stream {
 
 #[async_trait::async_trait]
 impl Streams for ZmqProvider {
+    /// Declarations live only in this process; nothing reaches the network.
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -268,6 +294,7 @@ impl Streams for ZmqProvider {
         Ok(out)
     }
 
+    /// Reads the in-process declaration; there is no broker to ask.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.declared()
             .get(id)
@@ -275,18 +302,22 @@ impl Streams for ZmqProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// The manager keeps a copy of the declaration taken now.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.get(id).await?;
         Ok(Arc::new(ZmqManager::new(self.shared.clone(), stream)))
     }
 
+    /// Replaces the whole declaration; managers already bound keep the old one.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let mut declared = self.declared_mut();
         let slot = declared.get_mut(id).ok_or_else(|| not_found(id))?;
         *slot = declaration(id.to_owned(), stream);
         Ok(slot.clone())
     }
 
+    /// Forgets the declaration; managers already bound keep working.
     async fn delete(&self, id: &str) -> Result<()> {
         self.declared_mut()
             .remove(id)
@@ -294,6 +325,7 @@ impl Streams for ZmqProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// Lists only the streams this process declared, in id order.
     async fn list(&self) -> Result<Vec<Stream>> {
         // A BTreeMap already iterates in id order, the order runtime-go sorts to.
         Ok(self.declared().values().cloned().collect())

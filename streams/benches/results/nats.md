@@ -131,3 +131,103 @@ runs. (async-nats' ack timeout is 5 s; `JetStreamProvider` builds its context wi
 - `nats_live`: 16/16 passed, including the new large ordered batch test.
 - Library unit tests: passed.
 - `clippy -D warnings`, `rustfmt --check`, and the `aws-lc-rs` check (no match): clean.
+
+## Round 5: against the official tool
+
+`nats bench` (natsio/nats-box) and the driver were run in alternation over the
+same Docker Desktop port forward, plaintext, 256-byte payloads, 200k messages for
+JetStream and 1M for core. The Mac was shared with other benchmarks the whole time
+(load average 15–55), so a single run of either tool swings by 2–4×. `nats bench js
+pub async --dedup` measured anywhere from 40k to 190k/s. The figures below are
+medians of 3–9 paired runs. Compare the ratios, not the absolute numbers.
+
+### What the official tool measures
+
+`nats bench js pub` only publishes. The driver's `fanout`, `batch` and `durable`
+runs also read every message back through the same forward. With an ordered
+consumer reading at the same time, `nats bench` itself drops from about 150k to
+about 97k/s. With a durable consumer acking at the same time, it drops to about
+86k/s. Round 4's "67%" set a pub+sub run against a publish-only run. The like-for-like
+comparisons are:
+
+| JetStream | `nats bench` (median) | before (round-4 driver, paired) | after | ratio after |
+|---|---|---|---|---|
+| publish only, single publishes (512 pubs, `--consumers 0`) vs `js pub async --dedup` | 151k | 159k | 138k | ~0.9 (noise; paired runs split 3–4) |
+| publish only, `batch --message string` (32 × 500, 256 B) | 151k | — | 324k | > 2 |
+| publish + ordered consumer: `fanout` 512 pubs vs `js pub` + `js ordered` | 97k delivered | 78k | 96k | **0.99** |
+| publish + ordered consumer: `batch --message string` | 97k delivered | — | 108k | 1.1 |
+| publish + durable consumer, explicit acks: `durable --consumers 1` vs `js pub` + `js consume` | 86k delivered | 74k | 80k | **0.93** |
+
+In every pair the delivered rate equalled the published rate. `lost` and `dup` were 0 and every run reported `ok`.
+
+| core NATS (1M msgs) | `nats bench` pub+sub | ours, 1 / 32 / 256 publishers (median delivered) |
+|---|---|---|
+| fanout | 228k (169k–469k) | 236k / 280k / 300k |
+
+Core NATS is at or above the tool at every publisher count. Round 4's 256-publisher
+dip did not reproduce once publishers and subscribers had separate connections, though the noise
+on this machine cannot rule out a small effect.
+
+### What changed
+
+- **JetStream PubAcks (`drivers/nats/acks.rs`, new).** async-nats' `send_publish`
+  turns each publish into its own request, which costs three things:
+  - an inbox from the global nuid generator, which sits behind a mutex;
+  - a permit from one semaphore shared by every publisher on the connection;
+  - two `tokio::time::timeout`s on the runtime's timer wheel.
+
+  `sample` taken during a 32-publisher batch run showed 30% of worker time in
+  `__psynch_mutexwait` on those three locks. The driver now does what nats.go's
+  `PublishAsync` does:
+  - one `<inbox>.*` reply subscription per connection, opened on the first publish;
+  - a counter for reply tokens and 16 sharded pending maps;
+  - one task that routes each PubAck to its waiter and sweeps waits older than 5 s
+    every 250 ms. That 5 s is async-nats' JetStream ack timeout.
+
+  In-flight publishes are capped at 4,000 per connection. That is nats.go's
+  `PublishAsyncMaxPending`. Without the cap, 32 × 1,024 in flight overflowed the
+  stream's inbound queue and the server answered `429 too many requests` (10167). A
+  batch takes and returns permits 64 at a time, and it settles its own oldest waits
+  before it waits on anyone else.
+
+  Nothing changes on the wire: the same subject, `Nats-Msg-Id` and frame. The
+  reply goes under the client's inbox prefix. `publish` still returns only after a
+  PubAck that names a stream and sequence. A 503 no-responders reply is reported as
+  no stream, and a JetStream error is reported as a failure. After the sweep,
+  `mutexwait` was gone from the profile, and the client sat mostly idle waiting on
+  the network.
+- **Batch:** the waits are a plain `VecDeque` of receivers, not a `FuturesOrdered` of
+  boxed futures.
+- **Receive paths:** all three now use `provider::unpack_shared` with one shared
+  subject per subscription (`LastSubject`). Those are the core subscribe, the JetStream ordered subscribe and the durable consume.
+- **Bench target:** publishers and subscribers each have their own connection, as in
+  `nats bench` and as in a service that both produces and consumes heavily. When they shared one, PubAcks queued behind
+  deliveries on the connection's single reader task.
+- **Harness (generic):** `--consumers 0` attaches no receiver, which gives a publish-only run to set
+  beside a tool that only publishes. Only that case changes. `fanout` and `batch`
+  still default to 1 receiver.
+
+### What limits it now
+
+The client process is mostly idle (`__psynch_cvwait`) in every JetStream run.
+What limits throughput is the PubAck round trip through the Docker Desktop forward,
+and the server delivering each message back out through that same forward. The
+official tool hits the same limit. Single publishes need about 500 in flight, so
+`--publishers` should be 256–512. `batch` needs about 32.
+
+### Tests
+
+- `nats_e2e`, secure, `STREAMS_E2E_RESTART=1`, strict: 19/19 passed, three times in a
+  row. This includes the forbidden-publish case, which now fails through the ack
+  sweep.
+- `nats_live`: 16/16 passed.
+- Library tests: 17/17 passed. New: PubAck parsing, and `LastSubject`.
+- `clippy -D warnings`, `rustfmt --check` and the `aws-lc-rs` check (no match): clean.
+
+## Headers (round 6)
+
+Header-less publishes are unchanged on the wire (a plain `PUB` on core NATS,
+only `Nats-Msg-Id` on JetStream) and in speed. One unpaced plaintext run each
+after the change: core fanout 382k/s, core batch 1.52M/s, JetStream batch
+126k/s, JetStream fanout (512 pubs) 100k/s, all `ok` and inside the ranges
+above.

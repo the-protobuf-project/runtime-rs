@@ -23,6 +23,8 @@ struct Tick {
 const STREAM_ID: &str = "market";
 const SUBJECT: &str = "tick";
 
+/// Binds a publisher and connects a subscriber in one process, sends a tick,
+/// and shows the subscriber refusing to publish and to be durable.
 #[tokio::main]
 async fn main() -> streams::Result<()> {
     // The publisher binds and the subscriber connects. They are separate

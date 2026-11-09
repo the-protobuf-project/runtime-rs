@@ -39,6 +39,7 @@ const SUBJECT: &str = "user.created";
 /// How long a test waits for a delivery before calling it lost.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// The plaintext broker, `RABBITMQ_TEST_URL` or the compose default.
 fn url() -> String {
     std::env::var("RABBITMQ_TEST_URL")
         .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:15682/%2f".into())
@@ -54,6 +55,7 @@ fn prefix() -> String {
     format!("t{nanos}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -64,6 +66,11 @@ fn event(user: &str, action: &str) -> Payload {
 
 /// A provider on a fresh connection the test owns, as an application would.
 async fn provider() -> (Arc<Connection>, RabbitProvider) {
+    provider_under(&prefix()).await
+}
+
+/// [`provider`] under a prefix the caller chose, to find its names on the broker.
+async fn provider_under(prefix: &str) -> (Arc<Connection>, RabbitProvider) {
     let conn = Connection::connect(&url(), ConnectionProperties::default())
         .await
         .unwrap_or_else(|e| {
@@ -73,12 +80,14 @@ async fn provider() -> (Arc<Connection>, RabbitProvider) {
             )
         });
     let conn = Arc::new(conn);
-    let provider = RabbitProvider::new(conn.clone(), RabbitConfig::default().with_prefix(prefix()))
+    let provider = RabbitProvider::new(conn.clone(), RabbitConfig::default().with_prefix(prefix))
         .await
         .unwrap();
     (conn, provider)
 }
 
+/// A fresh provider with a stream over `subjects` bound, and the connection,
+/// which the test must keep alive for as long as it uses the manager.
 async fn declare(subjects: &[&str]) -> (RabbitProvider, Arc<dyn Manager>, Arc<Connection>) {
     let (conn, provider) = provider().await;
     let stream = provider
@@ -93,6 +102,7 @@ async fn declare(subjects: &[&str]) -> (RabbitProvider, Arc<dyn Manager>, Arc<Co
     (provider, manager, conn)
 }
 
+/// The next item within [`WAIT`], panicking on a timeout or an ended stream.
 async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
     tokio::time::timeout(WAIT, stream.next())
         .await
@@ -435,4 +445,562 @@ async fn refusals() {
         durable.consume(SUBJECT, "", &Options::default()).await,
         Err(StreamError::Unsupported(_))
     ));
+}
+
+// Headers, expiry, retain and delayed nak.
+
+/// The plaintext broker's container, for its own tools.
+const CONTAINER: &str = "tpp-streams-rabbitmq";
+
+/// A stream declaring [`SUBJECT`] with `headers` as its defaults, under a
+/// prefix of its own, and the name of a durable consumer's queue on it.
+struct Headed {
+    provider: RabbitProvider,
+    manager: Arc<dyn Manager>,
+    conn: Arc<Connection>,
+    exchange: String,
+}
+
+impl Headed {
+    /// Declares the stream on a fresh connection under a new prefix and
+    /// records the exchange name the broker knows it by.
+    async fn new(headers: &[(&str, &str)]) -> Self {
+        let prefix = prefix();
+        let (conn, provider) = provider_under(&prefix).await;
+        let stream = provider
+            .create(
+                Stream::named("headers")
+                    .subjects([SUBJECT])
+                    .headers(headers.iter().copied()),
+            )
+            .await
+            .unwrap();
+        let manager = provider.bind(&stream.id).await.unwrap();
+        Self {
+            provider,
+            manager,
+            conn,
+            exchange: format!("{prefix}.{}", stream.id),
+        }
+    }
+
+    /// The durable queue `consumer` reads [`SUBJECT`] from.
+    fn queue(&self, consumer: &str) -> String {
+        format!("{}.{consumer}.user-created", self.exchange)
+    }
+
+    /// Declares `consumer`'s queue and detaches, so publishes wait in it.
+    async fn park(&self, consumer: &str) {
+        let durable = as_durable(self.manager.as_ref()).unwrap();
+        drop(
+            durable
+                .consume(SUBJECT, consumer, &Options::default())
+                .await
+                .unwrap(),
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// `docker exec` into the plaintext broker, failing loudly.
+fn in_broker(args: &[&str]) -> Vec<u8> {
+    let out = std::process::Command::new("docker")
+        .args(["exec", CONTAINER])
+        .args(args)
+        .output()
+        .expect("docker is not on PATH");
+    assert!(
+        out.status.success(),
+        "{args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    out.stdout
+}
+
+/// The broker's own view of `queue`'s messages, through the management HTTP
+/// API inside the container, leaving them in the queue.
+fn peek(queue: &str) -> Vec<serde_json::Value> {
+    let url = format!(
+        "http://guest:guest@127.0.0.1:15672/api/queues/%2f/{}/get",
+        queue.replace(':', "%3A")
+    );
+    let body = r#"{"count":10,"ackmode":"ack_requeue_true","encoding":"base64"}"#;
+    let out = in_broker(&[
+        "wget",
+        "-q",
+        "-O-",
+        "--header",
+        "content-type: application/json",
+        "--post-data",
+        body,
+        &url,
+    ]);
+    serde_json::from_slice(&out).unwrap()
+}
+
+/// How many messages the broker holds in `queue`, delivered or not.
+fn depth(queue: &str) -> usize {
+    let out = in_broker(&["rabbitmqctl", "-q", "list_queues", "name", "messages"]);
+    String::from_utf8_lossy(&out)
+        .lines()
+        .find_map(|line| {
+            let mut words = line.split_whitespace();
+            (words.next() == Some(queue)).then(|| words.next().unwrap().parse().unwrap())
+        })
+        .unwrap_or_else(|| panic!("no queue {queue}"))
+}
+
+/// A message's headers as owned pairs, in the order they arrived.
+fn headers_of(m: &streams::Message) -> Vec<(String, String)> {
+    m.headers()
+        .iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect()
+}
+
+/// Literal pairs as owned ones, to compare with [`headers_of`].
+fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
+    p.iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
+/// Stream defaults arrive and a publish's own win, on single publishes over
+/// every channel of the pool and on batches.
+#[tokio::test]
+async fn headers_travel_in_the_amqp_properties() {
+    let h = Headed::new(&[("lang", "rust"), ("site", "plant-3")]).await;
+    let m = &h.manager;
+    let mut sub = m.subscribe(SUBJECT, &Options::default()).await.unwrap();
+
+    m.publish(SUBJECT, event("ada", ""), &Options::default())
+        .await
+        .unwrap();
+    let got = next(&mut sub).await;
+    assert_eq!(
+        headers_of(&got),
+        pairs(&[("lang", "rust"), ("site", "plant-3")])
+    );
+    assert_eq!(got.json::<Event>().unwrap().user, "ada");
+
+    // More publishes than channels, so every channel carries them.
+    for _ in 0..8 {
+        m.publish(
+            SUBJECT,
+            event("grace", ""),
+            &Options::default()
+                .header("site", "plant-4")
+                .header("traceparent", "00-ab"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            headers_of(&next(&mut sub).await),
+            pairs(&[
+                ("lang", "rust"),
+                ("site", "plant-4"),
+                ("traceparent", "00-ab")
+            ])
+        );
+    }
+
+    let ids = as_batch(m.as_ref())
+        .unwrap()
+        .publish_batch(
+            SUBJECT,
+            vec![event("a", ""), event("b", "")],
+            &Options::default().header("batch", "1"),
+        )
+        .await
+        .unwrap();
+    for id in &ids {
+        let got = next(&mut sub).await;
+        assert_eq!(got.id(), id);
+        assert_eq!(
+            headers_of(&got),
+            pairs(&[("batch", "1"), ("lang", "rust"), ("site", "plant-3")])
+        );
+    }
+}
+
+/// Another tool reading the broker sees the headers as an AMQP table and the
+/// expiry as the `expiration` property; the body is runtime-go's version-1
+/// frame with no header in it, and a header-less publish sends no table.
+#[tokio::test]
+async fn headers_are_native_amqp_properties() {
+    let h = Headed::new(&[("lang", "rust")]).await;
+    h.park("audit").await;
+    let queue = h.queue("audit");
+
+    let payload = event("ada", "created");
+    let id = h
+        .manager
+        .publish(
+            SUBJECT,
+            payload.clone(),
+            &Options::default()
+                .header("traceparent", "00-ab")
+                .with_expiry(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+    let seen = peek(&queue);
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    let props = &seen[0]["properties"];
+    assert_eq!(props["headers"]["lang"], "rust", "{props}");
+    assert_eq!(props["headers"]["traceparent"], "00-ab", "{props}");
+    assert_eq!(props["expiration"], "60000", "{props}");
+    assert_eq!(props["message_id"], id.as_str(), "{props}");
+    eprintln!("management API sees: {props}");
+
+    let ch = h.conn.create_channel().await.unwrap();
+    let raw = ch
+        .basic_get(
+            queue.as_str().into(),
+            lapin::options::BasicGetOptions { no_ack: true },
+        )
+        .await
+        .unwrap()
+        .expect("the queue did not hold the message");
+    assert_eq!(raw.data, streams::provider::pack(&id, &payload));
+
+    // Without headers or expiry the properties are runtime-go's exactly.
+    let plain = Headed::new(&[]).await;
+    plain.park("audit").await;
+    plain
+        .manager
+        .publish(SUBJECT, event("x", ""), &Options::default())
+        .await
+        .unwrap();
+    let seen = peek(&plain.queue("audit"));
+    let props = seen[0]["properties"].as_object().unwrap();
+    assert!(!props.contains_key("headers"), "{props:?}");
+    assert!(!props.contains_key("expiration"), "{props:?}");
+}
+
+/// A frame a runtime-go peer publishes, with no headers table, reads back with
+/// no headers; one carrying the broker's own bookkeeping and a non-string
+/// value keeps only the string headers.
+#[tokio::test]
+async fn foreign_messages_read_back() {
+    let h = Headed::new(&[]).await;
+    let durable = as_durable(h.manager.as_ref()).unwrap();
+    let mut d = durable
+        .consume(SUBJECT, "go", &Options::default())
+        .await
+        .unwrap();
+    let ch = h.conn.create_channel().await.unwrap();
+    let send = |id: &str, headers: Option<lapin::types::FieldTable>| {
+        let mut props = lapin::BasicProperties::default()
+            .with_message_id(id.into())
+            .with_delivery_mode(2)
+            .with_content_type("application/json".into());
+        if let Some(t) = headers {
+            props = props.with_headers(t);
+        }
+        let body = streams::provider::pack(id, &event("go", ""));
+        let ch = ch.clone();
+        let exchange = h.exchange.clone();
+        async move {
+            ch.basic_publish(
+                exchange.as_str().into(),
+                SUBJECT.into(),
+                lapin::options::BasicPublishOptions::default(),
+                &body,
+                props,
+            )
+            .await
+            .unwrap()
+            .await
+            .unwrap();
+        }
+    };
+    send("go-1", None).await;
+    let got = next(&mut d).await;
+    assert_eq!(got.id(), "go-1");
+    assert!(got.headers().is_empty());
+    assert_eq!(got.json::<Event>().unwrap().user, "go");
+    got.ack().await.unwrap();
+
+    use lapin::types::{AMQPValue, FieldTable};
+    let mut table = FieldTable::default();
+    table.insert("lang".into(), AMQPValue::LongString("go".into()));
+    table.insert("count".into(), AMQPValue::LongInt(3));
+    table.insert("x-origin".into(), AMQPValue::LongString("shovel".into()));
+    send("go-2", Some(table)).await;
+    let got = next(&mut d).await;
+    assert_eq!(headers_of(&got), pairs(&[("lang", "go")]));
+    got.ack().await.unwrap();
+}
+
+/// Headers come back with a redelivery after a nak and after the consumer
+/// dropped the message unsettled.
+#[tokio::test]
+async fn headers_survive_redelivery() {
+    let h = Headed::new(&[("lang", "rust")]).await;
+    let durable = as_durable(h.manager.as_ref()).unwrap();
+    let mut d = durable
+        .consume(SUBJECT, "billing", &Options::default())
+        .await
+        .unwrap();
+    h.manager
+        .publish(
+            SUBJECT,
+            event("ada", ""),
+            &Options::default().header("try", "1"),
+        )
+        .await
+        .unwrap();
+    let want = pairs(&[("lang", "rust"), ("try", "1")]);
+    let first = next(&mut d).await;
+    assert_eq!(headers_of(&first), want);
+    first.nak().await.unwrap();
+    let again = next(&mut d).await;
+    assert!(again.attempt() >= 2);
+    assert_eq!(headers_of(&again), want);
+    drop(again);
+    drop(d);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let mut d = durable
+        .consume(SUBJECT, "billing", &Options::default())
+        .await
+        .unwrap();
+    let back = next(&mut d).await;
+    assert_eq!(headers_of(&back), want);
+    back.ack().await.unwrap();
+}
+
+/// Invalid and RabbitMQ-reserved headers are refused at create, update and
+/// publish, before anything reaches the broker.
+#[tokio::test]
+async fn bad_headers_are_refused() {
+    let (_conn, p) = provider().await;
+    let bad = [
+        ("x-death", "v"),
+        ("x-delivery-count", "1"),
+        ("CC", "user.deleted"),
+        ("BCC", "user.deleted"),
+        ("has space", "v"),
+        ("lang", "two\nlines"),
+    ];
+    for (key, value) in bad {
+        let stream = Stream::named("bad").subjects([SUBJECT]).header(key, value);
+        assert!(
+            matches!(p.create(stream).await, Err(StreamError::InvalidHeader(_))),
+            "create accepted {key:?}"
+        );
+    }
+    let long = "k".repeat(256);
+    assert!(matches!(
+        p.create(Stream::named("bad").subjects([SUBJECT]).header(&long, "v"))
+            .await,
+        Err(StreamError::InvalidHeader(_))
+    ));
+    assert!(
+        p.list().await.unwrap().is_empty(),
+        "a refused create stored a stream"
+    );
+
+    let good = p
+        .create(
+            Stream::named("ok")
+                .subjects([SUBJECT])
+                .header("lang", "rust"),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(
+        p.update(
+            &good.id,
+            Stream::named("ok").subjects([SUBJECT]).header("x-a", "b")
+        )
+        .await,
+        Err(StreamError::InvalidHeader(_))
+    ));
+    assert_eq!(
+        p.get(&good.id).await.unwrap().headers.get("lang"),
+        Some("rust")
+    );
+
+    let m = p.bind(&good.id).await.unwrap();
+    let batch = as_batch(m.as_ref()).unwrap();
+    for (key, value) in bad.into_iter().chain([(long.as_str(), "v")]) {
+        let opts = Options::default().header(key, value);
+        assert!(
+            matches!(
+                m.publish(SUBJECT, event("", ""), &opts).await,
+                Err(StreamError::InvalidHeader(_))
+            ),
+            "publish accepted {key:?}"
+        );
+        assert!(
+            matches!(
+                batch
+                    .publish_batch(SUBJECT, vec![event("", "")], &opts)
+                    .await,
+                Err(StreamError::InvalidHeader(_))
+            ),
+            "batch accepted {key:?}"
+        );
+    }
+}
+
+/// An expired message is dropped by the broker, not delivered; one that has
+/// not expired is delivered with its headers.
+#[tokio::test]
+async fn expired_messages_are_not_delivered() {
+    let h = Headed::new(&[]).await;
+    h.park("late").await;
+    h.manager
+        .publish(
+            SUBJECT,
+            event("stale", ""),
+            &Options::default().with_expiry(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    let fresh = h
+        .manager
+        .publish(
+            SUBJECT,
+            event("fresh", ""),
+            &Options::default().with_expiry(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+    let durable = as_durable(h.manager.as_ref()).unwrap();
+    let mut d = durable
+        .consume(SUBJECT, "late", &Options::default())
+        .await
+        .unwrap();
+    let got = next(&mut d).await;
+    assert_eq!(got.id(), fresh);
+    got.ack().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), d.next())
+            .await
+            .is_err(),
+        "an expired message was delivered"
+    );
+
+    // An expiry RabbitMQ cannot hold is refused by name, and zero means none.
+    let too_long = Duration::from_millis(u64::from(u32::MAX) + 1);
+    assert!(matches!(
+        h.manager
+            .publish(
+                SUBJECT,
+                event("", ""),
+                &Options::default().with_expiry(too_long)
+            )
+            .await,
+        Err(StreamError::Unsupported(_))
+    ));
+    let none = h
+        .manager
+        .publish(
+            SUBJECT,
+            event("zero", ""),
+            &Options::default().with_expiry(Duration::ZERO),
+        )
+        .await
+        .unwrap();
+    assert_eq!(next(&mut d).await.id(), none);
+}
+
+/// RabbitMQ expires a message only once it reaches the head of its queue: a
+/// short-lived message behind a long-lived one stays in the queue past its
+/// expiry, and is dropped, not delivered, once it gets there.
+#[tokio::test]
+async fn expiry_waits_for_the_head_of_the_queue() {
+    let h = Headed::new(&[]).await;
+    h.park("slow").await;
+    let queue = h.queue("slow");
+    let long = h
+        .manager
+        .publish(
+            SUBJECT,
+            event("long", ""),
+            &Options::default().with_expiry(Duration::from_secs(60)),
+        )
+        .await
+        .unwrap();
+    h.manager
+        .publish(
+            SUBJECT,
+            event("short", ""),
+            &Options::default().with_expiry(Duration::from_millis(200)),
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        depth(&queue),
+        2,
+        "the expired message is still held behind the head"
+    );
+
+    let durable = as_durable(h.manager.as_ref()).unwrap();
+    let mut d = durable
+        .consume(SUBJECT, "slow", &Options::default())
+        .await
+        .unwrap();
+    let got = next(&mut d).await;
+    assert_eq!(got.id(), long);
+    got.ack().await.unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), d.next())
+            .await
+            .is_err(),
+        "the expired message was delivered once it reached the head"
+    );
+    assert_eq!(depth(&queue), 0);
+}
+
+/// Retain and a delayed nak are refused by name; a refused delayed nak still
+/// hands the message straight back rather than stranding it.
+#[tokio::test]
+async fn retain_and_delayed_nak_are_refused() {
+    let h = Headed::new(&[]).await;
+    let error = h
+        .manager
+        .publish(SUBJECT, event("", ""), &Options::default().with_retain())
+        .await
+        .unwrap_err();
+    assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
+    assert!(error.to_string().contains("last value"), "{error}");
+    assert!(matches!(
+        as_batch(h.manager.as_ref())
+            .unwrap()
+            .publish_batch(
+                SUBJECT,
+                vec![event("", "")],
+                &Options::default().with_retain()
+            )
+            .await,
+        Err(StreamError::Unsupported(_))
+    ));
+
+    let durable = as_durable(h.manager.as_ref()).unwrap();
+    let mut d = durable
+        .consume(SUBJECT, "retry", &Options::default())
+        .await
+        .unwrap();
+    let id = h
+        .manager
+        .publish(SUBJECT, event("ada", ""), &Options::default())
+        .await
+        .unwrap();
+    let first = next(&mut d).await;
+    assert!(!first.can_delay_redelivery());
+    let error = first.nak_after(Duration::from_secs(30)).await.unwrap_err();
+    assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
+    assert!(error.to_string().contains("requeued"), "{error}");
+    let again = tokio::time::timeout(Duration::from_secs(5), d.next())
+        .await
+        .expect("the refused delayed nak stranded the message")
+        .unwrap();
+    assert_eq!(again.id(), id);
+    again.ack().await.unwrap();
+    drop(h.provider);
 }

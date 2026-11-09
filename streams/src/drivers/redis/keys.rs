@@ -38,6 +38,16 @@ pub(super) const METADATA_FIELD: &str = "meta";
 /// shape depend on the payload's.
 pub(super) const PAYLOAD_FIELD: &str = "msg";
 
+/// What a durable entry's header fields start with: header `lang` is stored as
+/// the field `h:lang`, beside [`PAYLOAD_FIELD`].
+///
+/// A prefix rather than the bare key because a header may be called `msg`,
+/// and the colon keeps any header clear of the driver's own fields: the
+/// contract refuses a `:` inside a key, so `h:<key>` can never be `msg`,
+/// `meta`, or a second header's field. runtime-go reads `msg` and ignores the
+/// rest, so a Go consumer still reads the payload.
+pub(super) const HEADER_FIELD_PREFIX: &str = "h:";
+
 /// Builds every key one provider uses. The prefix and kind are baked in at
 /// construction, so an operation asks for "the key for this id" and cannot
 /// reach another provider's keyspace.
