@@ -25,7 +25,20 @@
 set -euo pipefail
 
 out="$(cd "$(dirname "$0")" && pwd)/tls/out/opcua"
-if [[ -f "$out/client.der" && "${1:-}" != "--force" ]]; then
+
+# Whether $out holds everything below, with a day left on every certificate:
+# a run cut short, or certificates past their 30 days, are issued again.
+complete() {
+  local name thumb
+  for name in server client stranger; do
+    [[ -f "$out/$name.der" && -f "$out/$name.pem" ]] || return 1
+    openssl x509 -inform DER -in "$out/$name.der" -noout -checkend 86400 >/dev/null 2>&1 || return 1
+  done
+  thumb="$(openssl x509 -inform DER -in "$out/server.der" -noout -fingerprint -sha1 | sed 's/.*=//; s/://g')"
+  [[ -f "$out/own/certs/OpcPlc [$thumb].der" && -f "$out/own/private/OpcPlc [$thumb].pfx" ]]
+}
+
+if [[ "${1:-}" != "--force" ]] && complete; then
   echo "certificates already in $out (pass --force to issue new ones)"
   exit 0
 fi

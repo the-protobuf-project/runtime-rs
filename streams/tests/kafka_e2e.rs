@@ -50,6 +50,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -58,10 +59,12 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The mutual-TLS listener, `KAFKA_E2E_ADDR` or the compose default.
 fn addr() -> String {
     std::env::var("KAFKA_E2E_ADDR").unwrap_or_else(|_| "127.0.0.1:19093".into())
 }
 
+/// The test certificate directory, `STREAMS_E2E_TLS_DIR` or docker/tls/out.
 fn certs() -> PathBuf {
     std::env::var("STREAMS_E2E_TLS_DIR").map_or_else(
         |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"),
@@ -69,6 +72,7 @@ fn certs() -> PathBuf {
     )
 }
 
+/// Path of a test certificate, failing with how to generate it when missing.
 fn cert(name: &str) -> String {
     let path = certs().join(name);
     assert!(
@@ -96,6 +100,7 @@ fn tls_client(mutual: bool) -> ClientConfig {
     client
 }
 
+/// The SASL_SSL listener, `KAFKA_E2E_SASL_ADDR` or the compose default.
 fn sasl_addr() -> String {
     std::env::var("KAFKA_E2E_SASL_ADDR").unwrap_or_else(|_| "127.0.0.1:19094".into())
 }
@@ -139,6 +144,7 @@ enum Auth {
 }
 
 impl Auth {
+    /// The client config for this principal's listener and credentials.
     fn client(self) -> ClientConfig {
         match self {
             Self::Mtls => tls_client(true),
@@ -164,6 +170,8 @@ impl Auth {
     }
 }
 
+/// A provider as `auth` under `prefix`, failing with how to start the broker
+/// when it cannot connect.
 async fn provider_at(auth: Auth, prefix: &str, partitions: i32) -> KafkaProvider {
     KafkaProvider::connect(
         auth.client(),
@@ -179,15 +187,18 @@ async fn provider_at(auth: Auth, prefix: &str, partitions: i32) -> KafkaProvider
     })
 }
 
+/// A provider as `auth` under a fresh prefix inside its ACLs, and that prefix.
 async fn provider_as(auth: Auth, partitions: i32) -> (KafkaProvider, String) {
     let prefix = auth.fresh_prefix();
     (provider_at(auth, &prefix, partitions).await, prefix)
 }
 
+/// A provider as the mutual-TLS principal under a fresh prefix.
 async fn provider(partitions: i32) -> (KafkaProvider, String) {
     provider_as(Auth::Mtls, partitions).await
 }
 
+/// Creates a stream over [`SUBJECT`] and binds a manager to it.
 async fn declare(provider: &KafkaProvider) -> (Stream, Arc<dyn Manager>) {
     let stream = provider
         .create(Stream {
@@ -201,6 +212,7 @@ async fn declare(provider: &KafkaProvider) -> (Stream, Arc<dyn Manager>) {
     (stream, manager)
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next(deliveries: &mut Deliveries) -> Delivery {
     tokio::time::timeout(WITHIN, deliveries.next())
         .await
@@ -208,6 +220,7 @@ async fn next(deliveries: &mut Deliveries) -> Delivery {
         .expect("deliveries ended before a message arrived")
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next_message(messages: &mut BoxStream<'static, Message>) -> Message {
     tokio::time::timeout(WITHIN, messages.next())
         .await
@@ -1234,6 +1247,7 @@ async fn headers_travel_as_record_headers() {
 // Durability across a broker restart
 // ---------------------------------------------------------------------------
 
+/// The broker container's docker health status, e.g. `healthy`.
 fn health() -> String {
     let out = Command::new("docker")
         .args(["inspect", "-f", "{{.State.Health.Status}}", CONTAINER])
@@ -1242,6 +1256,8 @@ fn health() -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+/// Restarts the broker container and waits, up to 180s, until it is healthy
+/// and both client listeners answer three metadata reads in a row.
 async fn restart_broker() {
     let status = Command::new("docker")
         .args(["restart", "-t", "30", CONTAINER])

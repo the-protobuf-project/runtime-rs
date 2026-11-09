@@ -6,7 +6,7 @@
 //! the connection shares, and two timers on the runtime's timer wheel. With
 //! many publishers on a multi-threaded runtime those three locks, not the
 //! network, set the rate. This does what nats.go's `PublishAsync` does
-//! instead: one wildcard reply subscription per connection, a counter for the
+//! instead: one wildcard reply subscription per provider, a counter for the
 //! reply tokens, and a single task that routes each PubAck to its waiter and
 //! fails the ones that wait too long.
 //!
@@ -17,10 +17,12 @@
 
 use std::{
     collections::HashMap,
+    pin::pin,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::Poll,
     time::{Duration, Instant},
 };
 
@@ -41,9 +43,14 @@ pub(super) const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 /// meet on one lock.
 const SHARDS: usize = 16;
 
-/// How many publishes may await their PubAcks on one connection at once,
+/// How many publishes may await their PubAcks through one [`Acks`] at once,
 /// nats.go's `PublishAsyncMaxPending` default. Above roughly ten thousand a
 /// stream's inbound queue overflows and the server answers 429.
+///
+/// Like nats.go's, the limit belongs to the publishing context (here, one
+/// provider), not to the connection: the server sets no per-connection
+/// limit, and its 429 is per stream, so two contexts on one connection are
+/// no worse off than two on two connections.
 pub(super) const MAX_PENDING: usize = 4000;
 
 /// How many permits under [`MAX_PENDING`] a batch takes or gives back at a
@@ -68,6 +75,8 @@ pub(super) enum AckError {
 }
 
 impl std::fmt::Display for AckError {
+    /// Keeps the server's or client's wording, so a caller can match on what
+    /// NATS itself would have said.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AckError::Send(e) => write!(f, "{e}"),
@@ -101,10 +110,14 @@ struct Inner {
 }
 
 impl Inner {
+    /// The shard holding `token`'s wait. Splitting the map keeps publishers and
+    /// the reply router from serializing on one lock.
     fn shard(&self, token: u64) -> &Mutex<HashMap<u64, Waiter>> {
         &self.waiting[token as usize % SHARDS]
     }
 
+    /// Hands `outcome` to whoever waits on `token`. A token with no wait (it
+    /// already timed out, or its sender gave up) is dropped silently.
     fn settle(&self, token: u64, outcome: Outcome) {
         let waiter = self.shard(token).lock().expect("ack map").remove(&token);
         if let Some(waiter) = waiter {
@@ -140,11 +153,14 @@ pub(super) struct Acks {
     inner: Arc<Inner>,
     task: AbortHandle,
     /// Permits for [`MAX_PENDING`]. They are taken and returned by count
-    /// through [`Credit`], never held as guard objects.
-    budget: Semaphore,
+    /// through [`Credit`], never held as guard objects. Shared so that the
+    /// permits of an abandoned [`Credit`] can come back after it is gone.
+    budget: Arc<Semaphore>,
 }
 
 impl Drop for Acks {
+    /// Stops routing replies and fails every outstanding wait at once, so no
+    /// publish is left waiting on a reply subscription that no longer exists.
     fn drop(&mut self) {
         self.task.abort();
         self.inner.closed.store(true, Ordering::SeqCst);
@@ -189,13 +205,40 @@ impl Acks {
         Ok(Self {
             inner,
             task,
-            budget: Semaphore::new(MAX_PENDING),
+            budget: Arc::new(Semaphore::new(MAX_PENDING)),
         })
+    }
+
+    /// Returns `permits` once every wait registered by now has ended: the
+    /// sweep fails a wait `ACK_TIMEOUT` after it was sent, checking every
+    /// `SWEEP`, so none outlives that by more.
+    fn release_later(&self, permits: usize) {
+        let budget = self.budget.clone();
+        match tokio::runtime::Handle::try_current() {
+            Ok(runtime) => {
+                runtime.spawn(async move {
+                    tokio::time::sleep(ACK_TIMEOUT + SWEEP).await;
+                    budget.add_permits(permits);
+                });
+            }
+            // No runtime is left to run the sweep either, so nothing is
+            // waiting any more.
+            Err(_) => budget.add_permits(permits),
+        }
     }
 
     /// Sends `payload` to `subject` under `id`, with `headers` beside
     /// `Nats-Msg-Id`, returning once it is on its way. The receiver resolves
     /// when the server has stored it, or refused, or `ACK_TIMEOUT` has passed.
+    ///
+    /// Handing the frame to the connection waits only while the client's
+    /// outbound queue is full, as it is while the connection is down. That
+    /// wait counts against the same `ACK_TIMEOUT`: past it the send gives up
+    /// with [`AckError::TimedOut`] rather than holding its permit for as long
+    /// as the outage lasts. Giving up drops the client's enqueue, which is
+    /// cancel safe, so the frame is either queued whole or not at all. The
+    /// timer is armed only once the queue turns out to be full, so the usual
+    /// send, which enqueues at once, costs none.
     pub(super) async fn send(
         &self,
         subject: Subject,
@@ -205,13 +248,12 @@ impl Acks {
     ) -> Result<Pending, AckError> {
         let token = self.inner.next.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.inner.shard(token).lock().expect("ack map").insert(
-            token,
-            Waiter {
-                tx,
-                sent: Instant::now(),
-            },
-        );
+        let sent = Instant::now();
+        self.inner
+            .shard(token)
+            .lock()
+            .expect("ack map")
+            .insert(token, Waiter { tx, sent });
         if self.inner.closed.load(Ordering::SeqCst) {
             self.inner
                 .shard(token)
@@ -225,18 +267,28 @@ impl Acks {
         let mut headers = headers.cloned().unwrap_or_default();
         headers.insert(NATS_MESSAGE_ID, id);
         let reply = format!("{}{token}", self.inner.prefix);
-        if let Err(error) = self
-            .inner
-            .client
-            .publish_with_reply_and_headers(subject, reply, headers, payload)
-            .await
-        {
+        let mut publish = pin!(
+            self.inner
+                .client
+                .publish_with_reply_and_headers(subject, reply, headers, payload)
+        );
+        let outcome = match futures::poll!(publish.as_mut()) {
+            Poll::Ready(sent) => sent.map_err(|error| AckError::Send(error.to_string())),
+            Poll::Pending => {
+                let deadline = tokio::time::Instant::from_std(sent + ACK_TIMEOUT);
+                match tokio::time::timeout_at(deadline, publish).await {
+                    Ok(sent) => sent.map_err(|error| AckError::Send(error.to_string())),
+                    Err(_) => Err(AckError::TimedOut),
+                }
+            }
+        };
+        if let Err(error) = outcome {
             self.inner
                 .shard(token)
                 .lock()
                 .expect("ack map")
                 .remove(&token);
-            return Err(AckError::Send(error.to_string()));
+            return Err(error);
         }
         Ok(rx)
     }
@@ -245,7 +297,12 @@ impl Acks {
 /// Permits under [`MAX_PENDING`] one caller holds, returned when it drops.
 ///
 /// `spare` are held but not yet spent on a send; the rest are spent on sends
-/// still awaiting acks. Finished sends are returned in chunks.
+/// still awaiting acks. Finished sends are returned in chunks. A caller calls
+/// [`finish`](Self::finish) for every send it spent a permit on once that
+/// send's wait is over, so that a credit dropped with spent permits left
+/// unfinished is one whose caller was cancelled mid-wait: those permits stay
+/// taken until the waits they cover can no longer be open, so cancelling
+/// never lets more than [`MAX_PENDING`] waits stand at once.
 pub(super) struct Credit<'a> {
     acks: &'a Acks,
     held: usize,
@@ -254,6 +311,7 @@ pub(super) struct Credit<'a> {
 }
 
 impl<'a> Credit<'a> {
+    /// A credit holding no permits; the first send takes some.
     pub(super) fn new(acks: &'a Acks) -> Self {
         Self {
             acks,
@@ -307,6 +365,7 @@ impl<'a> Credit<'a> {
         }
     }
 
+    /// Returns the permits of finished sends to the shared budget in one call.
     fn flush(&mut self) {
         if self.finished > 0 {
             self.held -= self.finished;
@@ -317,9 +376,16 @@ impl<'a> Credit<'a> {
 }
 
 impl Drop for Credit<'_> {
+    /// Returns what is free now; permits still covering an open wait are
+    /// released only once that wait can no longer be outstanding.
     fn drop(&mut self) {
-        if self.held > 0 {
-            self.acks.budget.add_permits(self.held);
+        let free = self.spare + self.finished;
+        if free > 0 {
+            self.acks.budget.add_permits(free);
+        }
+        let waiting = self.held - free;
+        if waiting > 0 {
+            self.acks.release_later(waiting);
         }
     }
 }
@@ -337,6 +403,8 @@ struct PubAck {
     seq: Option<IgnoredAny>,
 }
 
+/// Settles the wait a reply belongs to, found by the token after the inbox
+/// prefix. A reply that carries no token of ours is ignored.
 fn route(inner: &Inner, reply: async_nats::Message) {
     let Some(token) = reply
         .subject
@@ -349,6 +417,9 @@ fn route(inner: &Inner, reply: async_nats::Message) {
     inner.settle(token, outcome(&reply));
 }
 
+/// Reads a PubAck reply. "No responders" means no stream captures the
+/// subject; a reply with neither an error nor a stream and sequence is not a
+/// PubAck, and is treated as a refusal rather than as stored.
 fn outcome(reply: &async_nats::Message) -> Outcome {
     if reply.status == Some(StatusCode::NO_RESPONDERS) {
         return Err(AckError::NoStream);
@@ -369,6 +440,7 @@ fn outcome(reply: &async_nats::Message) -> Outcome {
 mod tests {
     use super::*;
 
+    /// A reply on a token-bearing inbox subject, as the server would send.
     fn reply(payload: &str, status: Option<StatusCode>) -> async_nats::Message {
         async_nats::Message {
             subject: "_INBOX.x.1".into(),
@@ -399,5 +471,66 @@ mod tests {
         ));
         assert!(outcome(&reply("hello", None)).is_err());
         assert!(outcome(&reply("{}", None)).is_err());
+    }
+
+    /// A client whose connection never comes up, so nothing drains its
+    /// outbound queue of `capacity` commands.
+    async fn unconnected(capacity: usize) -> Client {
+        async_nats::ConnectOptions::new()
+            .retry_on_initial_connect()
+            .client_capacity(capacity)
+            .connect("127.0.0.1:1")
+            .await
+            .unwrap()
+    }
+
+    /// How many publishes are waiting on an ack, across every shard.
+    fn waits(acks: &Acks) -> usize {
+        acks.inner
+            .waiting
+            .iter()
+            .map(|shard| shard.lock().unwrap().len())
+            .sum()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_send_stuck_on_a_full_queue_gives_up_at_the_ack_deadline() {
+        // The reply subscription takes the queue's only slot.
+        let acks = Acks::start(unconnected(1).await).await.unwrap();
+        let start = tokio::time::Instant::now();
+        let error = acks
+            .send("s".into(), "id", None, Bytes::from_static(b"x"))
+            .await
+            .expect_err("the queue is full");
+        assert!(matches!(error, AckError::TimedOut), "{error}");
+        assert!(start.elapsed() >= ACK_TIMEOUT);
+        assert_eq!(waits(&acks), 0, "the wait is cleaned up");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_abandoned_credit_keeps_its_open_waits_until_they_expire() {
+        let acks = Acks::start(unconnected(64).await).await.unwrap();
+        let mut credit = Credit::new(&acks);
+        credit.take(4).await;
+        credit.spend();
+        credit.spend();
+        credit.finish();
+        drop(credit);
+        assert_eq!(
+            acks.budget.available_permits(),
+            MAX_PENDING - 1,
+            "the spare and finished permits come back at once, the open wait's does not"
+        );
+        tokio::time::sleep(ACK_TIMEOUT).await;
+        assert_eq!(acks.budget.available_permits(), MAX_PENDING - 1);
+        tokio::time::sleep(SWEEP + Duration::from_millis(1)).await;
+        assert_eq!(acks.budget.available_permits(), MAX_PENDING);
+
+        let mut credit = Credit::new(&acks);
+        credit.take(2).await;
+        credit.spend();
+        credit.finish();
+        drop(credit);
+        assert_eq!(acks.budget.available_permits(), MAX_PENDING);
     }
 }

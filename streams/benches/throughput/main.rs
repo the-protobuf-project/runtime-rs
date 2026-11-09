@@ -96,6 +96,8 @@ struct Args {
 }
 
 impl Args {
+    /// Reads `--key value` pairs from the command line, panicking on anything
+    /// unknown or inconsistent so a bad run fails before it connects.
     fn parse() -> Self {
         let mut a = Args {
             backend: "redis".into(),
@@ -157,6 +159,16 @@ impl Args {
         assert!(
             !a.drain || a.scenario == "durable",
             "--drain reads a published log back, so it needs --scenario durable"
+        );
+        // A batch of full-size bodies writes the sequence padded to --payload
+        // bytes; a sequence with more digits than that would overflow the body
+        // and fail the receiver's length check as undecodable.
+        let widest = a.messages.saturating_sub(1).to_string().len();
+        assert!(
+            a.scenario != "batch" || a.message != "string" || a.payload >= widest,
+            "--payload {} cannot hold sequence numbers up to {} ({widest} digits)",
+            a.payload,
+            a.messages.saturating_sub(1)
         );
         // A batch cannot pin ids, so by default it sends Int64Value and reads
         // the sequence from it; `--message string` sends a full-size
@@ -299,6 +311,7 @@ struct Shared {
 }
 
 impl Shared {
+    /// Counts `n` failed publishes, keeping only the first error's text for the report.
     fn error(&self, n: u64, e: impl std::fmt::Display) {
         self.publish_errors.fetch_add(n, Ordering::Relaxed);
         self.first_error
@@ -308,10 +321,13 @@ impl Shared {
     }
 }
 
+/// The `i`th bench subject, zero-padded so subjects sort in order.
 fn subject(i: usize) -> String {
     format!("bench.s{i:02}")
 }
 
+/// Runs one benchmark, prints its report, and appends it as one JSON line to
+/// `target/bench-results.jsonl`.
 #[tokio::main(flavor = "multi_thread")]
 async fn main() {
     LazyLock::force(&START);
@@ -328,6 +344,9 @@ async fn main() {
     writeln!(file, "{}", serde_json::to_string(&report).unwrap()).unwrap();
 }
 
+/// Declares the stream, publishes and receives everything, then deletes the
+/// stream and returns the report. Receivers attach before publishing unless
+/// `--drain` asks to read the finished log back.
 async fn run(args: &Args) -> serde_json::Value {
     let conn = targets::connect(&args.backend, &args.profile, registry())
         .await
@@ -360,6 +379,18 @@ async fn run(args: &Args) -> serde_json::Value {
         Some(sub) => sub.bind(&stream.id).await.expect("bind subscriber"),
         None => publisher.clone(),
     };
+
+    // Draining publishes before any receiver exists, so only a backend that
+    // keeps a log a consumer can start from the beginning of measures a
+    // drain; elsewhere (a RabbitMQ queue or an MQTT session created on
+    // consume) everything published first would be dropped and counted lost.
+    if args.drain
+        && let Err(error) = as_positioned(receiver.as_ref())
+    {
+        panic!(
+            "--drain needs a backend that can replay its log from the earliest message: {error}"
+        );
+    }
 
     // Attach every receiver before anything is published, unless draining.
     let shared = Arc::new(Shared::default());
@@ -434,6 +465,16 @@ async fn run(args: &Args) -> serde_json::Value {
     }
     for p in pubs {
         p.await.expect("publisher task panicked");
+    }
+    // A publish-only run stops the clock here, so the publishing connection
+    // must first have sent what it buffered.
+    if args.receivers_per_subject() == 0
+        && let Some(flush) = &conn.flush
+        && let Err(error) = flush().await
+    {
+        // Counted as a failure, so the run is not reported `ok` when its
+        // messages may never have left the client.
+        shared.error(1, format!("flush: {error}"));
     }
     let publish_secs = pub_start.elapsed().as_secs_f64();
     let published = shared.published.load(Ordering::Relaxed);
@@ -532,6 +573,9 @@ enum Delivered {
     Lent(Delivery),
 }
 
+/// Opens one receiver on `subject` for the scenario: a durable consumer from
+/// the earliest offset where the backend can replay, a group member, or a
+/// plain subscription.
 async fn attach(args: &Args, m: &dyn Manager, subject: &str) -> BoxStream<'static, Delivered> {
     let opts = Options::default().with_prefetch(1024);
     match args.scenario.as_str() {
@@ -565,6 +609,8 @@ async fn attach(args: &Args, m: &dyn Manager, subject: &str) -> BoxStream<'stati
     }
 }
 
+/// Reads `messages` until aborted, recording each sequence and latency in
+/// `slot`; a durable delivery is acked only after it is decoded.
 async fn receive(
     args: Args,
     mut messages: BoxStream<'static, Delivered>,
@@ -602,6 +648,8 @@ async fn receive(
     }
 }
 
+/// Builds the JSON report. `ok` holds only when nothing was lost, failed,
+/// undecodable or unacked, and a group delivered no duplicates.
 #[allow(clippy::too_many_arguments)]
 fn summarize(
     args: &Args,
@@ -637,6 +685,7 @@ fn summarize(
         "backend": args.backend,
         "profile": args.profile,
         "scenario": args.scenario,
+        "drain": args.drain,
         "message": match args.message.as_str() { "int64" => "google.protobuf.Int64Value", "opcua" => "opcua.DataValue(Int64)", _ => "google.protobuf.StringValue" },
         "payload_bytes": if matches!(args.message.as_str(), "int64" | "opcua") { 0 } else { args.payload },
         "messages": args.messages,
@@ -664,6 +713,7 @@ fn summarize(
     })
 }
 
+/// Rounds to two decimals, so the report stays readable.
 fn round(x: f64) -> f64 {
     (x * 100.0).round() / 100.0
 }

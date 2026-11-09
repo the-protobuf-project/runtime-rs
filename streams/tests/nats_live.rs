@@ -25,6 +25,7 @@ struct Event {
 const SUBJECT: &str = "user.created";
 const WITHIN: Duration = Duration::from_secs(5);
 
+/// A JSON `Event` payload for `user`.
 fn event(user: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -33,6 +34,7 @@ fn event(user: &str) -> Payload {
     .unwrap()
 }
 
+/// A plaintext client for `NATS_URL`, failing with how to start the server when it cannot connect.
 async fn client() -> async_nats::Client {
     let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:14222".into());
     async_nats::connect(&url)
@@ -45,6 +47,7 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}.{}", provider::new_id())
 }
 
+/// Declares a stream over `subjects` and binds a manager to it.
 async fn declare(streams: &dyn Streams, subjects: &[&str]) -> (Stream, Arc<dyn Manager>) {
     let stream = streams
         .create(Stream {
@@ -58,6 +61,7 @@ async fn declare(streams: &dyn Streams, subjects: &[&str]) -> (Stream, Arc<dyn M
     (stream, manager)
 }
 
+/// The next item within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
     tokio::time::timeout(WITHIN, stream.next())
         .await
@@ -65,6 +69,7 @@ async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
         .expect("the stream ended")
 }
 
+/// Asserts nothing arrives within `within`; an ended stream also passes.
 async fn nothing<S: futures::Stream + Unpin>(stream: &mut S, within: Duration) {
     if let Ok(Some(_)) = tokio::time::timeout(within, stream.next()).await {
         panic!("something arrived that should not have");
@@ -212,6 +217,7 @@ async fn plain_batch_and_capabilities() {
 
 // ---------------------------------------------------------------- JetStream
 
+/// A JetStream provider on a fresh client, failing if the server lacks JetStream.
 async fn jetstream() -> JetStreamProvider {
     JetStreamProvider::new(client().await, NatsConfig::default())
         .await
@@ -535,6 +541,7 @@ async fn jetstream_is_wire_compatible_with_go() {
 
 // ---------------------------------------------------------------- headers
 
+/// A stream over `subject` declaring default headers `lang` and `site`.
 fn headed(subject: &str) -> Stream {
     Stream::named("headed")
         .subjects([subject])
@@ -542,6 +549,7 @@ fn headed(subject: &str) -> Stream {
         .header("site", "plant-3")
 }
 
+/// Asserts `result` is [`StreamError::InvalidHeader`].
 fn invalid_header<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::InvalidHeader(_))),
@@ -549,6 +557,7 @@ fn invalid_header<T: std::fmt::Debug>(result: streams::Result<T>) {
     );
 }
 
+/// Asserts `result` is [`StreamError::Unsupported`] and its reason mentions `says`.
 fn refused_naming<T: std::fmt::Debug>(result: streams::Result<T>, says: &str) {
     assert!(
         matches!(&result, Err(StreamError::Unsupported(e)) if e.contains(says)),

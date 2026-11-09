@@ -33,6 +33,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -41,6 +42,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The plaintext server, `REDIS_TEST_ADDR` or the compose default.
 fn addr() -> String {
     std::env::var("REDIS_TEST_ADDR").unwrap_or_else(|_| "127.0.0.1:16380".into())
 }
@@ -68,6 +70,8 @@ async fn client() -> redis::Client {
     client
 }
 
+/// A fresh key prefix per call, so tests share no keys, with [`QUICK_RECLAIM`]
+/// so a redelivery happens within a test.
 fn config() -> RedisConfig {
     RedisConfig {
         prefix: format!("t{}", streams::provider::new_id()),
@@ -76,18 +80,23 @@ fn config() -> RedisConfig {
     }
 }
 
+/// A pub/sub provider under a fresh prefix.
 async fn immediate() -> RedisProvider {
     RedisProvider::new(client().await, config())
 }
 
+/// A keyspace-expiry provider under a fresh prefix; [`client`] turns on the
+/// notifications it needs.
 async fn scheduled() -> RedisProvider {
     RedisProvider::scheduled(client().await, config())
 }
 
+/// A Streams provider with `config`.
 async fn durable_with(config: RedisConfig) -> RedisProvider {
     RedisProvider::durable(client().await, config)
 }
 
+/// A Streams provider under a fresh prefix.
 async fn durable() -> RedisProvider {
     durable_with(config()).await
 }
@@ -106,6 +115,7 @@ async fn bind(provider: &RedisProvider, subjects: &[&str]) -> (Stream, Arc<dyn M
     (stream, manager)
 }
 
+/// The next message within `within`, panicking on a timeout or an ended subscription.
 async fn recv(messages: &mut Subscription, within: Duration) -> Message {
     tokio::time::timeout(within, messages.next())
         .await
@@ -113,6 +123,7 @@ async fn recv(messages: &mut Subscription, within: Duration) -> Message {
         .expect("the subscription ended before a message arrived")
 }
 
+/// The next delivery within `within`, panicking on a timeout or an ended consumer.
 async fn recv_delivery(deliveries: &mut Deliveries, within: Duration) -> Delivery {
     tokio::time::timeout(within, deliveries.next())
         .await
@@ -130,6 +141,7 @@ where
     }
 }
 
+/// Runs `cmd` on a connection of its own, to look at the server behind the provider.
 async fn command<T: redis::FromRedisValue>(cmd: &redis::Cmd) -> T {
     let mut conn = client()
         .await
@@ -455,6 +467,7 @@ async fn delivery_survives_a_late_reader() {
 
 // --- scheduled -------------------------------------------------------------
 
+/// Options scheduling delivery `ms` milliseconds from now, through the TTL.
 fn after(ms: u64) -> Options {
     Options::default().with_ttl(Duration::from_millis(ms))
 }
@@ -919,6 +932,7 @@ async fn max_len_caps_the_log() {
 
 // --- headers, expiry, retain, delayed nak ------------------------------------
 
+/// Headers from literal pairs, for comparing with what arrives.
 fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
     pairs.into_iter().collect()
 }
@@ -931,6 +945,7 @@ fn with_defaults() -> Stream {
         .header("site", "plant-3")
 }
 
+/// Creates `stream` as given and binds a manager to it.
 async fn bind_stream(provider: &RedisProvider, stream: Stream) -> (Stream, Arc<dyn Manager>) {
     let stream = provider.create(stream).await.unwrap();
     let manager = provider.bind(&stream.id).await.unwrap();
@@ -942,6 +957,7 @@ fn overridden() -> Headers {
     headers([("lang", "rust"), ("site", "plant-9"), ("trace", "t-1")])
 }
 
+/// A publish overriding `site` and adding `trace` on top of the stream's defaults.
 fn override_opts() -> Options {
     Options::default()
         .header("site", "plant-9")
@@ -1127,6 +1143,7 @@ async fn stream_headers_are_stored_and_omitted_when_empty() {
     assert!(!json.contains("headers"), "{json}");
 }
 
+/// Asserts `result` is [`StreamError::InvalidHeader`].
 fn invalid<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::InvalidHeader(_))),
@@ -1134,6 +1151,7 @@ fn invalid<T: std::fmt::Debug>(result: streams::Result<T>) {
     );
 }
 
+/// Asserts `result` is [`StreamError::Unsupported`].
 fn unsupported<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::Unsupported(_))),

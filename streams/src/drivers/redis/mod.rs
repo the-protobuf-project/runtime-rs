@@ -205,6 +205,8 @@ pub struct RedisConfig {
 }
 
 impl Default for RedisConfig {
+    /// No prefix, the client's own database, no length cap, the default reclaim
+    /// interval, and confirmed acks.
     fn default() -> Self {
         Self {
             prefix: String::new(),
@@ -273,6 +275,8 @@ impl RedisProvider {
         Self::build(client, config, Kind::Durable)
     }
 
+    /// The shared state for every constructor. The database is taken from the
+    /// client's connection info unless the config names one.
     fn build(client: redis::Client, config: RedisConfig, kind: Kind) -> Self {
         let database = config
             .database
@@ -459,6 +463,7 @@ mod tests {
 
     use super::*;
 
+    /// A Redis error wrapping an I/O error of `kind`, as a dropped connection gives.
     fn io(kind: io::ErrorKind) -> RedisError {
         RedisError::from(io::Error::from(kind))
     }

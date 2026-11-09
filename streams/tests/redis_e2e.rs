@@ -53,6 +53,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -61,25 +62,30 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The user a message's `Event` names.
 fn user(message: &Message) -> String {
     message.json::<Event>().unwrap().user
 }
 
+/// The TLS server, `REDIS_E2E_ADDR` or the compose default.
 fn addr() -> String {
     std::env::var("REDIS_E2E_ADDR").unwrap_or_else(|_| "127.0.0.1:16381".into())
 }
 
+/// The test certificate directory, `REDIS_E2E_CERTS` or docker/tls/out.
 fn certs() -> PathBuf {
     std::env::var_os("REDIS_E2E_CERTS")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"))
 }
 
+/// A test certificate file's bytes, panicking with its path when unreadable.
 fn read_cert(name: &str) -> Vec<u8> {
     let path = certs().join(name);
     std::fs::read(&path).unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
+/// The secure server's container name, for the restart test.
 fn container() -> String {
     std::env::var("REDIS_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-redis-secure".into())
 }
@@ -146,6 +152,8 @@ async fn client() -> redis::Client {
     client
 }
 
+/// A fresh key prefix per call, so tests share no keys, with [`QUICK_RECLAIM`]
+/// so a redelivery happens within a test.
 fn config() -> RedisConfig {
     RedisConfig {
         prefix: format!("e2e{}", streams::provider::new_id()),
@@ -180,10 +188,12 @@ fn noperm<T: std::fmt::Debug>(what: &str, result: redis::RedisResult<T>) {
     }
 }
 
+/// Whether `key` exists, asked as `admin` since `streams` may not look outside its prefixes.
 async fn exists(key: &str) -> bool {
     command::<u64>(redis::cmd("EXISTS").arg(key)).await == 1
 }
 
+/// Creates a stream over `subjects` and binds a manager to it.
 async fn create(provider: &RedisProvider, subjects: &[&str]) -> (Stream, Arc<dyn Manager>) {
     let stream = provider
         .create(Stream {
@@ -197,6 +207,7 @@ async fn create(provider: &RedisProvider, subjects: &[&str]) -> (Stream, Arc<dyn
     (stream, manager)
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn recv(messages: &mut Subscription) -> Message {
     tokio::time::timeout(WITHIN, messages.next())
         .await
@@ -204,6 +215,7 @@ async fn recv(messages: &mut Subscription) -> Message {
         .expect("the subscription ended before a message arrived")
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended consumer.
 async fn recv_delivery(deliveries: &mut Deliveries) -> Delivery {
     tokio::time::timeout(WITHIN, deliveries.next())
         .await
@@ -211,6 +223,7 @@ async fn recv_delivery(deliveries: &mut Deliveries) -> Delivery {
         .expect("the consumer ended before a delivery arrived")
 }
 
+/// Asserts nothing arrives within `quiet`; an ended stream also passes.
 async fn silent<S: futures::Stream + Unpin>(stream: &mut S, quiet: Duration)
 where
     S::Item: std::fmt::Debug,
@@ -220,6 +233,7 @@ where
     }
 }
 
+/// Polls the async `check` every 50ms until it holds, failing after [`WITHIN`] with `what`.
 async fn eventually<F, Fut>(what: &str, mut check: F)
 where
     F: FnMut() -> Fut,
@@ -235,6 +249,7 @@ where
     panic!("{what} did not happen in time");
 }
 
+/// Asserts `result` is [`StreamError::Unsupported`].
 fn unsupported<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::Unsupported(_))),
@@ -242,6 +257,7 @@ fn unsupported<T: std::fmt::Debug>(result: streams::Result<T>) {
     );
 }
 
+/// Asserts `result` is [`StreamError::NotFound`].
 fn not_found<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::NotFound(_))),
@@ -249,6 +265,7 @@ fn not_found<T: std::fmt::Debug>(result: streams::Result<T>) {
     );
 }
 
+/// Asserts `result` is [`StreamError::UnknownSubject`].
 fn unknown_subject<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::UnknownSubject { .. })),
@@ -813,6 +830,7 @@ async fn the_typed_view_over_tls() {
 
 // --- scheduled (TTL expiry) ---------------------------------------------------
 
+/// Options scheduling delivery `ms` milliseconds from now, through the TTL.
 fn after(ms: u64) -> Options {
     Options::default().with_ttl(Duration::from_millis(ms))
 }
@@ -1143,6 +1161,7 @@ async fn max_len_caps_the_log_over_tls() {
 
 // --- headers, expiry, retain, delayed nak ------------------------------------
 
+/// Headers from literal pairs, for comparing with what arrives.
 fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
     pairs.into_iter().collect()
 }
@@ -1155,6 +1174,7 @@ fn with_defaults() -> Stream {
         .header("site", "plant-3")
 }
 
+/// The headers [`with_defaults`] stamps.
 fn defaults() -> Headers {
     headers([("lang", "rust"), ("site", "plant-3")])
 }
@@ -1164,18 +1184,21 @@ fn overridden() -> Headers {
     headers([("lang", "rust"), ("site", "plant-9"), ("trace", "t-1")])
 }
 
+/// A publish overriding `site` and adding `trace` on top of the stream's defaults.
 fn override_opts() -> Options {
     Options::default()
         .header("site", "plant-9")
         .header("trace", "t-1")
 }
 
+/// Creates `stream` as given and binds a manager to it.
 async fn create_stream(provider: &RedisProvider, stream: Stream) -> (Stream, Arc<dyn Manager>) {
     let stream = provider.create(stream).await.unwrap();
     let manager = provider.bind(&stream.id).await.unwrap();
     (stream, manager)
 }
 
+/// Asserts `result` is [`StreamError::InvalidHeader`].
 fn invalid<T: std::fmt::Debug>(result: streams::Result<T>) {
     assert!(
         matches!(result, Err(StreamError::InvalidHeader(_))),

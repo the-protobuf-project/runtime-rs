@@ -54,14 +54,17 @@ const WAIT: Duration = Duration::from_secs(20);
 static SERIAL: Mutex<()> = Mutex::const_new(());
 static NEXT: AtomicU32 = AtomicU32::new(0);
 
+/// The secure server's endpoint, `OPCUA_E2E_URL` or the compose default.
 fn url() -> String {
     std::env::var("OPCUA_E2E_URL").unwrap_or_else(|_| "opc.tcp://127.0.0.1:14841".into())
 }
 
+/// The secure server's container name, for the restart test.
 fn container() -> String {
     std::env::var("OPCUA_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-opcua-secure".into())
 }
 
+/// The OPC UA certificates written by compose.opcua.secure.sh, under the TLS directory.
 fn certs() -> PathBuf {
     std::env::var("STREAMS_E2E_TLS_DIR")
         .map(PathBuf::from)
@@ -69,6 +72,7 @@ fn certs() -> PathBuf {
         .join("opcua")
 }
 
+/// A node id by namespace URI, which stays stable when the server renumbers namespaces.
 fn node(name: &str) -> String {
     format!("nsu={NAMESPACE};s={name}")
 }
@@ -93,6 +97,8 @@ enum Identity {
 }
 
 impl Default for As {
+    /// The trusted client certificate, the server pinned, the operator user,
+    /// and Basic256Sha256 with SignAndEncrypt: what the server accepts.
     fn default() -> Self {
         Self {
             cert: "client",
@@ -170,6 +176,7 @@ async fn session(who: As, retry: bool) -> (Arc<Session>, JoinHandle<StatusCode>)
     (session, event_loop.spawn())
 }
 
+/// A session as `who` that retries until connected, failing after [`WAIT`].
 async fn connected(who: As) -> Arc<Session> {
     let (session, _) = session(who, true).await;
     assert!(
@@ -197,6 +204,7 @@ async fn refused(who: As) -> StatusCode {
     status
 }
 
+/// A provider on `session` with a stream over the PLC test tags, and a manager bound to it.
 async fn bound(session: Arc<Session>) -> (OpcUaProvider, Arc<dyn Manager>) {
     let provider = OpcUaProvider::new(session, OpcUaConfig::default());
     let stream = provider
@@ -214,6 +222,7 @@ async fn bound(session: Arc<Session>) -> (OpcUaProvider, Arc<dyn Manager>) {
     (provider, manager)
 }
 
+/// The next notification's value within [`WAIT`].
 async fn value(sub: &mut Subscription) -> Variant {
     timeout(WAIT, sub.next())
         .await
@@ -424,21 +433,61 @@ async fn wrong_credentials_are_refused() {
 #[tokio::test(flavor = "multi_thread")]
 async fn an_untrusted_client_certificate_is_refused() {
     let _serial = SERIAL.lock().await;
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        - 2;
     let status = refused(As {
         cert: "stranger",
         ..As::default()
     })
     .await;
+    // A server tells a refused client only that its security checks failed
+    // (Part 4, 5.5.2), so that is all the client may see...
     assert!(
         matches!(
             status,
-            StatusCode::BadSecurityChecksFailed
-                | StatusCode::BadCertificateUntrusted
-                | StatusCode::BadConnectionClosed
-                | StatusCode::BadCommunicationError
+            StatusCode::BadSecurityChecksFailed | StatusCode::BadCertificateUntrusted
         ),
         "{status}"
     );
+    // ...and the server's log says it was this certificate, untrusted.
+    let Some(mut log) = server_log(since) else {
+        eprintln!(
+            "cannot read {}'s log; checked the client's side only",
+            container()
+        );
+        return;
+    };
+    for _ in 0..20 {
+        if log.contains("Rejecting OPC application with certificate CN=tpp-streams stranger") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        log = server_log(since).unwrap_or_default();
+    }
+    let rejected = log.lines().any(|l| {
+        l.contains("Reason=BadCertificateUntrusted") && l.contains("tpp-streams stranger")
+    });
+    assert!(
+        rejected,
+        "the server's log since the attempt names no untrusted stranger certificate:\n{log}"
+    );
+}
+
+/// The OPC PLC container's log since `since` (Unix seconds), when it can be
+/// read.
+fn server_log(since: u64) -> Option<String> {
+    let out = Command::new("docker")
+        .args(["logs", "--since", &since.to_string(), &container()])
+        .output()
+        .ok()?;
+    out.status.success().then(|| {
+        let mut log = String::from_utf8_lossy(&out.stdout).into_owned();
+        log.push_str(&String::from_utf8_lossy(&out.stderr));
+        log
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -449,7 +498,8 @@ async fn an_unpinned_server_is_refused_by_the_client() {
         ..As::default()
     })
     .await;
-    assert!(status.is_bad(), "{status}");
+    // The client's own check of the certificate the server presented.
+    assert_eq!(status, StatusCode::BadCertificateUntrusted);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -514,6 +564,7 @@ async fn subscriptions_survive_a_server_restart() {
     assert_eq!(value(&mut sub).await, Variant::from(8i32));
 }
 
+/// Restarts container `name` and blocks up to 60s until it reports healthy.
 fn restart(name: &str) {
     let ok = Command::new("docker")
         .args(["restart", name])

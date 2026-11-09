@@ -1,6 +1,7 @@
 //! How the bench reaches each backend. One file per backend, so each can grow
 //! its own profiles (`plain`, `tls`, ...) without touching the others.
 
+use futures::future::BoxFuture;
 use streams::{Registry, Streams};
 
 #[cfg(feature = "kafka")]
@@ -25,14 +26,24 @@ mod zeromq;
 pub struct Conn {
     pub publisher: Box<dyn Streams>,
     pub subscriber: Option<Box<dyn Streams>>,
+    /// Pushes out whatever the publishing connection still buffers. A
+    /// publish-only run awaits it before stopping the clock, since a backend
+    /// whose publish returns once the message is queued in the client (core
+    /// NATS) would otherwise be timed before its bytes left.
+    pub flush: Option<Flush>,
 }
 
+/// A publishing connection's flush.
+pub type Flush = Box<dyn Fn() -> BoxFuture<'static, Result<(), Error>> + Send + Sync>;
+
 impl Conn {
+    /// A backend whose one provider both publishes and subscribes, with no flush.
     #[allow(dead_code)] // every backend but NATS uses it
     pub fn one(streams: impl Streams + 'static) -> Self {
         Self {
             publisher: Box::new(streams),
             subscriber: None,
+            flush: None,
         }
     }
 }

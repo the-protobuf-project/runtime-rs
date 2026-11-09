@@ -211,7 +211,9 @@ pub struct PubSubConfig {
     /// How long a publish waits for the broker's acknowledgement.
     pub publish_timeout: Duration,
 
-    /// How many connections publishes are spread over. At least one.
+    /// How many connections publishes are spread over. At least one. A topic,
+    /// and so a writer, always takes the same one, which keeps its messages
+    /// in sequence order on the wire.
     pub publish_connections: usize,
 
     /// The most DataSetMessages one NetworkMessage of a batch carries; a
@@ -227,6 +229,7 @@ pub struct PubSubConfig {
 }
 
 impl Default for PubSubConfig {
+    /// Each call draws a fresh random PublisherId, so set one for a stable identity.
     fn default() -> Self {
         Self {
             publisher_id: format!("runtime-rs-{}", provider::new_id().to_lowercase()),
@@ -251,7 +254,12 @@ pub struct PubSubProvider {
     inner: Arc<Inner>,
 }
 
-/// A writer of one WriterGroup of one publisher.
+/// A writer of one of this provider's WriterGroups, as (group, writer).
+///
+/// No publisher in the key because a provider publishes under exactly one
+/// PublisherId: a stream naming another publisher is read-only, and both
+/// `publish` and `publish_metadata` refuse it (`check_own`), so only this
+/// provider's own writers ever take a SequenceNumber or a version.
 type WriterKey = (String, String);
 
 /// What every bound manager shares with the provider.
@@ -277,6 +285,7 @@ pub(crate) struct Group {
     own: bool,
 }
 
+/// Locks `mutex`, recovering from poison: the guarded maps are updated entry by entry.
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
@@ -348,6 +357,7 @@ impl PubSubProvider {
         Ok(self.inner.topic("data", &group, Some(writer)))
     }
 
+    /// The stored declaration for `id`, or [`StreamError::NotFound`].
     fn declared(&self, id: &str) -> Result<Stream> {
         self.inner
             .read()
@@ -400,7 +410,7 @@ impl PubSubProvider {
         let topic = self.inner.topic("metadata", &group, Some(writer));
         self.inner
             .links
-            .link()
+            .link(&topic)
             .send(
                 &topic,
                 self.inner.config.qos,
@@ -484,10 +494,12 @@ pub fn writer_id(name: &str) -> u16 {
 }
 
 impl Inner {
+    /// Reads the declared streams, recovering from a poisoned lock.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Stream>> {
         self.declared.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Writes the declared streams, recovering from a poisoned lock.
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Stream>> {
         self.declared.write().unwrap_or_else(|e| e.into_inner())
     }
@@ -533,6 +545,7 @@ impl Inner {
         first
     }
 
+    /// The ConfigurationVersion last announced for a writer through `publish_metadata`, if any.
     pub(crate) fn version(
         &self,
         group: &str,
@@ -543,6 +556,7 @@ impl Inner {
             .cloned()
     }
 
+    /// Adds to the in-process gap total and, when a meter is set, the gap counter.
     pub(crate) fn record_gap(&self, publisher: &str, writer: &str, missed: u64) {
         self.gaps.fetch_add(missed, Ordering::Relaxed);
         if let Some(counter) = &self.gap_counter {
@@ -557,6 +571,7 @@ impl Inner {
     }
 }
 
+/// The error for a stream this provider has not declared.
 fn not_found(id: &str) -> StreamError {
     StreamError::NotFound(format!("stream {id}"))
 }
@@ -614,6 +629,7 @@ fn declaration(id: String, stream: Stream) -> Result<Stream> {
 
 #[async_trait::async_trait]
 impl Streams for PubSubProvider {
+    /// Checks the id and subjects as topic levels and refuses two writers whose ids collide.
     async fn create(&self, stream: Stream) -> Result<Stream> {
         let id = if stream.id.is_empty() {
             safe_name(&provider::new_stream_id(&stream.name))
@@ -626,15 +642,18 @@ impl Streams for PubSubProvider {
         Ok(out)
     }
 
+    /// Reads the in-process declaration; the broker keeps no stream catalogue.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.declared(id)
     }
 
+    /// The manager keeps a copy of the declaration taken now.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.declared(id)?;
         Ok(Arc::new(PubSubManager::new(self.inner.clone(), stream)))
     }
 
+    /// Revalidates as create does; managers already bound keep the old declaration.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
         let out = declaration(id.to_owned(), stream)?;
         let mut declared = self.inner.write();
@@ -643,6 +662,7 @@ impl Streams for PubSubProvider {
         Ok(slot.clone())
     }
 
+    /// Forgets the declaration; managers already bound and their subscriptions are untouched.
     async fn delete(&self, id: &str) -> Result<()> {
         self.inner
             .write()
@@ -651,6 +671,7 @@ impl Streams for PubSubProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// Lists only the streams this process declared, in id order.
     async fn list(&self) -> Result<Vec<Stream>> {
         Ok(self.inner.read().values().cloned().collect())
     }

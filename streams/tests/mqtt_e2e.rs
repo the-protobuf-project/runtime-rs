@@ -63,6 +63,7 @@ struct Event2 {
 const APP: (&str, &str) = ("e2e-app", "e2e-app-secret");
 const OTHER: (&str, &str) = ("e2e-other", "e2e-other-secret");
 
+/// Splits the `host:port` in `var` (or `default`), panicking on a malformed one.
 fn parse_addr(var: &str, default: &str) -> (String, u16) {
     let addr = std::env::var(var).unwrap_or_else(|_| default.into());
     let (host, port) = addr
@@ -81,12 +82,14 @@ fn password_addr() -> (String, u16) {
     parse_addr("MQTT_E2E_PASSWORD_ADDR", "127.0.0.1:18884")
 }
 
+/// The test certificate directory, `STREAMS_E2E_TLS_DIR` or docker/tls/out.
 fn tls_dir() -> PathBuf {
     std::env::var("STREAMS_E2E_TLS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/docker/tls/out")))
 }
 
+/// The secure broker's container name, for tests that restart it.
 fn container() -> String {
     std::env::var("MQTT_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-mqtt-secure".into())
 }
@@ -129,6 +132,8 @@ fn options(tls: Option<Arc<ClientConfig>>) -> MqttOptions {
     options_at(addr(), tls)
 }
 
+/// A template for the listener at `host:port`, with a 5s connect timeout and
+/// TLS when given. The client id is replaced per connection by the provider.
 fn options_at((host, port): (String, u16), tls: Option<Arc<ClientConfig>>) -> MqttOptions {
     let mut options = MqttOptions::new("template", host, port);
     options.set_connection_timeout(5);
@@ -138,6 +143,8 @@ fn options_at((host, port): (String, u16), tls: Option<Arc<ClientConfig>>) -> Mq
     options
 }
 
+/// QoS 1 under `prefix`, with sessions expiring after [`SESSION_EXPIRY`] so
+/// leftovers do not pile up on the broker.
 fn config(prefix: &str) -> MqttConfig {
     MqttConfig {
         prefix: prefix.into(),
@@ -153,6 +160,7 @@ fn fresh(tag: &str) -> String {
     format!("e2e-{tag}-{}", ulid::Ulid::new().to_string().to_lowercase())
 }
 
+/// A provider on the certificate-identity listener over mutual TLS.
 async fn connect(prefix: &str) -> MqttProvider {
     MqttProvider::connect(options(Some(tls(true, true))), config(prefix))
         .await
@@ -183,6 +191,7 @@ fn fresh_for((user, _): (&str, &str), tag: &str) -> String {
     format!("{user}/{}", fresh(tag))
 }
 
+/// Declares a stream with a fixed `id` over `subjects` and binds a manager to it.
 async fn declare(streams: &MqttProvider, id: &str, subjects: &[&str]) -> Arc<dyn Manager> {
     let stream = streams
         .create(Stream {
@@ -196,6 +205,7 @@ async fn declare(streams: &MqttProvider, id: &str, subjects: &[&str]) -> Arc<dyn
     streams.bind(&stream.id).await.expect("bind")
 }
 
+/// A JSON payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event2 {
         user: user.into(),
@@ -204,6 +214,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -211,6 +222,7 @@ async fn next(subscription: &mut Subscription) -> Message {
         .expect("subscription ended before a message arrived")
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next_delivery(deliveries: &mut Deliveries) -> Delivery {
     timeout(WITHIN, deliveries.next())
         .await
@@ -874,6 +886,8 @@ const CONNECTED: &str = "$SYS/broker/clients/connected";
 const SUBSCRIPTIONS: &str = "$SYS/broker/subscriptions/count";
 
 impl SysWatch {
+    /// Subscribes to the connected-clients and subscription-count counters and
+    /// keeps the latest value of each in the background until dropped.
     async fn start() -> Self {
         let mut options = options(Some(tls(true, true)));
         options.set_client_id(format!("e2e-sys-{}", ulid::Ulid::new()));
@@ -902,6 +916,7 @@ impl SysWatch {
         Self { latest, task }
     }
 
+    /// The last value the broker published for `topic`, if any yet.
     fn get(&self, topic: &str) -> Option<u64> {
         self.latest.lock().unwrap().get(topic).copied()
     }
@@ -919,6 +934,7 @@ impl SysWatch {
         least.unwrap_or_else(|| panic!("the broker never published {topic}"))
     }
 
+    /// Waits up to 15s for `topic` to read exactly `want`; an error names the last value seen.
     async fn reaches(&self, topic: &str, want: u64) -> Result<(), String> {
         let mut last = None;
         for _ in 0..150 {
@@ -933,6 +949,7 @@ impl SysWatch {
 }
 
 impl SysWatch {
+    /// Waits up to 15s for `topic` to drop to `most` or below, panicking otherwise.
     async fn falls_to(&self, topic: &str, most: u64) {
         let mut last = None;
         for _ in 0..150 {
@@ -947,6 +964,7 @@ impl SysWatch {
 }
 
 impl Drop for SysWatch {
+    /// Stops the background reader, which drops its client connection.
     fn drop(&mut self) {
         self.task.abort();
     }

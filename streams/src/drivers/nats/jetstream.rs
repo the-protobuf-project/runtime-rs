@@ -79,7 +79,9 @@ const ORDERED_INACTIVE_THRESHOLD: Duration = Duration::from_secs(30);
 struct Shared {
     context: jetstream::Context,
     client: Client,
-    /// The PubAck routing for this connection, started by the first publish.
+    /// The PubAck routing for this provider, started by the first publish.
+    /// Its in-flight limit is the provider's, as nats.go's is its JetStream
+    /// context's; see [`acks::MAX_PENDING`].
     acks: tokio::sync::OnceCell<Acks>,
     registry: Registry,
     metrics: provider::Metrics,
@@ -145,12 +147,15 @@ impl JetStreamProvider {
     }
 }
 
+/// The error for an id the server has no stream for.
 fn not_found(id: &str) -> StreamError {
     StreamError::NotFound(format!("stream {id}"))
 }
 
 #[async_trait::async_trait]
 impl Streams for JetStreamProvider {
+    /// Creates the server-side stream; its subjects become the stream's subject
+    /// filter, so the server captures every publish on them.
     async fn create(&self, stream: Stream) -> Result<Stream> {
         check_stream_headers(&stream)?;
         let id = if stream.id.is_empty() {
@@ -174,6 +179,8 @@ impl Streams for JetStreamProvider {
         Ok(stream_from(id, stream))
     }
 
+    /// Reads the stream's config from the server, so a stream made by another
+    /// process is found; the declaration is rebuilt from that config.
     async fn get(&self, id: &str) -> Result<Stream> {
         let handle = self.handle(id, "read").await?;
         Ok(to_stream(&handle.cached_info().config))
@@ -195,6 +202,8 @@ impl Streams for JetStreamProvider {
         }))
     }
 
+    /// Replaces the server-side config. The server refuses changes it cannot
+    /// make in place, such as the storage type, and that refusal is returned.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
         check_stream_headers(&stream)?;
         let name = safe_name(id);
@@ -210,6 +219,7 @@ impl Streams for JetStreamProvider {
         Ok(stream_from(name, stream))
     }
 
+    /// Deletes the server-side stream and every message it holds.
     async fn delete(&self, id: &str) -> Result<()> {
         self.shared
             .context
@@ -356,11 +366,18 @@ impl Publisher for JetStreamManager {
         let mut credit = Credit::new(acks);
         credit.take(1).await;
         credit.spend();
-        let pending = self
+        let stored = match self
             .send(acks, &target, &id, headers.as_ref(), &payload)
-            .await?;
-        self.stored(subject, &id, pending).await?;
-        Ok(id)
+            .await
+        {
+            Ok(pending) => self.stored(subject, &id, pending).await,
+            Err(error) => Err(error),
+        };
+        // The wait is over, so its permit is free. Only a publish cancelled
+        // mid-wait skips this, and its credit then holds the permit until
+        // the wait has expired.
+        credit.finish();
+        stored.map(|()| id)
     }
 }
 
@@ -409,7 +426,7 @@ impl JetStreamManager {
         Ok(Some(map))
     }
 
-    /// The connection's PubAck routing, started on first use.
+    /// The provider's PubAck routing, started on first use.
     async fn acks(&self) -> Result<&Acks> {
         self.shared
             .acks
@@ -461,6 +478,7 @@ fn ttl_seconds(expiry: Duration) -> Result<u64> {
     Ok(expiry.as_secs() + u64::from(expiry.subsec_nanos() > 0))
 }
 
+/// Logs a publish that was not stored and wraps the reason with its subject.
 fn publish_failed(subject: &str, id: &str, error: &AckError) -> StreamError {
     warn!(subject, id, %error, "could not publish");
     StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
@@ -539,6 +557,8 @@ impl Subscriber for JetStreamManager {
 
 #[async_trait::async_trait]
 impl Durable for JetStreamManager {
+    /// Starts a new durable consumer at the end of the stream; an existing one
+    /// resumes where it left off.
     async fn consume(&self, subject: &str, consumer: &str, opts: &Options) -> Result<Deliveries> {
         self.consume_from(subject, consumer, Position::New, opts)
             .await
@@ -741,6 +761,8 @@ struct JetStreamAck {
 }
 
 impl JetStreamAck {
+    /// Sends `kind` on the message's reply subject. The server does not confirm
+    /// it, so `Ok` means the client took it, not that the server applied it.
     async fn settle(self, kind: AckKind, outcome: &'static str) -> Result<()> {
         self.message
             .ack_with(kind)
@@ -753,10 +775,12 @@ impl JetStreamAck {
 
 #[async_trait::async_trait]
 impl Acker for JetStreamAck {
+    /// A `+ACK`: the server will not redeliver this message to the consumer.
     async fn ack(self: Box<Self>) -> Result<()> {
         self.settle(AckKind::Ack, "ack").await
     }
 
+    /// A `-NAK`: the server redelivers at once rather than after `ack_wait`.
     async fn nak(self: Box<Self>) -> Result<()> {
         self.settle(AckKind::Nak(None), "nak").await
     }
@@ -768,6 +792,8 @@ impl Acker for JetStreamAck {
         self.settle(AckKind::Nak(delay), "nak").await
     }
 
+    /// True: the server holds a delayed nak back itself, so
+    /// [`nak_after`](Acker::nak_after) honours its delay.
     fn delays_nak(&self) -> bool {
         true
     }
@@ -781,7 +807,7 @@ impl Batch for JetStreamManager {
     ///
     /// Frames are sent one after another, in order, so the stream stores them
     /// in order; only the waits for their acks overlap. Up to
-    /// `BATCH_IN_FLIGHT` wait at once, within the connection's own limit of
+    /// `BATCH_IN_FLIGHT` wait at once, within the provider's own limit of
     /// `MAX_PENDING` across every publisher. While that limit is reached, the
     /// batch settles its own oldest waits before it waits on anyone else, so
     /// it never holds room it is itself waiting for. Each message carries its
@@ -810,7 +836,7 @@ impl Batch for JetStreamManager {
                 outcomes.push(self.stored(subject, &ids[done], pending).await);
                 credit.finish();
             }
-            // Room under the connection's in-flight limit: take it without
+            // Room under the provider's in-flight limit: take it without
             // waiting if there is some, else settle this batch's own oldest
             // wait, and only wait on other publishers when nothing of ours
             // is outstanding.
@@ -856,14 +882,18 @@ impl Batch for JetStreamManager {
 }
 
 impl Manager for JetStreamManager {
+    /// JetStream offers every optional capability: durable consumers live on the
+    /// server, start at either end of the stream, and batches are pipelined.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some: a new durable consumer starts at `New` or `Earliest`.
     fn positioned(&self) -> Option<&dyn Positioned> {
         Some(self)
     }
 
+    /// Some: a batch is pipelined, costing about one round trip.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }

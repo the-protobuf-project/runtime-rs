@@ -29,6 +29,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -37,6 +38,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// A plaintext client for `KAFKA_ADDR`, default the compose broker.
 fn client() -> ClientConfig {
     let mut client = ClientConfig::new();
     client.set(
@@ -67,6 +69,7 @@ async fn provider_with_prefix(partitions: i32) -> (KafkaProvider, String) {
     (provider, prefix)
 }
 
+/// Creates a stream over [`SUBJECT`] and binds a manager to it.
 async fn declare(provider: &KafkaProvider) -> (Stream, Arc<dyn Manager>) {
     let stream = provider
         .create(Stream {
@@ -80,6 +83,7 @@ async fn declare(provider: &KafkaProvider) -> (Stream, Arc<dyn Manager>) {
     (stream, manager)
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next(deliveries: &mut Deliveries) -> Delivery {
     tokio::time::timeout(WITHIN, deliveries.next())
         .await
@@ -314,6 +318,7 @@ async fn connect_fails_without_a_broker_list() {
 // Headers
 // ---------------------------------------------------------------------------
 
+/// Headers from literal pairs, for comparing with what arrives.
 fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
     pairs.into_iter().collect()
 }

@@ -61,6 +61,8 @@ enum Reader {
 }
 
 impl KafkaManager {
+    /// Works out every declared subject's topic name up front, so a publish
+    /// looks its topic up rather than formatting it each time.
     pub(super) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         let topics = stream
             .subjects
@@ -375,10 +377,24 @@ fn try_watermarks(
     let metadata = consumer.fetch_metadata(Some(topic), DIAL_TIMEOUT)?;
     let mut ends = HashMap::new();
     for described in metadata.topics() {
+        // A topic whose leaders are not elected yet comes back with an error
+        // and no partitions rather than failing the fetch. Raise it, so
+        // [`watermarks`] waits it out instead of reporting no partitions.
+        if let Some(error) = described.error() {
+            return Err(KafkaError::MetadataFetch(error.into()));
+        }
         for partition in described.partitions() {
             let (_, high) = consumer.fetch_watermarks(topic, partition.id(), DIAL_TIMEOUT)?;
             ends.insert(partition.id(), high);
         }
+    }
+    // Every topic has at least one partition, so none means the broker has not
+    // caught up with it yet: an empty map would pin a tail to nothing, and it
+    // would never deliver.
+    if ends.is_empty() {
+        return Err(KafkaError::MetadataFetch(
+            RDKafkaErrorCode::UnknownTopicOrPartition,
+        ));
     }
     Ok(ends)
 }
@@ -396,6 +412,9 @@ struct Start {
 impl ClientContext for Start {}
 
 impl ConsumerContext for Start {
+    /// Applies librdkafka's assignment itself, eager or cooperative to match
+    /// the group's protocol, so uncommitted partitions can be pointed at their
+    /// noted ends first. A failed apply is logged, not raised: there is no caller.
     fn rebalance(
         &self,
         consumer: &BaseConsumer<Self>,
@@ -724,14 +743,18 @@ impl Positioned for KafkaManager {
 }
 
 impl Manager for KafkaManager {
+    /// Kafka offers every optional capability: committed group offsets make a
+    /// consumer durable, and a fresh group can start at either end of the log.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some: a new group starts at `Earliest` or at the end noted on subscribe.
     fn positioned(&self) -> Option<&dyn Positioned> {
         Some(self)
     }
 
+    /// Some: a batch goes through one producer, keeping its order.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -773,6 +796,7 @@ impl Partition {
 }
 
 impl Commits {
+    /// An empty ledger for `topic`; partitions are added as deliveries arrive.
     fn new(topic: String) -> Self {
         Self {
             topic,
@@ -781,6 +805,8 @@ impl Commits {
         }
     }
 
+    /// Locks the ledger, carrying on past a poisoned lock: every update to it
+    /// is a few integer and set operations that a panic cannot leave half-done.
     fn ledger(&self) -> std::sync::MutexGuard<'_, Ledger> {
         self.ledger.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -920,6 +946,9 @@ struct Settle {
 
 #[async_trait::async_trait]
 impl Acker for Settle {
+    /// Marks the offset settled for the committer to pick up; it does not wait
+    /// for the commit. Fails once the consumer has been dropped, since its
+    /// partitions may already belong to another member.
     async fn ack(self: Box<Self>) -> Result<()> {
         if !self.commits.ack(self.partition, self.offset) {
             return Err(StreamError::Internal(format!(
@@ -966,6 +995,7 @@ mod tests {
         )
     }
 
+    /// A JSON payload whose contents no test cares about.
     fn payload() -> Payload {
         Payload::json(&"x".to_owned()).unwrap()
     }
@@ -1180,6 +1210,7 @@ mod tests {
         );
     }
 
+    /// An acker for `offset` on `partition`, as a delivery would carry.
     fn settle(commits: &Arc<Commits>, partition: i32, offset: i64) -> Box<Settle> {
         Box::new(Settle {
             commits: Arc::clone(commits),
@@ -1191,6 +1222,8 @@ mod tests {
         })
     }
 
+    /// Takes what the ledger would commit now, as sorted (partition, offset)
+    /// pairs, so tests can compare it against a literal.
     fn committed(commits: &Commits) -> Vec<(i32, i64)> {
         let (list, _) = commits.take(None);
         let mut out: Vec<(i32, i64)> = list

@@ -30,6 +30,8 @@ const STREAM: &str = "opc-publisher/plc";
 const WRITER: &str = "simulation";
 const WITHIN: Duration = Duration::from_secs(60);
 
+/// A provider with a fresh PublisherId that declares OPC Publisher's
+/// WriterGroup as [`STREAM`], so it can read what OPC Publisher sends.
 async fn connect() -> PubSubProvider {
     let addr = std::env::var("OPCUA_PUBSUB_MQTT_ADDR").unwrap_or_else(|_| "127.0.0.1:11885".into());
     let (host, port) = addr
@@ -58,6 +60,8 @@ async fn connect() -> PubSubProvider {
     provider
 }
 
+/// The next message within [`WITHIN`], long enough for OPC Publisher's first
+/// publishing cycle after start-up.
 async fn next(subscription: &mut Subscription) -> Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -65,6 +69,7 @@ async fn next(subscription: &mut Subscription) -> Message {
         .expect("the subscription ended")
 }
 
+/// The `StepUp` counter's value, which opc-plc publishes as a UInt32.
 fn as_u32(message: &Message) -> u32 {
     match OpcUaValue::data_value(message).unwrap().value {
         Some(Variant::UInt32(n)) => n,

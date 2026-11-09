@@ -79,6 +79,7 @@ impl Metrics {
     }
 }
 
+/// The two bounded attributes every consumer-side instrument carries.
 fn labels(subject: &str, consumer: &str) -> [KeyValue; 2] {
     [
         KeyValue::new("subject", subject.to_owned()),

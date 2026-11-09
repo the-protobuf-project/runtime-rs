@@ -19,6 +19,8 @@ use streams::{
     drivers::opcua::{OpcUaConfig, OpcUaProvider, OpcUaValue},
 };
 
+/// Writes and monitors PLC tags by namespace-URI node id, then shows a
+/// wrong-typed write and an unsupported capability being refused.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("OPCUA_URL").unwrap_or_else(|_| "opc.tcp://127.0.0.1:14840".into());
@@ -47,8 +49,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             IdentityToken::Anonymous,
         )
         .await?;
-    let events = event_loop.spawn();
-    session.wait_for_connection().await;
+    // The event loop ends with a status if it cannot connect, and then
+    // wait_for_connection would wait for ever, so wait on both.
+    let mut events = event_loop.spawn();
+    tokio::select! {
+        _ = session.wait_for_connection() => {}
+        ended = &mut events => {
+            return Err(format!("cannot connect to {url}: {}", ended?).into());
+        }
+    }
     println!("connected to {url}");
 
     let provider = OpcUaProvider::new(session.clone(), OpcUaConfig::default());

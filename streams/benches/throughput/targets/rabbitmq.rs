@@ -22,6 +22,8 @@ use streams::{
 
 use super::{Conn, Error, env, unknown_profile};
 
+/// Connects over AMQP, or AMQPS with SASL EXTERNAL for `tls`;
+/// `RABBITMQ_PUBLISH_CHANNELS` sets the publishing channel pool.
 pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     let conn = match profile {
         "plain" => {

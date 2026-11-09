@@ -201,6 +201,7 @@ impl NatsConfig {
 struct LastSubject(Option<Arc<str>>);
 
 impl LastSubject {
+    /// The shared copy of `subject`, replacing the held one when it differs.
     fn of(&mut self, subject: &str) -> &Arc<str> {
         if self.0.as_deref() != Some(subject) {
             self.0 = Some(Arc::from(subject));
@@ -320,6 +321,7 @@ mod tests {
     use super::*;
     use crate::StreamError;
 
+    /// A declaration with the given subjects and nothing else set.
     fn stream(subjects: &[&str]) -> Stream {
         Stream {
             id: "s-1".into(),

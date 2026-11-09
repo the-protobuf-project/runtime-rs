@@ -109,6 +109,7 @@ pub struct MetaDataMessage {
     pub meta_data: DataSetMetaDataType,
 }
 
+/// Every encode and decode failure in this module is a [`StreamError::Codec`].
 fn codec_error(what: &str, error: impl std::fmt::Display) -> StreamError {
     StreamError::Codec(format!("opcua pubsub: cannot {what}: {error}"))
 }
@@ -137,6 +138,7 @@ fn read_document<T>(data: &[u8], body: impl FnOnce(&mut Reader<'_>) -> Outcome<T
     Ok(value)
 }
 
+/// Writes `name: value` only when set; Part 14 omits absent fields rather than nulling them.
 fn put_str(writer: &mut Writer<'_>, name: &str, value: &Option<String>) -> Outcome<()> {
     if let Some(value) = value {
         writer.name(name)?;
@@ -145,6 +147,7 @@ fn put_str(writer: &mut Writer<'_>, name: &str, value: &Option<String>) -> Outco
     Ok(())
 }
 
+/// Writes `name` with async-opcua's JSON encoding, omitting it when unset.
 fn put<T: JsonEncodable>(writer: &mut Writer<'_>, name: &str, value: &Option<T>) -> Outcome<()> {
     if let Some(value) = value {
         writer.name(name)?;
@@ -203,6 +206,7 @@ impl NetworkMessage {
         document(|writer| self.write(writer))
     }
 
+    /// The NetworkMessage header and its DataSetMessages; MessageType is always `ua-data`.
     fn write(&self, writer: &mut Writer<'_>) -> Outcome<()> {
         writer.begin_object()?;
         put_str(writer, "MessageId", &self.message_id)?;
@@ -239,6 +243,7 @@ impl NetworkMessage {
 }
 
 impl DataSetMessage {
+    /// One DataSetMessage object, writing only the fields that are set.
     fn write(&self, writer: &mut Writer<'_>) -> Outcome<()> {
         writer.begin_object()?;
         if let Some(id) = self.data_set_writer_id {
@@ -377,6 +382,8 @@ fn text(reader: &mut Reader<'_>) -> Outcome<Option<String>> {
     })
 }
 
+/// A number given as JSON number or as string (Part 6 writes 64-bit ones as
+/// strings); null is `None`.
 fn number<T>(reader: &mut Reader<'_>) -> Outcome<Option<T>>
 where
     T: std::str::FromStr,
@@ -392,6 +399,7 @@ where
     })
 }
 
+/// An RFC 3339 string; any other JSON type is skipped as absent.
 fn timestamp(reader: &mut Reader<'_>) -> Outcome<Option<DateTime>> {
     match reader.peek()? {
         ValueType::String => Ok(Some(
@@ -428,6 +436,8 @@ fn status(reader: &mut Reader<'_>) -> Outcome<Option<StatusCode>> {
     }
 }
 
+/// Accepts a NetworkMessage, a header-less DataSetMessage, or an array of them,
+/// refusing any MessageType other than data.
 fn read_network(reader: &mut Reader<'_>) -> Outcome<NetworkMessage> {
     let mut network = NetworkMessage::default();
     match reader.peek()? {
@@ -489,6 +499,7 @@ fn read_network(reader: &mut Reader<'_>) -> Outcome<NetworkMessage> {
     }
 }
 
+/// A `Messages` value: an array, a lone object, or anything else read as none.
 fn read_messages(reader: &mut Reader<'_>) -> Outcome<Vec<DataSetMessage>> {
     match reader.peek()? {
         ValueType::Array => {
@@ -508,6 +519,7 @@ fn read_messages(reader: &mut Reader<'_>) -> Outcome<Vec<DataSetMessage>> {
     }
 }
 
+/// One DataSetMessage object, skipping fields this crate does not read.
 fn read_message(reader: &mut Reader<'_>) -> Outcome<DataSetMessage> {
     let mut message = DataSetMessage::default();
     reader.begin_object()?;
@@ -549,6 +561,7 @@ fn read_message_field(
     Ok(true)
 }
 
+/// The Payload object's fields in the order written, each read as a DataValue.
 fn read_payload(reader: &mut Reader<'_>) -> Outcome<Vec<(String, DataValue)>> {
     if reader.peek()? != ValueType::Object {
         return Err("a Payload is a JSON object of fields by name".into());
@@ -653,6 +666,7 @@ fn normalize(value: Value) -> Outcome<Value> {
 /// Boolean, Int64 (UInt64 past its range), Double, or String, and arrays of
 /// one of them.
 fn infer(value: &Value) -> Outcome<Value> {
+    /// The reversible type id (Part 6 built-in type) a scalar JSON value maps to.
     fn type_of(value: &Value) -> Outcome<u32> {
         Ok(match value {
             Value::Bool(_) => 1,
@@ -689,6 +703,7 @@ mod tests {
 
     use super::*;
 
+    /// A NetworkMessage with two DataSetMessages, for the encode and decode tests.
     fn sample() -> NetworkMessage {
         let at = DateTime::parse_from_rfc3339("2026-11-09T10:00:00Z").unwrap();
         NetworkMessage {

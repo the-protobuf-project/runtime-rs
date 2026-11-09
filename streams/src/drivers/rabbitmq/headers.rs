@@ -114,6 +114,7 @@ mod tests {
 
     use super::*;
 
+    /// A header set from literal pairs.
     fn headers(pairs: &[(&str, &str)]) -> Headers {
         pairs.iter().copied().collect()
     }

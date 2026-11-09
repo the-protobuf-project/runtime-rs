@@ -241,6 +241,8 @@ impl Streams for KafkaProvider {
         Ok(out)
     }
 
+    /// Answers from the metadata topic, read whole, so a stream declared by
+    /// another process is found.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.read_meta()
             .await?
@@ -248,6 +250,8 @@ impl Streams for KafkaProvider {
             .ok_or_else(|| StreamError::NotFound(format!("stream {id}")))
     }
 
+    /// Reads the declaration here so an unknown id fails at bind rather than at
+    /// the first publish. The manager shares the provider's producers.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.get(id).await?;
         tracing::debug!(id = %stream.id, subjects = ?stream.subjects, "bound to stream");
@@ -300,6 +304,8 @@ impl Streams for KafkaProvider {
         Ok(())
     }
 
+    /// Every declaration in the metadata topic, ordered by id as runtime-go
+    /// orders them; topics created outside this runtime are not listed.
     async fn list(&self) -> Result<Vec<Stream>> {
         // A BTreeMap is already ordered by id, which is the order Go sorts into.
         let out: Vec<Stream> = self.read_meta().await?.into_values().collect();
@@ -309,13 +315,18 @@ impl Streams for KafkaProvider {
 
     /// Flushes what the producers still hold. The caller's config is not a
     /// connection, so there is nothing of theirs to close.
+    ///
+    /// Every producer is flushed even when an earlier one fails, so one stuck
+    /// connection does not strand what the others hold; the first failure is
+    /// the one reported.
     async fn close(&self) -> Result<()> {
         let producers = self.inner.producers.clone();
         blocking(move || {
             use rdkafka::producer::Producer as _;
             producers
                 .iter()
-                .try_for_each(|producer| producer.flush(DIAL_TIMEOUT))
+                .map(|producer| producer.flush(DIAL_TIMEOUT))
+                .fold(Ok(()), std::result::Result::and)
         })
         .await?
         .map_err(|error| StreamError::internal("kafka: cannot flush the producer", error))

@@ -29,10 +29,12 @@ pub struct PubSubManager {
 }
 
 impl PubSubManager {
+    /// A manager over `stream`; nothing is read or subscribed until it is used.
     pub(super) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         Self { inner, stream }
     }
 
+    /// Whether this manager delivers on TTL expiry rather than immediately.
     fn scheduled(&self) -> bool {
         self.inner.kind == Kind::Notify
     }
@@ -212,6 +214,9 @@ pub(super) fn capacity(opts: &Options) -> usize {
 
 #[async_trait::async_trait]
 impl Publisher for PubSubManager {
+    /// A PUBLISH on an immediate stream; on a scheduled one, the payload and a
+    /// timer key set in one transaction. Neither is retried, since a repeat would
+    /// deliver or schedule the message twice.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.inner.declares(&self.stream, subject)?;
         let delay = self.delay(opts)?;
@@ -255,6 +260,8 @@ impl Publisher for PubSubManager {
 
 #[async_trait::async_trait]
 impl Subscriber for PubSubManager {
+    /// Confirms the subscription before returning, so a publish made after this
+    /// returns is delivered. Refuses a group: pub/sub has no way to share one.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         self.inner.declares(&self.stream, subject)?;
         refuse_group(opts)?;
@@ -295,6 +302,8 @@ impl Subscriber for PubSubManager {
 /// scheduled whole or not at all.
 #[async_trait::async_trait]
 impl Batch for PubSubManager {
+    /// One pipeline for the batch, transactional on a scheduled stream. A
+    /// failure is reported against every index, as Redis does not say which landed.
     async fn publish_batch(
         &self,
         subject: &str,
@@ -344,6 +353,7 @@ impl Batch for PubSubManager {
 }
 
 impl Manager for PubSubManager {
+    /// Only [`Batch`]: pub/sub keeps nothing to resume from or replay.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }

@@ -39,6 +39,7 @@ const SUBJECT: &str = "user.created";
 /// How long a test waits for a delivery before calling it lost.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// The plaintext broker, `RABBITMQ_TEST_URL` or the compose default.
 fn url() -> String {
     std::env::var("RABBITMQ_TEST_URL")
         .unwrap_or_else(|_| "amqp://guest:guest@127.0.0.1:15682/%2f".into())
@@ -54,6 +55,7 @@ fn prefix() -> String {
     format!("t{nanos}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -84,6 +86,8 @@ async fn provider_under(prefix: &str) -> (Arc<Connection>, RabbitProvider) {
     (conn, provider)
 }
 
+/// A fresh provider with a stream over `subjects` bound, and the connection,
+/// which the test must keep alive for as long as it uses the manager.
 async fn declare(subjects: &[&str]) -> (RabbitProvider, Arc<dyn Manager>, Arc<Connection>) {
     let (conn, provider) = provider().await;
     let stream = provider
@@ -98,6 +102,7 @@ async fn declare(subjects: &[&str]) -> (RabbitProvider, Arc<dyn Manager>, Arc<Co
     (provider, manager, conn)
 }
 
+/// The next item within [`WAIT`], panicking on a timeout or an ended stream.
 async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
     tokio::time::timeout(WAIT, stream.next())
         .await
@@ -457,6 +462,8 @@ struct Headed {
 }
 
 impl Headed {
+    /// Declares the stream on a fresh connection under a new prefix and
+    /// records the exchange name the broker knows it by.
     async fn new(headers: &[(&str, &str)]) -> Self {
         let prefix = prefix();
         let (conn, provider) = provider_under(&prefix).await;
@@ -543,6 +550,7 @@ fn depth(queue: &str) -> usize {
         .unwrap_or_else(|| panic!("no queue {queue}"))
 }
 
+/// A message's headers as owned pairs, in the order they arrived.
 fn headers_of(m: &streams::Message) -> Vec<(String, String)> {
     m.headers()
         .iter()
@@ -550,6 +558,7 @@ fn headers_of(m: &streams::Message) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Literal pairs as owned ones, to compare with [`headers_of`].
 fn pairs(p: &[(&str, &str)]) -> Vec<(String, String)> {
     p.iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))

@@ -33,6 +33,7 @@ pub(crate) struct MqttManager {
 }
 
 impl MqttManager {
+    /// Binds a copy of `stream`; a later update to the declaration is not seen here.
     pub(crate) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         Self { inner, stream }
     }
@@ -58,6 +59,7 @@ impl MqttManager {
         ))
     }
 
+    /// The broker topic for `subject`: optional prefix, stream id, then subject.
     fn topic(&self, subject: &str) -> String {
         self.inner.topic(&self.stream.id, subject)
     }
@@ -234,6 +236,7 @@ impl Attached {
 
 #[async_trait::async_trait]
 impl Publisher for MqttManager {
+    /// Sends on the connection that owns this topic, so publishes to one topic stay ordered.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let topic = self.publish_topic(subject, opts)?;
         let properties = self.properties(opts)?;
@@ -243,7 +246,7 @@ impl Publisher for MqttManager {
         if let Err(error) = self
             .inner
             .publisher
-            .link()
+            .link(&topic)
             .send(&topic, self.inner.config.qos, opts.retain, properties, body)
             .await
         {
@@ -468,7 +471,7 @@ impl Batch for MqttManager {
         let outcomes = self
             .inner
             .publisher
-            .link()
+            .link(&topic)
             .send_all(self.inner.config.qos, messages)
             .await;
         let failures: Vec<(usize, StreamError)> = outcomes
@@ -487,10 +490,12 @@ impl Batch for MqttManager {
 }
 
 impl Manager for MqttManager {
+    /// Durable consumers are persistent MQTT sessions keyed by consumer name.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// A batch is pipelined: every message in flight at once, one wait for all.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -507,6 +512,7 @@ struct MqttAcker {
 
 #[async_trait::async_trait]
 impl Acker for MqttAcker {
+    /// Queues the PUBACK; it settles the message only once the connection writes it.
     async fn ack(self: Box<Self>) -> Result<()> {
         self.client.ack(&self.publish).await.map_err(|error| {
             StreamError::internal(

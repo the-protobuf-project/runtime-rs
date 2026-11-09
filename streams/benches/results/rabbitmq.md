@@ -193,12 +193,15 @@ between 11k and 19k.
 
 Findings:
 
-- **The driver is not behind the official tool at the same in-flight window.**
-  The tool's single channel with 32 unconfirmed messages does what 32
-  confirm-awaiting publishers do, and with 10 subjects the driver does better,
-  because 10 queue processes and 4 publishing channels work in parallel. The
-  only shape below 100% is batch with a single publisher (87%): one lapin
-  channel against the tool's one channel, both bound by the confirm round trip.
+- **In the measured 10-subject scenarios the driver is not behind the official
+  tool at the same in-flight window.** The tool's single channel with 32
+  unconfirmed messages does what 32 confirm-awaiting publishers do, and with 10
+  subjects the driver does better, because 10 queue processes and 4 publishing
+  channels work in parallel. Two single-subject shapes measured below 100%.
+  Durable on one subject reached 78%, a row marked as noise because the same
+  code measured 10.7–16.3k across runs, around the tool's 11.7k. Batch with a
+  single publisher reached 87%: one lapin channel against the tool's one
+  channel, both bound by the confirm round trip.
 - **Durable is bound in the tool exactly as in the driver.** With persistent
   messages on a durable queue and 32 confirms in flight, perf-test drops from
   ~90k (raw) to 5–12k, and only a larger confirm window brings it back (37–52k

@@ -47,7 +47,7 @@
 //! | Publish / Subscribe | Yes | Yes | Yes | Yes | Yes | Yes | Write / monitored item |
 //! | Durable (ack / nak) | Yes | JetStream | Yes | Streams | Persistent session | No | No |
 //! | Positioned replay | Yes | JetStream | No | Streams | No | No | No |
-//! | Batch | Native | Pipelined (JetStream) | Pipelined | Pipelined | Pipelined | Each | One Write |
+//! | Batch | Native | Pipelined (JetStream) | Pipelined | Pipelined | Pipelined | Each | Sequential writes |
 //! | Headers | Record headers | NATS headers | AMQP headers | Stream fields; frame v2 on pub/sub | MQTT 5 user properties | Frame v2 | PubSub only (user properties) |
 //! | Expiry | No | JetStream (whole seconds) | Yes (at the head of the queue) | No | Yes (whole seconds) | No | PubSub only |
 //! | Retain (last value) | No | No | No | No | Yes | No | No |

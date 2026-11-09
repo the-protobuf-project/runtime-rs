@@ -149,11 +149,13 @@ impl Headers {
     }
 }
 
+/// The error every header check reports, so callers match one variant.
 fn invalid(reason: String) -> StreamError {
     StreamError::InvalidHeader(reason)
 }
 
 impl<K: Into<String>, V: Into<String>> FromIterator<(K, V)> for Headers {
+    /// Collects pairs as given; nothing is checked until [`Headers::validate`].
     fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
         Self(
             iter.into_iter()
@@ -164,6 +166,7 @@ impl<K: Into<String>, V: Into<String>> FromIterator<(K, V)> for Headers {
 }
 
 impl<K: Into<String>, V: Into<String>> Extend<(K, V)> for Headers {
+    /// Later pairs overwrite earlier ones with the same key, as with `insert`.
     fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, iter: I) {
         self.0
             .extend(iter.into_iter().map(|(k, v)| (k.into(), v.into())));
@@ -174,6 +177,7 @@ impl<'a> IntoIterator for &'a Headers {
     type Item = (&'a String, &'a String);
     type IntoIter = btree_map::Iter<'a, String, String>;
 
+    /// Iterates in key order, the order headers encode in.
     fn into_iter(self) -> Self::IntoIter {
         self.0.iter()
     }
@@ -183,6 +187,7 @@ impl IntoIterator for Headers {
     type Item = (String, String);
     type IntoIter = btree_map::IntoIter<String, String>;
 
+    /// Yields owned pairs in key order.
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }

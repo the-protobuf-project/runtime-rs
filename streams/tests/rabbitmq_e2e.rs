@@ -54,20 +54,24 @@ const QUIET: Duration = Duration::from_millis(700);
 /// test's connection dies under it.
 static BROKER: RwLock<()> = RwLock::const_new(());
 
+/// The AMQPS listener, `RABBITMQ_E2E_ADDR` or the compose default.
 fn addr() -> String {
     std::env::var("RABBITMQ_E2E_ADDR").unwrap_or_else(|_| "127.0.0.1:15671".into())
 }
 
+/// The secure broker's container name, for `rabbitmqctl` and the restart test.
 fn container() -> String {
     std::env::var("RABBITMQ_E2E_CONTAINER").unwrap_or_else(|_| "tpp-streams-rabbitmq-secure".into())
 }
 
+/// The test certificate directory, `STREAMS_E2E_TLS_DIR` or docker/tls/out.
 fn tls_dir() -> PathBuf {
     std::env::var("STREAMS_E2E_TLS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"))
 }
 
+/// A test certificate file's bytes, failing with how to generate it when missing.
 fn read(name: &str) -> Vec<u8> {
     let path = tls_dir().join(name);
     std::fs::read(&path).unwrap_or_else(|e| {
@@ -107,6 +111,7 @@ async fn connect_with(uri: String, tls: OwnedTLSConfig) -> Result<Connection, St
     connect_named(uri, tls, ConnectionProperties::default()).await
 }
 
+/// [`connect_with`] under `properties`, e.g. to name the connection on the broker.
 async fn connect_named(
     uri: String,
     tls: OwnedTLSConfig,
@@ -123,6 +128,7 @@ async fn connect_named(
     }
 }
 
+/// A mutual-TLS connection logged in by certificate, failing with how to start the broker.
 async fn connect() -> Arc<Connection> {
     let conn = connect_with(amqps(), mutual_tls())
         .await
@@ -135,6 +141,7 @@ async fn connect() -> Arc<Connection> {
     Arc::new(conn)
 }
 
+/// A prefix unique to this process and call, so tests on one broker never share queues.
 fn prefix() -> String {
     static SEQ: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
@@ -144,6 +151,7 @@ fn prefix() -> String {
     format!("e2e{nanos}-{}", SEQ.fetch_add(1, Ordering::Relaxed))
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -152,12 +160,14 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// A provider on `conn` naming everything under `prefix`.
 async fn provider(conn: &Arc<Connection>, prefix: &str) -> RabbitProvider {
     RabbitProvider::new(conn.clone(), RabbitConfig::default().with_prefix(prefix))
         .await
         .unwrap()
 }
 
+/// A stream declaration with a fixed `id` over `subjects`.
 fn stream(id: &str, subjects: &[&str]) -> Stream {
     Stream {
         id: id.into(),
@@ -167,6 +177,7 @@ fn stream(id: &str, subjects: &[&str]) -> Stream {
     }
 }
 
+/// The next item within [`WAIT`], panicking on a timeout or an ended stream.
 async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
     tokio::time::timeout(WAIT, stream.next())
         .await
@@ -174,6 +185,7 @@ async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
         .expect("the stream ended before a message arrived")
 }
 
+/// Asserts nothing arrives within [`QUIET`]; an ended stream fails too.
 async fn quiet<S: futures::Stream + Unpin>(stream: &mut S)
 where
     S::Item: std::fmt::Debug,

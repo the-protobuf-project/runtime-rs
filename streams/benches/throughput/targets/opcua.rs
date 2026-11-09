@@ -30,6 +30,9 @@ use super::{Conn, Error, env, unknown_profile};
 /// The e2e suite's user, from docker/compose.opcua.secure.yaml.
 const USER: (&str, &str) = ("e2e-operator", "e2e-operator-secret");
 
+/// Connects a session for `profile` (anonymous with no security, or
+/// Basic256Sha256 SignAndEncrypt with the server pinned and a user password),
+/// in a fresh per-process PKI directory, and waits up to 15s for it.
 pub async fn connect(profile: &str, _registry: Registry) -> Result<Conn, Error> {
     let certs = std::env::var("STREAMS_E2E_TLS_DIR")
         .map(PathBuf::from)

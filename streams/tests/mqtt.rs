@@ -73,18 +73,27 @@ fn broker() -> u16 {
     port
 }
 
+/// A template for the in-process broker on `port`; the provider sets each
+/// connection's client id.
 fn options(port: u16) -> MqttOptions {
     MqttOptions::new("template", "127.0.0.1", port)
 }
 
+/// A default provider on a broker of its own.
 async fn provider() -> MqttProvider {
     provider_on(broker()).await
 }
 
+/// A default provider on the broker at `port`.
 async fn provider_on(port: u16) -> MqttProvider {
+    provider_with(port, MqttConfig::default()).await
+}
+
+/// Connects with `config`, retrying for about 2.5s while the broker thread starts listening.
+async fn provider_with(port: u16, config: MqttConfig) -> MqttProvider {
     let mut last = None;
     for _ in 0..50 {
-        match MqttProvider::connect(options(port), MqttConfig::default()).await {
+        match MqttProvider::connect(options(port), config.clone()).await {
             Ok(provider) => return provider,
             Err(error) => last = Some(error),
         }
@@ -93,6 +102,7 @@ async fn provider_on(port: u16) -> MqttProvider {
     panic!("broker never came up: {last:?}");
 }
 
+/// Declares a stream over `subjects` and binds a manager to it.
 async fn declare(streams: &MqttProvider, subjects: &[&str]) -> Arc<dyn Manager> {
     let stream = streams
         .create(Stream {
@@ -105,6 +115,7 @@ async fn declare(streams: &MqttProvider, subjects: &[&str]) -> Arc<dyn Manager> 
     streams.bind(&stream.id).await.expect("bind")
 }
 
+/// A JSON `Event` payload; the user tells messages apart.
 fn event(user: &str, action: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -113,6 +124,7 @@ fn event(user: &str, action: &str) -> Payload {
     .unwrap()
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> streams::Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -120,6 +132,7 @@ async fn next(subscription: &mut Subscription) -> streams::Message {
         .expect("subscription ended before a message arrived")
 }
 
+/// The next delivery within [`WITHIN`], panicking on a timeout or an ended stream.
 async fn next_delivery(deliveries: &mut Deliveries) -> streams::Delivery {
     timeout(WITHIN, deliveries.next())
         .await
@@ -455,6 +468,46 @@ async fn publish_batch_publishes_each() {
     ));
 }
 
+/// Publishes on one topic, sent concurrently over several connections, reach
+/// a subscriber in the order they were sent: the topic takes one connection.
+#[tokio::test]
+async fn concurrent_publishes_on_a_topic_keep_their_order_over_several_connections() {
+    let config = MqttConfig {
+        publish_connections: 4,
+        ..MqttConfig::default()
+    };
+    let streams = provider_with(broker(), config).await;
+    let manager = declare(&streams, &[SUBJECT]).await;
+    let mut subscription = manager
+        .subscribe(SUBJECT, &Options::default())
+        .await
+        .unwrap();
+
+    const COUNT: usize = 200;
+    let sent: Vec<String> = (0..COUNT).map(|n| format!("m{n:04}")).collect();
+    // join_all polls in order, so each publish is handed to its connection
+    // before the next, and none waits for the one before it to be acked.
+    let opts: Vec<Options> = sent
+        .iter()
+        .map(|id| Options::default().with_id(id))
+        .collect();
+    let outcomes = futures::future::join_all(
+        sent.iter()
+            .zip(&opts)
+            .map(|(id, opts)| manager.publish(SUBJECT, event(id, ""), opts)),
+    )
+    .await;
+    for outcome in outcomes {
+        outcome.unwrap();
+    }
+    let mut received = Vec::with_capacity(COUNT);
+    for _ in 0..COUNT {
+        received.push(next(&mut subscription).await.id().to_owned());
+    }
+    assert_eq!(received, sent);
+    streams.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn publish_rejects_an_undeclared_subject() {
     let streams = provider().await;
@@ -534,6 +587,7 @@ async fn raw(port: u16, filter: &str) -> (rumqttc::v5::AsyncClient, rumqttc::v5:
     }
 }
 
+/// Nanoseconds since the epoch: unique enough for a raw client's id.
 fn ulid_ish() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -541,6 +595,8 @@ fn ulid_ish() -> u128 {
         .as_nanos()
 }
 
+/// The next PUBLISH the raw client receives, skipping other packets; each
+/// poll must arrive within [`WITHIN`].
 async fn raw_next(events: &mut rumqttc::v5::EventLoop) -> rumqttc::v5::mqttbytes::v5::Publish {
     use rumqttc::v5::{Event as Ev, Incoming};
     loop {
@@ -552,6 +608,7 @@ async fn raw_next(events: &mut rumqttc::v5::EventLoop) -> rumqttc::v5::mqttbytes
     }
 }
 
+/// Creates `stream` as given and binds a manager, returning the assigned id with it.
 async fn declare_with(streams: &MqttProvider, stream: Stream) -> (String, Arc<dyn Manager>) {
     let stream = streams.create(stream).await.expect("create");
     let manager = streams.bind(&stream.id).await.expect("bind");

@@ -25,6 +25,8 @@ struct Order {
 
 const SUBJECT: &str = "order.placed";
 
+/// Publishes three orders under one partition key, then reads them back in
+/// order through a consumer group starting from the earliest offset.
 #[tokio::main]
 async fn main() -> streams::Result<()> {
     // The config is yours: TLS and SASL go here, and every client the provider

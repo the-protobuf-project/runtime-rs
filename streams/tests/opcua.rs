@@ -10,7 +10,7 @@ use std::{net::TcpListener as StdListener, path::PathBuf, sync::Arc, time::Durat
 
 use futures::StreamExt;
 use opcua::{
-    client::{ClientBuilder, IdentityToken, Session},
+    client::{ClientBuilder, DataChangeCallback, IdentityToken, Session},
     crypto::SecurityPolicy,
     nodes::{AccessLevel, VariableBuilder},
     server::{
@@ -51,6 +51,7 @@ struct TestServer {
 }
 
 impl TestServer {
+    /// A server on a free localhost port.
     async fn start() -> Self {
         let port = StdListener::bind("127.0.0.1:0")
             .unwrap()
@@ -60,7 +61,21 @@ impl TestServer {
         Self::start_on(port).await
     }
 
+    /// A server on `port`, e.g. to bring one back where a stopped one was.
     async fn start_on(port: u16) -> Self {
+        Self::start_with(port, false).await
+    }
+
+    /// A server on `port` that registers another namespace before the test
+    /// one, so the test namespace's index is one higher.
+    async fn start_renumbered(port: u16) -> Self {
+        Self::start_with(port, true).await
+    }
+
+    /// Builds the server with the test variables and a read-only `Serial`, with
+    /// sampling and queue limits opened up so no write is folded or dropped, and
+    /// waits up to 2s for it to accept connections.
+    async fn start_with(port: u16, renumbered: bool) -> Self {
         let pki = scratch(&format!("server-{port}"));
         let mut builder = ServerBuilder::new()
             .application_name("tpp-streams test server")
@@ -82,14 +97,23 @@ impl TestServer {
                     MessageSecurityMode::None,
                     &[ANONYMOUS_USER_TOKEN_ID] as &[&str],
                 ),
-            )
-            .with_node_manager(simple_node_manager(
+            );
+        if renumbered {
+            builder = builder.with_node_manager(simple_node_manager(
                 NamespaceMetadata {
-                    namespace_uri: NAMESPACE.to_owned(),
+                    namespace_uri: "urn:tpp-streams:test-first".to_owned(),
                     ..Default::default()
                 },
-                "tpp-streams",
+                "tpp-streams-first",
             ));
+        }
+        builder = builder.with_node_manager(simple_node_manager(
+            NamespaceMetadata {
+                namespace_uri: NAMESPACE.to_owned(),
+                ..Default::default()
+            },
+            "tpp-streams",
+        ));
         // async-opcua samples a monitored node by source timestamp, at no
         // less than this; at its default of 100 ms, writes closer together
         // than that are folded into one sample. Zero reports every write.
@@ -102,7 +126,7 @@ impl TestServer {
         let ns = handle.get_namespace_index(NAMESPACE).unwrap();
         let manager = handle
             .node_managers()
-            .get_of_type::<SimpleNodeManager>()
+            .get_by_name::<SimpleNodeManager>("tpp-streams")
             .unwrap();
         {
             let mut space = manager.address_space().write();
@@ -138,10 +162,13 @@ impl TestServer {
         Self { handle, task, port }
     }
 
+    /// The server's endpoint URL.
     fn url(&self) -> String {
         format!("opc.tcp://127.0.0.1:{}/", self.port)
     }
 
+    /// Cancels the server and waits up to [`WAIT`] for it to stop, returning the
+    /// port so a test can start another there.
     async fn stop(self) -> u16 {
         self.handle.cancel();
         let _ = tokio::time::timeout(WAIT, self.task).await;
@@ -217,6 +244,7 @@ async fn setup() -> (TestServer, Arc<Session>, OpcUaProvider, u16) {
     setup_with(OpcUaConfig::default()).await
 }
 
+/// A server, a session to it, a provider with `config`, and the test namespace's index.
 async fn setup_with(config: OpcUaConfig) -> (TestServer, Arc<Session>, OpcUaProvider, u16) {
     let server = TestServer::start().await;
     let (session, _) = connect(&server.url()).await;
@@ -225,6 +253,7 @@ async fn setup_with(config: OpcUaConfig) -> (TestServer, Arc<Session>, OpcUaProv
     (server, session, provider, ns)
 }
 
+/// A node id by namespace index, as the test server numbers it.
 fn node(ns: u16, name: &str) -> String {
     format!("ns={ns};s={name}")
 }
@@ -245,6 +274,7 @@ async fn bound(provider: &OpcUaProvider, ns: u16) -> (Stream, Arc<dyn streams::M
     (stream, manager)
 }
 
+/// The next notification within [`WAIT`].
 async fn next(sub: &mut streams::Subscription) -> Message {
     tokio::time::timeout(WAIT, sub.next())
         .await
@@ -252,6 +282,7 @@ async fn next(sub: &mut streams::Subscription) -> Message {
         .expect("the stream is open")
 }
 
+/// Polls `check` every 20ms until it holds, failing after [`WAIT`] with `what`.
 async fn eventually(what: &str, mut check: impl FnMut() -> bool) {
     let deadline = tokio::time::Instant::now() + WAIT;
     while !check() {
@@ -508,7 +539,7 @@ async fn bad_writes_name_the_status() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn batch_is_one_write() {
+async fn batch_writes_in_order() {
     let (_server, _session, provider, ns) = setup().await;
     let (_, manager) = bound(&provider, ns).await;
     let seq = node(ns, "Sequence");
@@ -830,6 +861,11 @@ async fn subscriptions_survive_a_server_restart() {
     );
 
     let server = TestServer::start_on(port).await;
+    // Ids the new server will not reuse, so the recreated subscription's id
+    // differs from the one the provider last saw.
+    for _ in 0..10 {
+        server.handle.info().subscription_id_handle.next();
+    }
     assert_eq!(server.handle.get_namespace_index(NAMESPACE), Some(ns));
     // The session reconnects and recreates the subscription and its item.
     eventually("the subscription to be recreated", || {
@@ -854,4 +890,193 @@ async fn subscriptions_survive_a_server_restart() {
         server.monitored(&session) == (0, 0)
     })
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_shared_session_keeps_its_other_subscriptions() {
+    let (server, session, provider, ns) = setup().await;
+    let (_, manager) = bound(&provider, ns).await;
+    // The caller's own subscription, made first, so the provider's has the
+    // next id.
+    let mine = session
+        .create_subscription(
+            Duration::from_millis(100),
+            60,
+            10,
+            0,
+            0,
+            true,
+            DataChangeCallback::new(|_, _| {}),
+        )
+        .await
+        .unwrap();
+    let count = manager
+        .subscribe(&node(ns, "Count"), &Options::default())
+        .await
+        .unwrap();
+    // The caller drops its subscription, so after a restart the provider's
+    // is recreated under the id the caller's had...
+    session.delete_subscription(mine).await.unwrap();
+    let port = server.stop().await;
+    let server = TestServer::start_on(port).await;
+    eventually("the subscription to be recreated", || {
+        server.monitored(&session) == (1, 1)
+    })
+    .await;
+    // ...and the caller's new one is given the id the provider last saw.
+    let theirs = session
+        .create_subscription(
+            Duration::from_millis(100),
+            60,
+            10,
+            0,
+            0,
+            true,
+            DataChangeCallback::new(|_, _| {}),
+        )
+        .await
+        .unwrap();
+    let held = |id: u32| {
+        session
+            .subscription_state
+            .lock()
+            .get(id)
+            .map(|s| s.monitored_items().count())
+    };
+
+    // A new item goes to the provider's subscription, not the caller's.
+    let temp = manager
+        .subscribe(&node(ns, "Temperature"), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(held(theirs), Some(0));
+    assert_eq!(server.monitored(&session), (2, 2));
+
+    // And dropping every stream deletes the provider's, not the caller's.
+    drop(count);
+    drop(temp);
+    eventually("the provider's subscription to go", || {
+        server.monitored(&session) == (1, 0)
+    })
+    .await;
+    assert_eq!(held(theirs), Some(0));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_write_that_displaces_the_initial_value_is_delivered() {
+    let (_server, _session, provider, ns) = setup().await;
+    let (_, manager) = bound(&provider, ns).await;
+    let count = node(ns, "Count");
+    // A queue of one: a write before the first publishing cycle replaces the
+    // initial value in it, and is the first notification.
+    let mut sub = manager
+        .subscribe(&count, &Options::default().with_prefetch(1))
+        .await
+        .unwrap();
+    manager
+        .publish(&count, OpcUaValue::payload(5i32), &Options::default())
+        .await
+        .unwrap();
+    let got: Variant = next(&mut sub).await.decode(&OpcUaValue).unwrap();
+    assert_eq!(got, Variant::from(5i32));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_subscribe_leaves_nothing_behind() {
+    let (server, session, provider, ns) = setup().await;
+    let (_, manager) = bound(&provider, ns).await;
+    let subject = node(ns, "Count");
+    let opts = Options::default();
+    let mut subscribe = manager.subscribe(&subject, &opts);
+    // Cancelled once the item is routed and the server is being asked.
+    let finished = std::future::poll_fn(|cx| match subscribe.as_mut().poll(cx) {
+        std::task::Poll::Ready(result) => std::task::Poll::Ready(Some(result.is_ok())),
+        std::task::Poll::Pending if provider.monitored_items() > 0 => std::task::Poll::Ready(None),
+        std::task::Poll::Pending => {
+            // Polled again at once, to catch the moment between.
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
+    assert_eq!(finished, None, "the subscribe was cancelled midway");
+    drop(subscribe);
+    eventually("the cancelled item to go", || {
+        provider.monitored_items() == 0 && server.monitored(&session) == (0, 0)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_subscription_dropped_off_the_runtime_is_still_detached() {
+    let (server, session, provider, ns) = setup().await;
+    let (_, manager) = bound(&provider, ns).await;
+    let sub = manager
+        .subscribe(&node(ns, "Count"), &Options::default())
+        .await
+        .unwrap();
+    assert_eq!(server.monitored(&session), (1, 1));
+    std::thread::spawn(move || drop(sub)).join().unwrap();
+    eventually("the item and subscription to go", || {
+        provider.monitored_items() == 0 && server.monitored(&session) == (0, 0)
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_uris_follow_a_renumbered_server() {
+    let (server, _session, provider, ns) = setup().await;
+    let subject = format!("nsu={NAMESPACE};s=Count");
+    let stream = provider
+        .create(Stream {
+            subjects: vec![subject.clone()],
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+    let manager = provider.bind(&stream.id).await.unwrap();
+    let mut sub = manager
+        .subscribe(&subject, &Options::default())
+        .await
+        .unwrap();
+    manager
+        .publish(&subject, OpcUaValue::payload(1i32), &Options::default())
+        .await
+        .unwrap();
+    let got: Variant = next(&mut sub).await.decode(&OpcUaValue).unwrap();
+    assert_eq!(got, Variant::from(1i32));
+
+    // The server comes back with another namespace ahead of this one.
+    let port = server.stop().await;
+    let server = TestServer::start_renumbered(port).await;
+    assert_eq!(server.handle.get_namespace_index(NAMESPACE), Some(ns + 1));
+
+    // Writes reach the node the URI names, at its new index...
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        match manager
+            .publish(&subject, OpcUaValue::payload(7i32), &Options::default())
+            .await
+        {
+            Ok(_) => break,
+            Err(error) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "a write after the restart: {error}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    // ...and so does the monitored item, moved there.
+    let deadline = tokio::time::Instant::now() + WAIT;
+    loop {
+        let got: Variant = next(&mut sub).await.decode(&OpcUaValue).unwrap();
+        if got == Variant::from(9i32) {
+            break;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "the moved item");
+        manager
+            .publish(&subject, OpcUaValue::payload(9i32), &Options::default())
+            .await
+            .unwrap();
+    }
 }

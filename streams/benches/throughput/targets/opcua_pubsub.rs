@@ -32,6 +32,8 @@ use super::{Conn, Error, env, unknown_profile};
 
 const USER: (&str, &str) = ("e2e-app", "e2e-app-secret");
 
+/// Connects the PubSub provider and wraps it so every bench subject is its
+/// own one-field DataSetWriter. The registry is unused: payloads are OPC UA values.
 pub async fn connect(profile: &str, _registry: Registry) -> std::result::Result<Conn, Error> {
     let (mut options, prefix) = match profile {
         "plain" => (
@@ -74,30 +76,38 @@ struct OneFieldWriters(PubSubProvider);
 
 struct Bound(Arc<dyn Manager>);
 
+/// The PubSub subject for a bench subject: its writer's single field `v`.
 fn field(subject: &str) -> String {
     format!("{subject}/v")
 }
 
 #[async_trait::async_trait]
 impl Streams for OneFieldWriters {
+    /// Passes through; declarations are unchanged by the field mapping.
     async fn create(&self, stream: Stream) -> Result<Stream> {
         self.0.create(stream).await
     }
+    /// Passes through.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.0.get(id).await
     }
+    /// Wraps the bound manager so its publishes and subscriptions map to field `v`.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         Ok(Arc::new(Bound(self.0.bind(id).await?)))
     }
+    /// Passes through.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
         self.0.update(id, stream).await
     }
+    /// Passes through.
     async fn delete(&self, id: &str) -> Result<()> {
         self.0.delete(id).await
     }
+    /// Passes through.
     async fn list(&self) -> Result<Vec<Stream>> {
         self.0.list().await
     }
+    /// Passes through, closing the provider's MQTT connections.
     async fn close(&self) -> Result<()> {
         self.0.close().await
     }
@@ -105,6 +115,7 @@ impl Streams for OneFieldWriters {
 
 #[async_trait::async_trait]
 impl Publisher for Bound {
+    /// Publishes to the subject's field `v`.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.0.publish(&field(subject), payload, opts).await
     }
@@ -112,6 +123,7 @@ impl Publisher for Bound {
 
 #[async_trait::async_trait]
 impl Subscriber for Bound {
+    /// Subscribes to the subject's field `v`.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         self.0.subscribe(&field(subject), opts).await
     }
@@ -119,6 +131,8 @@ impl Subscriber for Bound {
 
 #[async_trait::async_trait]
 impl Batch for Bound {
+    /// Sends the batch to field `v` as the provider's NetworkMessages; fails if
+    /// the bound manager has no batch support.
     async fn publish_batch(
         &self,
         subject: &str,
@@ -132,6 +146,7 @@ impl Batch for Bound {
 }
 
 impl Manager for Bound {
+    /// Always offers batching, delegating to the wrapped manager.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }

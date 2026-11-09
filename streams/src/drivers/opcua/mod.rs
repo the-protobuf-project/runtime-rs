@@ -8,7 +8,7 @@
 //!
 //! The provider implements [`Publisher`](crate::Publisher),
 //! [`Subscriber`](crate::Subscriber), and [`Batch`](crate::Batch) as one Write
-//! request. [`as_durable`](crate::as_durable) and
+//! per value, in order. [`as_durable`](crate::as_durable) and
 //! [`as_positioned`](crate::as_positioned) refuse: a node holds its current
 //! value, not a queue or a log.
 //!
@@ -19,7 +19,7 @@
 //! | subject | a node id in string form, `ns=3;s=Temperature` or `nsu=urn:plant;i=1001` |
 //! | [`publish`](crate::Publisher::publish) | a Write to the node's Value attribute |
 //! | [`subscribe`](crate::Subscriber::subscribe) | a data-change monitored item in the provider's client subscription |
-//! | [`publish_batch`](crate::Batch::publish_batch) | one Write request carrying every value |
+//! | [`publish_batch`](crate::Batch::publish_batch) | one Write per value, each awaited before the next |
 //! | payload | a [`DataValue`] in OPC UA binary encoding: [`OpcUaValue`] |
 //! | stream | a declaration this provider holds: OPC UA has nowhere to keep one |
 //!
@@ -27,9 +27,17 @@
 //! else fails with [`StreamError::UnknownSubject`], and a declaration that is
 //! not a node id fails `create`. A namespace index (`ns=3`) is a position in
 //! the server's namespace table and can change when the server's
-//! configuration does; a namespace URI (`nsu=...`) is stable and resolved
-//! against the server when the stream is bound. Matching is literal: OPC UA
-//! has no wildcards over node ids.
+//! configuration does; a namespace URI (`nsu=...`) is stable, resolved
+//! against the server when the stream is bound, and again on each new server
+//! session, so a server that renumbers its namespaces when it restarts is
+//! still written to, and monitored on, the node the URI names. Matching is
+//! literal: OPC UA has no wildcards over node ids.
+//!
+//! **A batch is a Write per value**, each answered before the next is sent.
+//! A batch's values are all for one node, and a server applies the values of
+//! one Write request in whatever order it chooses (Part 4, 5.11.4.1), so a
+//! single request could leave the node holding any of them rather than the
+//! last.
 //!
 //! **Publish** writes the payload's DataValue, status and timestamps
 //! included, and returns once the server has answered the Write. A bad status
@@ -49,7 +57,10 @@
 //! between publishing cycles; [`OpcUaConfig::queue_size`] is used without it.
 //! The server reports an item's current value as soon as it is created; that
 //! value was not published after the subscription, so it is skipped unless
-//! [`OpcUaConfig::initial_value`] says otherwise. Each notification becomes a
+//! [`OpcUaConfig::initial_value`] says otherwise. To know it, subscribe reads
+//! the node first, and skips the first notification only when it is the value
+//! read: a write that displaced it from a full queue is delivered. Each
+//! notification becomes a
 //! [`Message`](crate::Message) on the node id's subject, codec
 //! [`CODEC_NAME`], carrying the DataValue with its status code and both
 //! timestamps. Dropping the stream deletes the monitored item, and the
@@ -191,10 +202,6 @@ pub struct OpcUaConfig {
     /// after it subscribes.
     pub initial_value: bool,
 
-    /// The most values one Write request carries; a larger batch is split.
-    /// Servers limit nodes per Write, often to 1000 or fewer.
-    pub max_nodes_per_write: usize,
-
     /// The most notifications the server puts in one Publish response; the
     /// rest wait for the next one, which the client asks for at once. Zero
     /// lets the server choose, which means no limit.
@@ -208,6 +215,7 @@ pub struct OpcUaConfig {
 }
 
 impl Default for OpcUaConfig {
+    /// No initial value, and at most 1,000 notifications per Publish response.
     fn default() -> Self {
         Self {
             publishing_interval: DEFAULT_PUBLISHING_INTERVAL,
@@ -217,7 +225,6 @@ impl Default for OpcUaConfig {
             keep_alive_count: 10,
             lifetime_count: 60,
             initial_value: false,
-            max_nodes_per_write: 1000,
             max_notifications_per_publish: 1000,
         }
     }
@@ -265,6 +272,7 @@ impl OpcUaProvider {
         self.inner.hub.items()
     }
 
+    /// Reads the declared streams, recovering from a poisoned lock.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Stream>> {
         self.inner
             .declared
@@ -272,6 +280,7 @@ impl OpcUaProvider {
             .unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Writes the declared streams, recovering from a poisoned lock.
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Stream>> {
         self.inner
             .declared
@@ -303,6 +312,7 @@ fn declaration(id: String, stream: Stream) -> Result<Stream> {
 
 #[async_trait::async_trait]
 impl Streams for OpcUaProvider {
+    /// Refuses default headers and any subject that is not a node id.
     async fn create(&self, stream: Stream) -> Result<Stream> {
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
@@ -315,6 +325,7 @@ impl Streams for OpcUaProvider {
         Ok(out)
     }
 
+    /// Reads the in-process declaration; nothing is asked of the server.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.read().get(id).cloned().ok_or_else(|| not_found(id))
     }
@@ -329,6 +340,7 @@ impl Streams for OpcUaProvider {
         ))
     }
 
+    /// Revalidates as create does; managers already bound keep the old declaration.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
         let out = declaration(id.to_owned(), stream)?;
         let mut declared = self.write();
@@ -337,6 +349,7 @@ impl Streams for OpcUaProvider {
         Ok(slot.clone())
     }
 
+    /// Forgets the declaration; items already monitored stay until their streams drop.
     async fn delete(&self, id: &str) -> Result<()> {
         self.write()
             .remove(id)
@@ -344,6 +357,7 @@ impl Streams for OpcUaProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// Lists only the streams this process declared, in id order.
     async fn list(&self) -> Result<Vec<Stream>> {
         Ok(self.read().values().cloned().collect())
     }

@@ -37,18 +37,23 @@ const WAIT: Duration = Duration::from_secs(15);
 
 static SERIAL: Mutex<()> = Mutex::const_new(());
 
+/// The simulator's endpoint, `OPCUA_URL` or the compose default.
 fn url() -> String {
     std::env::var("OPCUA_URL").unwrap_or_else(|_| "opc.tcp://127.0.0.1:14840".into())
 }
 
+/// The simulator's container name, for tests that restart it.
 fn container() -> String {
     std::env::var("OPCUA_CONTAINER").unwrap_or_else(|_| "tpp-streams-opcua".into())
 }
 
+/// A node id by namespace URI, which stays stable when the server renumbers namespaces.
 fn node(name: &str) -> String {
     format!("nsu={NAMESPACE};s={name}")
 }
 
+/// An anonymous session with no security that retries for ever, failing
+/// if it is not connected within [`WAIT`].
 async fn connect() -> Arc<Session> {
     let mut client = ClientBuilder::new()
         .application_name("tpp-streams live tests")
@@ -88,6 +93,7 @@ const NODES: [&str; 6] = [
     "Serial",
 ];
 
+/// A session, a provider on it, and a manager bound to a stream over [`NODES`].
 async fn setup() -> (Arc<Session>, OpcUaProvider, Arc<dyn Manager>) {
     let session = connect().await;
     let provider = OpcUaProvider::new(session.clone(), OpcUaConfig::default());
@@ -103,6 +109,7 @@ async fn setup() -> (Arc<Session>, OpcUaProvider, Arc<dyn Manager>) {
     (session, provider, manager)
 }
 
+/// The next notification within [`WAIT`].
 async fn next(sub: &mut Subscription) -> Message {
     timeout(WAIT, sub.next())
         .await
@@ -110,6 +117,7 @@ async fn next(sub: &mut Subscription) -> Message {
         .expect("the stream is open")
 }
 
+/// The next notification's value within [`WAIT`].
 async fn value(sub: &mut Subscription) -> Variant {
     next(sub).await.decode(&OpcUaValue).unwrap()
 }
@@ -351,7 +359,7 @@ async fn simulated_bad_quality_reaches_the_subscriber() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn batch_is_one_write() {
+async fn batch_writes_in_order() {
     let _serial = SERIAL.lock().await;
     let (_session, _provider, manager) = setup().await;
     let seq = node("Sequence");

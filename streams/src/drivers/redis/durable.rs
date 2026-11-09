@@ -89,10 +89,12 @@ pub struct DurableManager {
 }
 
 impl DurableManager {
+    /// A manager over `stream`; nothing is read or created until it is used.
     pub(super) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         Self { inner, stream }
     }
 
+    /// The Redis stream key that holds `subject`'s log.
     fn key(&self, subject: &str) -> String {
         self.inner.keys.subject(&self.stream.id, subject)
     }
@@ -135,6 +137,8 @@ impl DurableManager {
 
 #[async_trait::async_trait]
 impl Publisher for DurableManager {
+    /// An XADD that is never retried, because a retry would append a second
+    /// copy under a new entry id. Refuses a TTL: the log has no timer.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.inner.declares(&self.stream, subject)?;
         Self::refuse_ttl(opts)?;
@@ -158,6 +162,8 @@ impl Publisher for DurableManager {
 /// round trip, and the ids come back in order because they are minted first.
 #[async_trait::async_trait]
 impl Batch for DurableManager {
+    /// One pipeline for every XADD. A failure is reported against every index,
+    /// since Redis does not say how many entries landed before it.
     async fn publish_batch(
         &self,
         subject: &str,
@@ -198,6 +204,8 @@ impl Batch for DurableManager {
 /// [`Durable::consume`] when that matters.
 #[async_trait::async_trait]
 impl Subscriber for DurableManager {
+    /// Reads with XREAD from the newest entry at the time of the call. Refuses
+    /// a group, since every subscriber here sees every message.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         self.inner.declares(&self.stream, subject)?;
         refuse_group(opts)?;
@@ -261,6 +269,8 @@ impl Subscriber for DurableManager {
 
 #[async_trait::async_trait]
 impl Durable for DurableManager {
+    /// Joins the group at `$`: a new consumer sees only what is published after
+    /// it first attaches, and an existing one resumes where it left off.
     async fn consume(&self, subject: &str, consumer: &str, opts: &Options) -> Result<Deliveries> {
         self.consume_from(subject, consumer, Position::New, opts)
             .await
@@ -278,6 +288,8 @@ impl Durable for DurableManager {
 /// replay the log every time a process restarted.
 #[async_trait::async_trait]
 impl Positioned for DurableManager {
+    /// Creates the group at `at` if it does not exist, then spawns its delivery
+    /// loop under an identity unique to this call.
     async fn consume_from(
         &self,
         subject: &str,
@@ -359,14 +371,17 @@ impl Positioned for DurableManager {
 }
 
 impl Manager for DurableManager {
+    /// Some: consumer groups keep position and pending entries on the server.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some, though the position only applies when the group is first created.
     fn positioned(&self) -> Option<&dyn Positioned> {
         Some(self)
     }
 
+    /// Some: a batch is one pipeline of XADDs.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -410,6 +425,8 @@ fn disconnected(error: &redis::RedisError) -> bool {
 }
 
 impl ConsumeLoop {
+    /// Delivers until the reader drops its end or Redis refuses a read or a
+    /// reclaim, reconnecting across dropped connections, then leaves the group.
     async fn run(self, mut reader: MultiplexedConnection) {
         let mut delivered = 0u64;
         // Often enough that an abandoned message waits little past its reclaim
@@ -774,6 +791,8 @@ struct RedisAck {
 
 #[async_trait::async_trait]
 impl Acker for RedisAck {
+    /// Queues an XACK for the consumer's ack task, which batches them. With
+    /// `confirm_acks` it waits for Redis to answer; without, it returns once queued.
     async fn ack(self: Box<Self>) -> Result<()> {
         let target = &self.acks.target;
         let failed = |error: String| {
@@ -913,6 +932,8 @@ fn idle_for_delay(reclaim_after: Duration, delay: Duration) -> Result<u64> {
     Ok(reclaim.saturating_sub(delay))
 }
 
+/// XACK one entry outside the batching ack task, for an entry that is
+/// settled by the loop itself rather than by a handler.
 async fn xack(inner: &Inner, key: &str, group: &str, entry: &str) -> Result<()> {
     // Acknowledging an acknowledged entry is a no-op.
     inner

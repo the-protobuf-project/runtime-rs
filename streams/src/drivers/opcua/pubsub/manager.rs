@@ -55,6 +55,7 @@ pub(crate) struct PubSubManager {
 }
 
 impl PubSubManager {
+    /// Binds a copy of `stream`, resolving its id to the WriterGroup it names.
     pub(crate) fn new(inner: Arc<Inner>, stream: Stream) -> Self {
         let group = inner.group_of(&stream.id);
         Self {
@@ -146,6 +147,7 @@ impl PubSubManager {
             .collect()
     }
 
+    /// Wraps `messages` in a NetworkMessage headed with this group's publisher and name.
     fn network(&self, id: String, messages: Vec<DataSetMessage>) -> NetworkMessage {
         NetworkMessage {
             message_id: Some(id),
@@ -182,6 +184,7 @@ impl PubSubManager {
 
 #[async_trait::async_trait]
 impl Publisher for PubSubManager {
+    /// One NetworkMessage with one DataSetMessage on the writer's data topic, never retained.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let (writer, field, properties) = self.check_publish(subject, opts)?;
         let fields = Self::fields(field.as_deref(), &payload)?;
@@ -194,7 +197,7 @@ impl Publisher for PubSubManager {
         if let Err(error) = self
             .inner
             .links
-            .link()
+            .link(&topic)
             .send(&topic, self.inner.config.qos, false, Some(properties), body)
             .await
         {
@@ -282,7 +285,7 @@ impl Batch for PubSubManager {
         let outcomes = self
             .inner
             .links
-            .link()
+            .link(&topic)
             .send_all(self.inner.config.qos, networks)
             .await;
         for (indexes, outcome) in members.into_iter().zip(outcomes) {
@@ -311,6 +314,8 @@ impl Batch for PubSubManager {
 
 #[async_trait::async_trait]
 impl Subscriber for PubSubManager {
+    /// Subscribes to the writer's topic and the group topic, where a message names its writer.
+    /// Sequence gaps are tracked only without a group, since a share sees a subset.
     async fn subscribe(&self, subject: &str, opts: &Options) -> Result<Subscription> {
         let (writer, field) = self.check_subject(subject)?;
         let topics = [
@@ -344,6 +349,7 @@ impl Subscriber for PubSubManager {
 }
 
 impl Manager for PubSubManager {
+    /// Batches only; MQTT PubSub keeps no consumer positions here.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -403,6 +409,8 @@ impl Reader {
         }
     }
 
+    /// Appends this writer's DataSetMessages from one publish to `out`, dropping retained,
+    /// malformed, keep-alive, and repeated ones.
     fn convert(&mut self, publish: &Publish, out: &mut Vec<Message>) {
         if publish.retain {
             // Retained before this subscription: not published after it.
@@ -462,7 +470,7 @@ impl Reader {
                     .entry(name.clone())
                     .or_insert_with(|| Arc::from(format!("{}/{name}", self.writer)))
                     .clone();
-                let message = Message::new(
+                let message = Message::shared(
                     message_id.clone(),
                     subject,
                     self.codec.clone(),

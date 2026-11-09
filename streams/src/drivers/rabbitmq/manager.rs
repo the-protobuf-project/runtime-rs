@@ -49,6 +49,7 @@ enum Attach<'a> {
 }
 
 impl RabbitManager {
+    /// Works out the stream's exchange name once, rather than on every publish.
     pub(crate) fn new(shared: Arc<Shared>, stream: Stream) -> Self {
         let exchange = shared.exchange(&stream.id);
         Self {
@@ -508,10 +509,14 @@ impl Batch for RabbitManager {
 }
 
 impl Manager for RabbitManager {
+    /// Some: a named consumer is a durable queue bound to the exchange, so it
+    /// outlives the process and redelivers what was not acknowledged.
     fn durable(&self) -> Option<&dyn Durable> {
         Some(self)
     }
 
+    /// Some: a batch is sent in order on one confirmed channel, then its
+    /// confirms are collected.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -557,6 +562,7 @@ fn delivery_count(value: &AMQPValue) -> Option<u64> {
 struct LastSubject(Option<Arc<str>>);
 
 impl LastSubject {
+    /// The shared copy of `subject`, replacing the held one when it differs.
     fn of(&mut self, subject: &str) -> &Arc<str> {
         if self.0.as_deref() != Some(subject) {
             self.0 = Some(Arc::from(subject));
@@ -595,11 +601,15 @@ impl AmqpAck {
 
 #[async_trait::async_trait]
 impl Acker for AmqpAck {
+    /// A `basic.ack`; fails if the channel closed, since the broker has then
+    /// already requeued the message.
     async fn ack(self: Box<Self>) -> Result<()> {
         let sent = self.acker.ack(BasicAckOptions::default()).await;
         self.settled(sent, "acknowledge", "ack")
     }
 
+    /// A `basic.nack` with requeue, so the message goes back for any consumer
+    /// at once rather than being discarded.
     async fn nak(self: Box<Self>) -> Result<()> {
         // Requeue, so it goes back for another consumer rather than being
         // discarded.
@@ -648,6 +658,8 @@ mod tests {
 
     use super::*;
 
+    /// A mock delivery with the given redelivered flag and, if any, an
+    /// `x-delivery-count` header.
     fn delivery(redelivered: bool, count: Option<AMQPValue>) -> AmqpDelivery {
         let mut d = AmqpDelivery::mock(1, "x".into(), "k".into(), redelivered, Vec::new());
         if let Some(count) = count {

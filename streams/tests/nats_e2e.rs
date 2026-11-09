@@ -60,6 +60,7 @@ struct Event {
     action: String,
 }
 
+/// A JSON `Event` payload for `user`.
 fn event(user: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -68,10 +69,13 @@ fn event(user: &str) -> Payload {
     .unwrap()
 }
 
+/// The secure server's client URL, `NATS_E2E_URL` or the compose default.
 fn url() -> String {
     std::env::var("NATS_E2E_URL").unwrap_or_else(|_| "tls://127.0.0.1:14223".into())
 }
 
+/// The listener that maps a client certificate to a user, `NATS_E2E_CERTMAP_URL`
+/// or the compose default.
 fn certmap_url() -> String {
     std::env::var("NATS_E2E_CERTMAP_URL").unwrap_or_else(|_| "tls://127.0.0.1:14224".into())
 }
@@ -84,6 +88,7 @@ fn host_port() -> String {
         .to_owned()
 }
 
+/// The test certificate directory, `NATS_E2E_CERTS` or docker/tls/out.
 fn certs() -> PathBuf {
     std::env::var("NATS_E2E_CERTS").map_or_else(
         |_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("docker/tls/out"),
@@ -106,6 +111,7 @@ fn mtls() -> ConnectOptions {
     trusting().add_client_certificate(dir.join("client.crt"), dir.join("client.key"))
 }
 
+/// Adds the test-only password user's credentials to `options`.
 fn with_password(options: ConnectOptions) -> ConnectOptions {
     options.user_and_password(PASSWORD_USER.into(), PASSWORD.into())
 }
@@ -123,6 +129,7 @@ fn seed() -> String {
         .to_owned()
 }
 
+/// Connects `options` to `url`, failing with how to start the server when it cannot.
 async fn connect(options: ConnectOptions, url: String) -> async_nats::Client {
     options.connect(&url).await.unwrap_or_else(|error| {
         panic!("no NATS over mTLS at {url} ({error}); see docker/compose.nats.secure.yaml")
@@ -158,10 +165,12 @@ async fn unauthorized(options: ConnectOptions) {
     }
 }
 
+/// A JetStream provider with the default config.
 async fn jetstream(nc: async_nats::Client) -> JetStreamProvider {
     jetstream_with(nc, NatsConfig::default()).await
 }
 
+/// A JetStream provider with `config`, failing if the server lacks JetStream.
 async fn jetstream_with(nc: async_nats::Client, config: NatsConfig) -> JetStreamProvider {
     JetStreamProvider::new(nc, config)
         .await
@@ -173,14 +182,17 @@ fn unique(prefix: &str) -> String {
     format!("e2e.{prefix}.{}", provider::new_id())
 }
 
+/// Owned subjects for a stream declaration.
 fn subjects(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
 }
 
+/// The next item within [`WITHIN`].
 async fn next<S: futures::Stream + Unpin>(stream: &mut S) -> S::Item {
     next_within(stream, WITHIN).await
 }
 
+/// The next item within `within`, panicking on a timeout or an ended stream.
 async fn next_within<S: futures::Stream + Unpin>(stream: &mut S, within: Duration) -> S::Item {
     tokio::time::timeout(within, stream.next())
         .await
@@ -188,12 +200,14 @@ async fn next_within<S: futures::Stream + Unpin>(stream: &mut S, within: Duratio
         .expect("the stream ended")
 }
 
+/// Asserts nothing arrives within `within`; an ended stream also passes.
 async fn nothing<S: futures::Stream + Unpin>(stream: &mut S, within: Duration) {
     if let Ok(Some(_)) = tokio::time::timeout(within, stream.next()).await {
         panic!("something arrived that should not have");
     }
 }
 
+/// Asserts `result` failed with an error `want` accepts.
 fn is<T: std::fmt::Debug>(result: &streams::Result<T>, want: fn(&StreamError) -> bool) {
     match result {
         Err(error) if want(error) => {}
@@ -201,14 +215,17 @@ fn is<T: std::fmt::Debug>(result: &streams::Result<T>, want: fn(&StreamError) ->
     }
 }
 
+/// Matches [`StreamError::NotFound`], for [`is`].
 fn not_found(e: &StreamError) -> bool {
     matches!(e, StreamError::NotFound(_))
 }
 
+/// Matches [`StreamError::Unsupported`], for [`is`].
 fn unsupported(e: &StreamError) -> bool {
     matches!(e, StreamError::Unsupported(_))
 }
 
+/// Matches [`StreamError::UnknownSubject`], for [`is`].
 fn unknown_subject(e: &StreamError) -> bool {
     matches!(e, StreamError::UnknownSubject { .. })
 }
@@ -637,6 +654,8 @@ async fn jetstream_full_lifecycle_as_a_certificate_mapped_user() {
     jetstream_lifecycle(certmap_client().await).await;
 }
 
+/// The full JetStream stream and consumer lifecycle, checked against the
+/// server's own view; run once per way of authenticating.
 async fn jetstream_lifecycle(nc: async_nats::Client) {
     let js = async_nats::jetstream::new(nc.clone());
     let p = jetstream(nc.clone()).await;
@@ -916,12 +935,14 @@ async fn default_settings_are_the_servers() {
     p.delete(&s.id).await.unwrap();
 }
 
+/// Every consumer the server holds on `raw`.
 async fn consumers(
     raw: &async_nats::jetstream::stream::Stream,
 ) -> Vec<async_nats::jetstream::consumer::Info> {
     raw.consumers().map(Result::unwrap).collect().await
 }
 
+/// The one consumer on `raw`, failing if there are none or several.
 async fn only_consumer(
     raw: &async_nats::jetstream::stream::Stream,
 ) -> async_nats::jetstream::consumer::Info {
@@ -1043,10 +1064,12 @@ async fn a_dropped_subscription_releases_its_ordered_consumer() {
 
 // ---------------------------------------------------------------- headers
 
+/// Matches [`StreamError::InvalidHeader`], for [`is`].
 fn invalid_header(e: &StreamError) -> bool {
     matches!(e, StreamError::InvalidHeader(_))
 }
 
+/// A stream over `subject` declaring default headers `lang` and `site`.
 fn headed(subject: &str) -> Stream {
     Stream::named("headed")
         .subjects([subject])
@@ -1192,6 +1215,7 @@ async fn jetstream_headers_expiry_and_delayed_nak_over_tls() {
 
 // ---------------------------------------------------------------- restart
 
+/// Runs `docker` with `args`, failing on a non-zero exit, and returns its trimmed stdout.
 fn docker(args: &[&str]) -> String {
     let out = Command::new("docker")
         .args(args)
@@ -1205,6 +1229,7 @@ fn docker(args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+/// Waits up to 60s for the server container to report healthy.
 async fn wait_healthy() {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {

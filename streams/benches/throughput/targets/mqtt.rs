@@ -31,6 +31,8 @@ use super::{Conn, Error, env, unknown_profile};
 /// The e2e suite's password-listener user, from docker/compose.mqtt.secure.yaml.
 const USER: (&str, &str) = ("e2e-app", "e2e-app-secret");
 
+/// Connects at QoS 1. `tls` publishes under `e2e-app/bench`, the only tree the
+/// broker's ACLs give that user.
 pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     let (options, prefix) = match profile {
         "plain" => {

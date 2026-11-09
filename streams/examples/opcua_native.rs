@@ -25,7 +25,7 @@ use std::{
     str::FromStr,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicI64, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
@@ -41,6 +41,8 @@ use opcua::{
     },
 };
 
+/// The number after `name` on the command line, or `default` when it is
+/// missing or unparsable.
 fn arg(name: &str, default: u64) -> u64 {
     let mut args = std::env::args().skip(1);
     while let Some(key) = args.next() {
@@ -51,6 +53,8 @@ fn arg(name: &str, default: u64) -> u64 {
     default
 }
 
+/// Runs the fanout bench with the raw async-opcua client and prints a report
+/// shaped like the bench's, for side-by-side comparison.
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("OPCUA_URL").unwrap_or_else(|_| "opc.tcp://127.0.0.1:14840".into());
@@ -60,6 +64,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(20);
     let messages = arg("--messages", 20_000);
     let publishers = arg("--publishers", 32);
+    if publishers == 0 {
+        return Err("--publishers must be at least 1: nothing would write".into());
+    }
     let subjects = arg("--subjects", 10) as usize;
     let batch = arg("--batch", 1).max(1);
     let verbose = std::env::args().any(|a| a == "--verbose");
@@ -104,10 +111,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|i| NodeId::from_str(&format!("ns={ns};s=bench.s{i:02}")).unwrap())
         .collect();
 
-    // What arrives: sequence numbers and their latencies.
+    // What arrives: sequence numbers and their latencies. Only values this
+    // run wrote count: each carries its send time as source timestamp, and
+    // an initial value, which the server reports whenever it gets to it,
+    // carries an older one.
     let seen = Arc::new(Mutex::new((Vec::<u64>::new(), Vec::<u32>::new())));
     let received = Arc::new(AtomicU64::new(0));
-    let (seen_cb, received_cb) = (seen.clone(), received.clone());
+    let since = Arc::new(AtomicI64::new(i64::MAX));
+    let (seen_cb, received_cb, since_cb) = (seen.clone(), received.clone(), since.clone());
     let subscription = session
         .create_subscription(
             Duration::from_millis(publishing),
@@ -122,6 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(Variant::Int64(seq)) = value.value else {
                     return;
                 };
+                if value
+                    .source_timestamp
+                    .is_none_or(|t| t.ticks() < since_cb.load(Ordering::Relaxed))
+                {
+                    return;
+                }
                 let latency = value
                     .source_timestamp
                     .and_then(|t| (DateTime::now().as_chrono() - t.as_chrono()).to_std().ok())
@@ -155,18 +172,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         })
         .collect();
-    session
+    let created = session
         .create_monitored_items(subscription, TimestampsToReturn::Both, items)
         .await?;
-    // The initial values, then quiet.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    seen.lock().unwrap().0.clear();
-    seen.lock().unwrap().1.clear();
-    received.store(0, Ordering::Relaxed);
+    if created.len() != nodes.len() {
+        return Err(format!("monitored {} of {} nodes", created.len(), nodes.len()).into());
+    }
+    for (node, item) in nodes.iter().zip(&created) {
+        if item.result.status_code.is_bad() {
+            return Err(format!("cannot monitor {node}: {}", item.result.status_code).into());
+        }
+    }
 
     let next = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
     let first_error = Arc::new(Mutex::new(None::<String>));
+    since.store(DateTime::now().ticks(), Ordering::Relaxed);
     let start = Instant::now();
     let mut tasks = Vec::new();
     for _ in 0..publishers {

@@ -66,6 +66,7 @@ impl NatsProvider {
         }
     }
 
+    /// Reads the declarations, carrying on past a poisoned lock.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, HashMap<String, Stream>> {
         // A poisoned lock means a panic mid-insert of a plain map value, which
         // cannot leave it half-written; carrying on is safe.
@@ -75,6 +76,8 @@ impl NatsProvider {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Writes the declarations, carrying on past a poisoned lock for the same
+    /// reason as [`read`](Self::read).
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, HashMap<String, Stream>> {
         self.shared
             .declared
@@ -93,12 +96,15 @@ fn declared(id: String, stream: Stream) -> Stream {
     }
 }
 
+/// The error for an id this provider never declared.
 fn not_found(id: &str) -> StreamError {
     StreamError::NotFound(format!("stream {id}"))
 }
 
 #[async_trait::async_trait]
 impl Streams for NatsProvider {
+    /// Records the declaration in this process only: core NATS keeps nothing,
+    /// so another provider, or a restarted one, will not see it.
     async fn create(&self, stream: Stream) -> Result<Stream> {
         check_stream_headers(&stream)?;
         let id = if stream.id.is_empty() {
@@ -112,10 +118,12 @@ impl Streams for NatsProvider {
         Ok(out)
     }
 
+    /// Answers from this process's declarations; the server is not asked.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.read().get(id).cloned().ok_or_else(|| not_found(id))
     }
 
+    /// Binds a stream declared on this provider; no server round trip.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.get(id).await?;
         Ok(Arc::new(NatsManager {
@@ -124,6 +132,8 @@ impl Streams for NatsProvider {
         }))
     }
 
+    /// Replaces the declaration in place. Managers already bound keep the
+    /// subjects and default headers they were bound with.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
         check_stream_headers(&stream)?;
         let mut declared_streams = self.write();
@@ -132,6 +142,8 @@ impl Streams for NatsProvider {
         Ok(slot.clone())
     }
 
+    /// Forgets the declaration. Nothing on the server changes, and managers
+    /// already bound keep publishing.
     async fn delete(&self, id: &str) -> Result<()> {
         self.write()
             .remove(id)
@@ -139,6 +151,7 @@ impl Streams for NatsProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// This process's declarations, sorted by id.
     async fn list(&self) -> Result<Vec<Stream>> {
         let mut out: Vec<Stream> = self.read().values().cloned().collect();
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -324,6 +337,8 @@ impl Batch for NatsManager {
 }
 
 impl Manager for NatsManager {
+    /// Only [`Batch`]: core NATS keeps no messages, so there is nothing to make
+    /// durable or to position.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -348,10 +363,12 @@ mod tests {
             .expect("a retrying connect returns at once")
     }
 
+    /// A provider over [`offline`], with the default config.
     async fn provider() -> NatsProvider {
         NatsProvider::new(offline().await, NatsConfig::default())
     }
 
+    /// A JSON payload whose contents no test cares about.
     fn json() -> Payload {
         Payload::json(&"x".to_owned()).unwrap()
     }

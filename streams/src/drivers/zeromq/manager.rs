@@ -21,6 +21,7 @@ pub(crate) struct ZmqManager {
 }
 
 impl ZmqManager {
+    /// Binds `stream` as it was declared; later updates to it are not seen here.
     pub(crate) fn new(shared: Arc<Shared>, stream: Stream) -> Self {
         Self { shared, stream }
     }
@@ -54,6 +55,7 @@ impl ZmqManager {
         format!("{}|{subject}", self.stream.id)
     }
 
+    /// The error every call after [`Streams::close`](crate::Streams::close) reports.
     fn closed() -> StreamError {
         StreamError::Internal("zeromq: the provider is closed".into())
     }
@@ -228,6 +230,7 @@ impl Batch for ZmqManager {
 }
 
 impl Manager for ZmqManager {
+    /// Batches are sent frame by frame on the one socket; there is no durable side.
     fn batch(&self) -> Option<&dyn Batch> {
         Some(self)
     }
@@ -248,6 +251,7 @@ struct Receive {
 }
 
 impl Receive {
+    /// Forwards messages until the subscriber goes away or the provider closes.
     async fn run(mut self) {
         let subject = self.subject.clone();
         let mut delivered = 0usize;

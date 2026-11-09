@@ -52,7 +52,9 @@ frame. It is client/server: a stream's subjects are node ids
 (`ns=3;s=Temperature`, or the stable `nsu=<uri>;s=Temperature`), `publish` is
 a Write to the node's Value that returns after the server's Write response,
 `subscribe` is a data-change monitored item in one client subscription per
-provider, and `Batch` is one Write request. The payload is
+provider, and `Batch` is one awaited Write per value, in order (OPC UA
+Part 4 leaves the order of repeated writes to one node within a single Write
+undefined). The payload is
 `OpcUaValue` (`"opcua.datavalue"`): a `DataValue` in OPC UA binary encoding,
 so the value stays typed and its status code and source and server
 timestamps reach the subscriber. Groups, TTL, `Durable`, and `Positioned`

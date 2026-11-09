@@ -31,6 +31,7 @@ const SETTLE: Duration = Duration::from_millis(150);
 /// How long a test waits for a delivery before calling it lost.
 const WAIT: Duration = Duration::from_secs(10);
 
+/// A JSON `Event` payload for `user`.
 fn event(user: &str) -> Payload {
     Payload::json(&Event {
         user: user.into(),
@@ -48,6 +49,8 @@ struct Pair {
     sm: Arc<dyn Manager>,
 }
 
+/// A connected pair on an ephemeral loopback port, both sides declaring
+/// stream [`STREAM`] over `subjects` and bound to it.
 async fn pair(subjects: &[&str]) -> Pair {
     pair_on("tcp://127.0.0.1:0").await.declare(subjects).await
 }
@@ -57,6 +60,8 @@ struct Unbound {
     subscriber: ZmqProvider,
 }
 
+/// A publisher bound at `endpoint` and a subscriber connected to wherever it
+/// actually bound, before either declares a stream.
 async fn pair_on(endpoint: &str) -> Unbound {
     let publisher = ZmqProvider::publisher(ZmqConfig::new(endpoint).with_settle(SETTLE))
         .await
@@ -70,6 +75,7 @@ async fn pair_on(endpoint: &str) -> Unbound {
 }
 
 impl Unbound {
+    /// Declares the same stream, with the same id, on both sides and binds each.
     async fn declare(self, subjects: &[&str]) -> Pair {
         // The same id on both sides, because the id is part of the wire topic
         // and two processes would have agreed on it.
@@ -90,6 +96,7 @@ impl Unbound {
     }
 }
 
+/// The next message within [`WAIT`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> streams::Message {
     tokio::time::timeout(WAIT, subscription.next())
         .await
@@ -440,6 +447,7 @@ async fn reads_the_go_wire_layout() {
 
 // --- headers, expiry, retain ---------------------------------------------------
 
+/// Headers from literal pairs, for comparing with what arrives.
 fn headers<const N: usize>(pairs: [(&str, &str); N]) -> Headers {
     pairs.into_iter().collect()
 }

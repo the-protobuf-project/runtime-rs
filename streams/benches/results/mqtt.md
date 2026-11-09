@@ -173,8 +173,11 @@ another at 82k/s minutes later). Only the same-minute comparisons count.
    `DEFAULT_PUBLISH_CONNECTIONS`). This round measured it at 4; the default was
    then set to 1, because with more than one connection publishes sent
    concurrently without awaiting can reach the broker out of order, and
-   Mosquitto's single thread is the limit anyway. Raise it for batch speed. Publishes take the connections
-   in turn. Each connection keeps its own waiter table, event-loop task, and
+   Mosquitto's single thread is the limit anyway. Raise it for batch speed. After this round a review
+   changed the choice from taking the connections in turn to hashing the topic,
+   so each topic stays on one connection and keeps its order at any count;
+   concurrent publishes to a single subject therefore no longer spread over the
+   connections, and the batch gain measured here applies across subjects. Each connection keeps its own waiter table, event-loop task, and
    the broker's Receive Maximum (1000), so a batch can have 4000 in flight
    instead of 1000. A batch stays on one connection, in order. A publish still
    returns only after its PUBACK, and nothing on the wire changed. With

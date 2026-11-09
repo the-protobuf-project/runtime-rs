@@ -33,6 +33,7 @@ const WITHIN: Duration = Duration::from_secs(10);
 const APP: (&str, &str) = ("e2e-app", "e2e-app-secret");
 const OTHER: (&str, &str) = ("e2e-other", "e2e-other-secret");
 
+/// The test certificate directory, `STREAMS_E2E_TLS_DIR` or docker/tls/out.
 fn tls_dir() -> PathBuf {
     std::env::var("STREAMS_E2E_TLS_DIR")
         .map(PathBuf::from)
@@ -63,6 +64,8 @@ fn tls() -> Arc<ClientConfig> {
     )
 }
 
+/// A template for the broker's password listener as `user`, over mutual TLS,
+/// with a 1 MiB packet limit for NetworkMessages larger than rumqttc's default.
 fn options((user, password): (&str, &str)) -> MqttOptions {
     let addr = std::env::var("MQTT_E2E_PASSWORD_ADDR").unwrap_or_else(|_| "127.0.0.1:18884".into());
     let (host, port) = addr.rsplit_once(':').expect("host:port");
@@ -83,6 +86,7 @@ fn prefix(user: &str) -> String {
     )
 }
 
+/// A PubSub provider as `user` publishing under `prefix`.
 async fn connect(user: (&str, &str), prefix: &str) -> PubSubProvider {
     PubSubProvider::connect(
         options(user),
@@ -96,6 +100,7 @@ async fn connect(user: (&str, &str), prefix: &str) -> PubSubProvider {
     .unwrap_or_else(|e| panic!("connect as {} over mutual TLS: {e}", user.0))
 }
 
+/// Declares stream `line-a` over `subjects` and binds a manager to it.
 async fn declare(streams: &PubSubProvider, subjects: &[&str]) -> Arc<dyn Manager> {
     let stream = streams
         .create(Stream {
@@ -108,6 +113,7 @@ async fn declare(streams: &PubSubProvider, subjects: &[&str]) -> Arc<dyn Manager
     streams.bind(&stream.id).await.unwrap()
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -115,6 +121,7 @@ async fn next(subscription: &mut Subscription) -> Message {
         .expect("the subscription ended")
 }
 
+/// The OPC UA value a message carries, panicking if it has none.
 fn value(message: &Message) -> Variant {
     OpcUaValue::data_value(message).unwrap().value.unwrap()
 }

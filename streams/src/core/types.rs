@@ -136,14 +136,26 @@ impl Message {
     /// directly.
     pub fn new(
         id: impl Into<String>,
-        subject: impl Into<Arc<str>>,
-        codec: impl Into<Arc<str>>,
+        subject: impl Into<String>,
+        codec: impl Into<String>,
+        data: impl Into<Bytes>,
+    ) -> Self {
+        Self::shared(id, Arc::from(subject.into()), Arc::from(codec.into()), data)
+    }
+
+    /// [`Message::new`] for a subject and codec name the caller already holds
+    /// shared, as a subscription does for every message it receives: the
+    /// message points at those copies instead of allocating its own.
+    pub fn shared(
+        id: impl Into<String>,
+        subject: Arc<str>,
+        codec: Arc<str>,
         data: impl Into<Bytes>,
     ) -> Self {
         Self {
             id: id.into(),
-            subject: subject.into(),
-            codec: codec.into(),
+            subject,
+            codec,
             data: data.into(),
             headers: Headers::new(),
         }
@@ -208,6 +220,7 @@ impl Message {
 impl fmt::Debug for Message {
     // Payload bytes stay out of debug output, the same rule the logging
     // wrappers follow.
+    /// Shows the payload's length rather than its bytes.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Message")
             .field("id", &self.id)
@@ -350,12 +363,14 @@ impl Delivery {
 impl Deref for Delivery {
     type Target = Message;
 
+    /// Lets a delivery be read as the message it carries.
     fn deref(&self) -> &Message {
         &self.message
     }
 }
 
 impl fmt::Debug for Delivery {
+    /// Leaves out the acker, which has nothing useful to print.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Delivery")
             .field("message", &self.message)

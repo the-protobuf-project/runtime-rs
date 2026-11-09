@@ -78,6 +78,8 @@ fn normalized(id: &str, stream: Stream) -> Result<(Stream, Vec<u8>)> {
 
 #[async_trait::async_trait]
 impl Streams for RedisProvider {
+    /// Appends the declaration to the stream's metadata key on the server, so
+    /// any process reading that key finds it.
     async fn create(&self, stream: Stream) -> Result<Stream> {
         stream.headers.validate()?;
         let id = if stream.id.is_empty() {
@@ -103,6 +105,7 @@ impl Streams for RedisProvider {
         Ok(out)
     }
 
+    /// Reads the declaration from the server, so one made by another process is found.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.inner.read(&self.inner.keys.stream(id), id).await
     }

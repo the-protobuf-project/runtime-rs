@@ -89,28 +89,34 @@ pub(crate) fn decode(data: &[u8]) -> Result<DataValue> {
 }
 
 impl Codec<DataValue> for OpcUaValue {
+    /// The same name for both value types: a frame does not say which one it holds.
     fn name(&self) -> &'static str {
         CODEC_NAME
     }
 
+    /// The whole DataValue in OPC UA binary, timestamps and status included.
     fn encode(&self, value: &DataValue) -> Result<Vec<u8>> {
         Ok(encode(value))
     }
 
+    /// Refuses trailing bytes as well as a malformed DataValue.
     fn decode(&self, data: &[u8]) -> Result<DataValue> {
         decode(data)
     }
 }
 
 impl Codec<Variant> for OpcUaValue {
+    /// Shares the DataValue codec's name; a Variant travels as a value-only DataValue.
     fn name(&self) -> &'static str {
         CODEC_NAME
     }
 
+    /// Wraps the Variant in a DataValue with no status or timestamps.
     fn encode(&self, value: &Variant) -> Result<Vec<u8>> {
         Ok(encode(&DataValue::value_only(value.clone())))
     }
 
+    /// Keeps only the value; a DataValue without one reads as [`Variant::Empty`].
     fn decode(&self, data: &[u8]) -> Result<Variant> {
         Ok(decode(data)?.value.unwrap_or(Variant::Empty))
     }
@@ -122,6 +128,7 @@ mod tests {
 
     use super::*;
 
+    /// Asserts `value` survives an encode and decode unchanged.
     fn round_trip(value: DataValue) {
         let bytes = Codec::<DataValue>::encode(&OpcUaValue, &value).unwrap();
         let back: DataValue = OpcUaValue.decode(&bytes).unwrap();

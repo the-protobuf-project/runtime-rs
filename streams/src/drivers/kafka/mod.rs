@@ -159,6 +159,8 @@ pub struct KafkaConfig {
 }
 
 impl Default for KafkaConfig {
+    /// One partition, replication factor one, and eight producers: enough for a
+    /// single-broker development cluster; production wants more replicas.
     fn default() -> Self {
         Self {
             prefix: String::new(),

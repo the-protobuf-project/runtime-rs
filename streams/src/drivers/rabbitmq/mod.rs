@@ -192,6 +192,7 @@ pub struct RabbitConfig {
 }
 
 impl Default for RabbitConfig {
+    /// No prefix, the default prefetch and publishing channels, and no metrics.
     fn default() -> Self {
         Self {
             prefix: String::new(),
@@ -321,6 +322,8 @@ impl Shared {
             .await
     }
 
+    /// Publishing channel `index`, reopened if the broker closed it; when two
+    /// callers race to reopen, the first one stored wins and the other's is dropped.
     async fn channel_at(&self, index: usize) -> Result<Channel> {
         let current = self.current_channel(index);
         if current.status().connected()
@@ -340,6 +343,7 @@ impl Shared {
         Ok(fresh)
     }
 
+    /// Publishing channel `index` as it stands, open or not.
     fn current_channel(&self, index: usize) -> Channel {
         self.channels[index]
             .lock()
@@ -352,6 +356,8 @@ impl Shared {
         exchange_name(&self.config.prefix, stream_id)
     }
 
+    /// A declaration recorded by this provider; one made by another process
+    /// is not visible here.
     fn get(&self, id: &str) -> Result<Stream> {
         self.declared
             .read()
@@ -452,10 +458,13 @@ impl Streams for RabbitProvider {
         Ok(out)
     }
 
+    /// Answers from this provider's declarations; the broker is not asked.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.shared.get(id)
     }
 
+    /// Binds a stream declared on this provider, so an unknown id fails here
+    /// rather than at the first publish.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.shared.get(id)?;
         Ok(Arc::new(RabbitManager::new(self.shared.clone(), stream)))

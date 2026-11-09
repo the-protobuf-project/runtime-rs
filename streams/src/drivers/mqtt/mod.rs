@@ -87,9 +87,10 @@ mod topic;
 
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    hash::{BuildHasher, BuildHasherDefault, DefaultHasher},
     sync::{
         Arc, Mutex, MutexGuard, RwLock,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
@@ -133,9 +134,11 @@ const REQUEST_CAPACITY: usize = 8192;
 /// Publishing connections a provider opens when
 /// [`MqttConfig::publish_connections`] is not changed.
 ///
-/// One, because MQTT orders messages per connection: with one, every publish
-/// on a topic reaches the broker in the order it was sent, concurrent ones
-/// included. Raising it speeds up batches when the broker is not the limit.
+/// One, because one connection is all most brokers need: Mosquitto's single
+/// thread is the limit well before the connection is. Raising it speeds up
+/// publishing across many topics when the broker is not the limit; order on
+/// a topic is kept either way, since a topic always takes the same
+/// connection.
 pub const DEFAULT_PUBLISH_CONNECTIONS: usize = 1;
 
 /// How long the publishing connection waits before redialing a lost broker,
@@ -187,7 +190,8 @@ pub struct MqttConfig {
     /// bounds only the hand-off to the connection.
     pub publish_timeout: Duration,
 
-    /// How many connections publishes are spread over. At least one.
+    /// How many connections publishes are spread over, by topic. At least
+    /// one.
     ///
     /// Every QoS 1 publish waits for its PUBACK, and one connection carries
     /// every request through one event loop and one socket in turn, so with
@@ -197,11 +201,12 @@ pub struct MqttConfig {
     /// returns only once the broker has it, and a batch stays on one
     /// connection, in order.
     ///
-    /// The cost of more than one is ordering. MQTT orders messages per
-    /// connection, so two publishes sent concurrently without awaiting the
-    /// first can reach the broker in either order once they may take
-    /// different connections. Publishes awaited one after another keep their
-    /// order whatever this is. The default, one, keeps every publish in order.
+    /// Each topic always takes the same connection, chosen by a hash of the
+    /// topic. MQTT orders messages per connection, so this is what keeps
+    /// publishes on a topic in the order they were sent, concurrent ones
+    /// included, whatever this is. The cost is that the spread is across
+    /// topics: publishers all on one topic share one connection, and only
+    /// publishing to several topics gains from more than one.
     ///
     /// With [`client_id`](Self::client_id) set, the first connection uses it
     /// and the others append `-1`, `-2`, and so on, since a broker gives a
@@ -210,6 +215,7 @@ pub struct MqttConfig {
 }
 
 impl Default for MqttConfig {
+    /// At-least-once QoS, no topic prefix, and a generated client id.
     fn default() -> Self {
         Self {
             prefix: String::new(),
@@ -296,7 +302,7 @@ impl MqttProvider {
         let topic = manager.publish_topic(subject, &crate::Options::default())?;
         self.inner
             .publisher
-            .link()
+            .link(&topic)
             .send(&topic, self.inner.config.qos, true, None, Bytes::new())
             .await
             .map_err(|error| {
@@ -318,10 +324,12 @@ impl Inner {
         }
     }
 
+    /// Reads the declared streams, recovering from a poisoned lock.
     fn read(&self) -> std::sync::RwLockReadGuard<'_, BTreeMap<String, Stream>> {
         self.declared.read().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Writes the declared streams, recovering from a poisoned lock.
     fn write(&self) -> std::sync::RwLockWriteGuard<'_, BTreeMap<String, Stream>> {
         self.declared.write().unwrap_or_else(|e| e.into_inner())
     }
@@ -360,6 +368,7 @@ impl Streams for MqttProvider {
         Ok(out)
     }
 
+    /// Reads the in-process declaration; MQTT brokers keep no stream catalogue.
     async fn get(&self, id: &str) -> Result<Stream> {
         self.inner
             .read()
@@ -368,11 +377,13 @@ impl Streams for MqttProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// The manager keeps a copy of the declaration taken now.
     async fn bind(&self, id: &str) -> Result<Arc<dyn Manager>> {
         let stream = self.get(id).await?;
         Ok(Arc::new(MqttManager::new(self.inner.clone(), stream)))
     }
 
+    /// Replaces the whole declaration; managers already bound keep the old one.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
         stream.headers.validate()?;
         let mut declared = self.inner.write();
@@ -381,6 +392,7 @@ impl Streams for MqttProvider {
         Ok(slot.clone())
     }
 
+    /// Forgets the declaration; managers already bound and their sessions are untouched.
     async fn delete(&self, id: &str) -> Result<()> {
         self.inner
             .write()
@@ -389,6 +401,7 @@ impl Streams for MqttProvider {
             .ok_or_else(|| not_found(id))
     }
 
+    /// Lists only the streams this process declared, in id order.
     async fn list(&self) -> Result<Vec<Stream>> {
         // A BTreeMap lists in id order, the order runtime-go sorts into.
         Ok(self.inner.read().values().cloned().collect())
@@ -518,6 +531,7 @@ struct Waiters {
 }
 
 impl Waiters {
+    /// Fails every queued and in-flight publish, used when the connection drops.
     fn fail_all(&mut self, error: &StreamError) {
         for waiter in self
             .queued
@@ -528,6 +542,7 @@ impl Waiters {
         }
     }
 
+    /// Hands `outcome` to the publish that went out as `pkid`; an unknown id is ignored.
     fn settle(&mut self, pkid: u16, outcome: Result<()>) {
         if let Some(waiter) = self.inflight.remove(&pkid) {
             let _ = waiter.send(outcome);
@@ -643,10 +658,9 @@ pub(crate) async fn subscribe(
     })
 }
 
-/// The publishing connections, taken in turn.
+/// The publishing connections, one per topic.
 pub(crate) struct PublishPool {
     links: Vec<PublishLink>,
-    next: AtomicUsize,
 }
 
 impl PublishPool {
@@ -678,22 +692,31 @@ impl PublishPool {
                 }
             }
         }
-        Ok(Self {
-            links,
-            next: AtomicUsize::new(0),
-        })
+        Ok(Self { links })
     }
 
-    /// The connection the next publish goes out on.
-    pub(crate) fn link(&self) -> &PublishLink {
-        let n = self.next.fetch_add(1, Ordering::Relaxed);
-        &self.links[n % self.links.len()]
+    /// The connection publishes on `topic` go out on: always the same one,
+    /// because MQTT orders messages per connection and two publishes on a
+    /// topic sent concurrently over different connections could reach the
+    /// broker in either order. Different topics spread by hash.
+    pub(crate) fn link(&self, topic: &str) -> &PublishLink {
+        &self.links[slot(topic, self.links.len())]
     }
 
     /// Disconnects every connection.
     pub(crate) async fn close(&self) {
         futures::future::join_all(self.links.iter().map(PublishLink::close)).await;
     }
+}
+
+/// Which of `count` connections `topic` takes. The hasher is unseeded, so
+/// the choice is the same for every publish and every clone of a provider.
+fn slot(topic: &str, count: usize) -> usize {
+    if count <= 1 {
+        return 0;
+    }
+    let hash = BuildHasherDefault::<DefaultHasher>::default().hash_one(topic);
+    (hash % count as u64) as usize
 }
 
 /// One publish as it goes on the wire: the body is sent as given, unframed,
@@ -717,6 +740,7 @@ pub(crate) struct PublishLink {
 }
 
 impl PublishLink {
+    /// Starts the task that drives `events` and settles waiters as the broker answers.
     fn spawn(client: AsyncClient, events: EventLoop, timeout: Duration) -> Self {
         let waiters = Arc::new(Mutex::new(Waiters::default()));
         let closed = Arc::new(AtomicBool::new(false));
@@ -827,6 +851,7 @@ impl PublishLink {
         }
     }
 
+    /// The error a publish gets when no acknowledgement arrives within the timeout.
     fn timed_out(&self) -> StreamError {
         StreamError::Internal(format!(
             "mqtt: the broker did not acknowledge within {:?}",
@@ -834,6 +859,7 @@ impl PublishLink {
         ))
     }
 
+    /// Disconnects once, then gives the driver task [`LINGER`] to finish before aborting it.
     async fn close(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
@@ -922,6 +948,7 @@ async fn drive_publisher(
     }
 }
 
+/// The error for a publish the broker answered with a failure reason code.
 fn refused(reason: String) -> StreamError {
     StreamError::Internal(format!("mqtt: the broker refused the publish: {reason}"))
 }
@@ -981,6 +1008,19 @@ mod tests {
         };
         let publish = Publish::new("t", QoS::AtLeastOnce, "x", Some(properties));
         assert_eq!(headers_of(&publish).get("k"), Some("2"));
+    }
+
+    #[test]
+    fn a_topic_always_takes_the_same_connection() {
+        assert_eq!(slot("any", 1), 0);
+        assert_eq!(slot("any", 0), 0);
+        let topics: Vec<String> = (0..64).map(|n| format!("plant/{n}/temp")).collect();
+        for topic in &topics {
+            assert_eq!(slot(topic, 4), slot(topic, 4), "{topic}");
+            assert!(slot(topic, 4) < 4);
+        }
+        let used: std::collections::BTreeSet<usize> = topics.iter().map(|t| slot(t, 4)).collect();
+        assert_eq!(used.len(), 4, "topics spread over every connection");
     }
 
     #[test]

@@ -143,7 +143,7 @@ pub fn unpack_shared(
         }
     }
     let codec = registry.resolve(name)?;
-    Ok(Message::new(id, subject.clone(), codec, frame.slice(at..)).with_headers(headers))
+    Ok(Message::shared(id, subject.clone(), codec, frame.slice(at..)).with_headers(headers))
 }
 
 /// Reads one length-prefixed field at `*at`, advancing past it.
@@ -199,6 +199,7 @@ mod tests {
         total: u32,
     }
 
+    /// A fixed order the round-trip tests encode and compare against.
     fn order() -> Order {
         Order {
             user: "ada".into(),

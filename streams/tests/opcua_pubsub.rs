@@ -71,6 +71,8 @@ fn broker() -> u16 {
     port
 }
 
+/// A template for the in-process broker on `port`, with a 1 MiB packet limit
+/// because a batch's NetworkMessage outgrows rumqttc's 10 KiB default.
 fn options(port: u16) -> MqttOptions {
     let mut options = MqttOptions::new("template", "127.0.0.1", port);
     // NetworkMessages of a batch are larger than rumqttc's 10 KiB default.
@@ -78,6 +80,8 @@ fn options(port: u16) -> MqttOptions {
     options
 }
 
+/// A provider publishing as `publisher`, retrying for about 2.5s while the
+/// broker thread starts listening.
 async fn provider_on(port: u16, publisher: &str) -> PubSubProvider {
     let config = PubSubConfig {
         publisher_id: publisher.into(),
@@ -94,11 +98,13 @@ async fn provider_on(port: u16, publisher: &str) -> PubSubProvider {
     panic!("broker never came up: {last:?}");
 }
 
+/// A provider publishing as [`PUBLISHER`] on a broker of its own, and that broker's port.
 async fn provider() -> (PubSubProvider, u16) {
     let port = broker();
     (provider_on(port, PUBLISHER).await, port)
 }
 
+/// Declares a stream (a WriterGroup) with a fixed `id` over `subjects` and binds a manager to it.
 async fn declare(streams: &PubSubProvider, id: &str, subjects: &[&str]) -> Arc<dyn Manager> {
     let stream = streams
         .create(Stream {
@@ -111,6 +117,7 @@ async fn declare(streams: &PubSubProvider, id: &str, subjects: &[&str]) -> Arc<d
     streams.bind(&stream.id).await.expect("bind")
 }
 
+/// The next message within [`WITHIN`], panicking on a timeout or an ended subscription.
 async fn next(subscription: &mut Subscription) -> Message {
     timeout(WITHIN, subscription.next())
         .await
@@ -118,12 +125,14 @@ async fn next(subscription: &mut Subscription) -> Message {
         .expect("subscription ended before a message arrived")
 }
 
+/// Asserts nothing arrives within 300ms.
 async fn quiet(subscription: &mut Subscription) {
     if let Ok(Some(message)) = timeout(Duration::from_millis(300), subscription.next()).await {
         panic!("expected nothing, got {message:?}");
     }
 }
 
+/// The OPC UA value a message carries, or `Empty` when the DataValue has none.
 fn value(message: &Message) -> Variant {
     OpcUaValue::data_value(message)
         .expect("an OPC UA DataValue")
@@ -153,6 +162,8 @@ async fn raw(port: u16, filter: Option<&str>) -> (AsyncClient, EventLoop) {
     (client, events)
 }
 
+/// The next PUBLISH the raw client receives, skipping other events; each
+/// poll must arrive within [`WITHIN`].
 async fn raw_next(events: &mut EventLoop) -> Publish {
     loop {
         match timeout(WITHIN, events.poll()).await.expect("a publish") {
@@ -168,6 +179,8 @@ async fn inject(client: &AsyncClient, events: &mut EventLoop, topic: &str, body:
     inject_raw(client, events, topic, &body.to_string()).await;
 }
 
+/// Publishes `body` verbatim at QoS 1 and drives the raw client until the
+/// broker acks it, so malformed JSON can be sent too.
 async fn inject_raw(client: &AsyncClient, events: &mut EventLoop, topic: &str, body: &str) {
     client
         .publish(topic, QoS::AtLeastOnce, false, Bytes::from(body.to_owned()))
@@ -182,6 +195,7 @@ async fn inject_raw(client: &AsyncClient, events: &mut EventLoop, topic: &str, b
     }
 }
 
+/// A JSON DataSetMessage from `writer` carrying `field` as an Int32 (type 6) `body`.
 fn data_set_message(writer: &str, sequence: u32, field: &str, body: i32) -> Value {
     json!({
         "DataSetWriterName": writer,

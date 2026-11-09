@@ -20,6 +20,7 @@ struct Event {
     action: String,
 }
 
+/// Runs the same contract over core NATS and JetStream on one client.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let url = std::env::var("NATS_URL").unwrap_or_else(|_| "nats://127.0.0.1:14222".into());

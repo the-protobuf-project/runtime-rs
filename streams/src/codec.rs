@@ -33,15 +33,18 @@ pub trait Codec<T>: Send + Sync {
 pub struct Json;
 
 impl<T: Serialize + DeserializeOwned> Codec<T> for Json {
+    /// Always `"json"`, the name a Go peer writes for the same encoding.
     fn name(&self) -> &'static str {
         "json"
     }
 
+    /// Serialises with `serde_json`; a failure is a [`StreamError::Codec`].
     fn encode(&self, value: &T) -> Result<Vec<u8>> {
         serde_json::to_vec(value)
             .map_err(|error| StreamError::Codec(format!("cannot encode value as JSON: {error}")))
     }
 
+    /// Bytes that are not valid JSON for `T` are a [`StreamError::Codec`].
     fn decode(&self, data: &[u8]) -> Result<T> {
         serde_json::from_slice(data)
             .map_err(|error| StreamError::Codec(format!("cannot decode message as JSON: {error}")))
@@ -55,14 +58,17 @@ pub struct Protobuf;
 
 #[cfg(feature = "protobuf")]
 impl<T: prost::Message + Default> Codec<T> for Protobuf {
+    /// Always `"protobuf"`, matching Go's `codec/protobuf` name.
     fn name(&self) -> &'static str {
         "protobuf"
     }
 
+    /// Infallible: prost encodes any message into a fresh buffer.
     fn encode(&self, value: &T) -> Result<Vec<u8>> {
         Ok(value.encode_to_vec())
     }
 
+    /// Bytes that do not parse as `T` are a [`StreamError::Codec`].
     fn decode(&self, data: &[u8]) -> Result<T> {
         T::decode(data).map_err(|error| {
             StreamError::Codec(format!("cannot decode message as protobuf: {error}"))
@@ -127,6 +133,7 @@ pub struct Registry {
 }
 
 impl Default for Registry {
+    /// The same as [`Registry::new`]: JSON is always accepted.
     fn default() -> Self {
         Self::new()
     }

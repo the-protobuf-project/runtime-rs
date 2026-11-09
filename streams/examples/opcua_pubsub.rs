@@ -19,6 +19,8 @@ use streams::{
     },
 };
 
+/// Reads OPC Publisher's read-only `plc` WriterGroup and publishes a DataSet
+/// from a WriterGroup of our own, with retained metadata.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let addr = std::env::var("OPCUA_PUBSUB_MQTT_ADDR").unwrap_or_else(|_| "127.0.0.1:11885".into());
