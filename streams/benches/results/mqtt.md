@@ -170,7 +170,10 @@ another at 82k/s minutes later). Only the same-minute comparisons count.
 ### What changed
 
 1. **A pool of publishing connections** (`MqttConfig::publish_connections`,
-   default 4, `DEFAULT_PUBLISH_CONNECTIONS`). Publishes take the connections
+   `DEFAULT_PUBLISH_CONNECTIONS`). This round measured it at 4; the default was
+   then set to 1, because with more than one connection publishes sent
+   concurrently without awaiting can reach the broker out of order, and
+   Mosquitto's single thread is the limit anyway. Raise it for batch speed. Publishes take the connections
    in turn. Each connection keeps its own waiter table, event-loop task, and
    the broker's Receive Maximum (1000), so a batch can have 4000 in flight
    instead of 1000. A batch stays on one connection, in order. A publish still

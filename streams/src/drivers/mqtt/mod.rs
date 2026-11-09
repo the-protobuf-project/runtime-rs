@@ -97,7 +97,11 @@ const REQUEST_CAPACITY: usize = 8192;
 
 /// Publishing connections a provider opens when
 /// [`MqttConfig::publish_connections`] is not changed.
-pub const DEFAULT_PUBLISH_CONNECTIONS: usize = 4;
+///
+/// One, because MQTT orders messages per connection: with one, every publish
+/// on a topic reaches the broker in the order it was sent, concurrent ones
+/// included. Raising it speeds up batches when the broker is not the limit.
+pub const DEFAULT_PUBLISH_CONNECTIONS: usize = 1;
 
 /// How long the publishing connection waits before redialing a lost broker,
 /// so an outage is a retry a second rather than a spin.
@@ -157,6 +161,12 @@ pub struct MqttConfig {
     /// one independently. A publish goes out whole on one connection and still
     /// returns only once the broker has it, and a batch stays on one
     /// connection, in order.
+    ///
+    /// The cost of more than one is ordering. MQTT orders messages per
+    /// connection, so two publishes sent concurrently without awaiting the
+    /// first can reach the broker in either order once they may take
+    /// different connections. Publishes awaited one after another keep their
+    /// order whatever this is. The default, one, keeps every publish in order.
     ///
     /// With [`client_id`](Self::client_id) set, the first connection uses it
     /// and the others append `-1`, `-2`, and so on, since a broker gives a

@@ -28,17 +28,20 @@ spec() {
     kafka) echo "kafka kafka fanout batch durable group" ;;
     rabbitmq) echo "rabbitmq rabbitmq fanout batch durable" ;;
     mqtt) echo "mqtt mqtt fanout batch durable group" ;;
+    opcua) echo "opcua opcua fanout batch" ;;
+    opcua-pubsub) echo "opcua mqtt fanout batch group" ;;
     *) echo "unknown backend $1" >&2; exit 2 ;;
   esac
 }
-order=(zeromq nats jetstream redis redis-durable kafka rabbitmq mqtt)
+order=(zeromq nats jetstream redis redis-durable kafka rabbitmq mqtt opcua opcua-pubsub)
 [ $# -gt 0 ] && order=("$@")
 
 up() {   # compose-name profile
   local c="$1" p="$2"
   case "$p" in
     plain) docker compose -p "tpp-streams-live-$c" -f "$docker_dir/compose.$c.yaml" up -d --wait >/dev/null ;;
-    tls-prod) STREAMS_DURABILITY=prod docker compose -p "tpp-streams-e2e-$c" -f "$docker_dir/compose.$c.secure.yaml" up -d --wait --force-recreate >/dev/null ;;
+    tls-prod) [ "$c" = opcua ] && bash "$docker_dir/compose.opcua.secure.sh" >/dev/null 2>&1
+      STREAMS_DURABILITY=prod docker compose -p "tpp-streams-e2e-$c" -f "$docker_dir/compose.$c.secure.yaml" up -d --wait --force-recreate >/dev/null ;;
     tls-strict) STREAMS_DURABILITY=strict docker compose -p "tpp-streams-e2e-$c" -f "$docker_dir/compose.$c.secure.yaml" up -d --wait --force-recreate >/dev/null ;;
   esac
 }
@@ -51,6 +54,12 @@ down() { # compose-name
 # Publishers that keep enough publishes in flight. Every confirmed publish waits
 # about a round trip, so 32 publishers cap a backend near 32k/s whatever it
 # could do; batches need far fewer because each call carries --batch messages.
+# Arguments a backend needs beyond the common ones. OPC UA client/server writes
+# typed Int64 values to nodes instead of protobuf messages.
+extra() { # backend
+  case "$1" in opcua) echo "--message opcua" ;; *) echo "" ;; esac
+}
+
 publishers() { # backend scenario
   if [ "$2" = batch ]; then echo 32; return; fi
   case "$1" in mqtt|kafka) echo 512 ;; *) echo 256 ;; esac
@@ -64,10 +73,10 @@ run() {  # feature backend profile scenario rate
   [ "$profile" = tls-strict ] && messages=20000
   local cli_profile="$profile"; [ "$profile" != plain ] && cli_profile=tls
   printf '%-14s %-10s %-8s %7s/s ... ' "$backend" "$profile" "$scenario" "$rate"
-  cargo bench -q -p tpp-streams --features "kafka,nats,rabbitmq,redis,mqtt,zeromq,protobuf,live-tests,tls" --bench throughput -- \
+  cargo bench -q -p tpp-streams --features "kafka,nats,rabbitmq,redis,mqtt,zeromq,opcua,protobuf,live-tests,tls" --bench throughput -- \
     --backend "$backend" --profile "$cli_profile" --scenario "$scenario" \
     --messages "$messages" --rate "$rate" --publishers "$(publishers "$backend" "$scenario")" --batch 500 --consumers "$([ "$scenario" = group ] || [ "$scenario" = durable ] && echo 2 || echo 1)" \
-    --timeout 180 --label "$label/$profile" >/dev/null 2>"$root/target/bench-last.log" \
+    $(extra "$backend") --timeout 180 --label "$label/$profile" >/dev/null 2>"$root/target/bench-last.log" \
     || { echo "FAIL (no result; see target/bench-last.log)"; return; }
   tail -1 "$root/target/bench-results.jsonl" | python3 -c '
 import sys, json
@@ -86,6 +95,8 @@ for backend in "${order[@]}"; do
   read -r feature compose scenarios <<<"$(spec "$backend")"
   profiles=(plain)
   [ "$compose" != - ] && profiles+=(tls-prod tls-strict)
+  # The OPC PLC simulator has no durability setting, so strict would only repeat tls-prod.
+  [ "$backend" = opcua ] && profiles=(plain tls-prod)
   for profile in "${profiles[@]}"; do
     [ "$compose" != - ] && { down "$compose"; up "$compose" "$profile"; }
     for scenario in $scenarios; do
