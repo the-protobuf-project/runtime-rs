@@ -167,6 +167,22 @@ required-features = ["opcua"]
 name = "opcua_native"
 required-features = ["opcua"]
 
+[[test]]
+name = "opcua_pubsub"
+required-features = ["opcua"]
+
+[[test]]
+name = "opcua_pubsub_e2e"
+required-features = ["live-tests", "tls", "opcua"]
+
+[[test]]
+name = "opcua_pubsub_live"
+required-features = ["live-tests", "opcua"]
+
+[[example]]
+name = "opcua_pubsub"
+required-features = ["opcua"]
+
 # Throughput and latency across every backend; see benches/README.md.
 [[bench]]
 name = "throughput"

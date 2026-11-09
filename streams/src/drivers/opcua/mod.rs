@@ -111,11 +111,18 @@
 //! read, so it must be a native typed value. [`OpcUaValue`] is the codec; its
 //! bytes are a DataValue's OPC UA binary encoding and nothing else, which is
 //! also the DataValue field encoding OPC UA PubSub uses.
+//!
+//! # PubSub
+//!
+//! [`pubsub`] is the other half of OPC UA: Part 14 PubSub over an MQTT
+//! broker, where DataSets travel as JSON NetworkMessages and are delivered
+//! as the same [`OpcUaValue`] messages this provider's subscriptions give.
 
 mod codec;
 mod hub;
 mod manager;
 mod node;
+pub mod pubsub;
 
 use std::{
     collections::BTreeMap,

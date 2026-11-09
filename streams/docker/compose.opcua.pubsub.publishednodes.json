@@ -1,0 +1,26 @@
+[
+  {
+    "EndpointUrl": "opc.tcp://opc-plc:50000",
+    "UseSecurity": false,
+    "DataSetWriterGroup": "plc",
+    "DataSetWriterId": "simulation",
+    "DataSetPublishingInterval": 500,
+    "OpcNodes": [
+      {
+        "Id": "nsu=http://microsoft.com/Opc/OpcPlc/;s=StepUp",
+        "DataSetFieldId": "StepUp",
+        "OpcSamplingInterval": 250
+      },
+      {
+        "Id": "nsu=http://microsoft.com/Opc/OpcPlc/;s=AlternatingBoolean",
+        "DataSetFieldId": "AlternatingBoolean",
+        "OpcSamplingInterval": 250
+      },
+      {
+        "Id": "nsu=http://microsoft.com/Opc/OpcPlc/;s=RandomSignedInt32",
+        "DataSetFieldId": "RandomSignedInt32",
+        "OpcSamplingInterval": 250
+      }
+    ]
+  }
+]

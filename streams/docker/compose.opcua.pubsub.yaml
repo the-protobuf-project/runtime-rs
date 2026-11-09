@@ -1,0 +1,85 @@
+# OPC UA PubSub interop, for tests/opcua_pubsub_live.rs and
+# examples/opcua_pubsub.rs: Microsoft's OPC Publisher reads Microsoft's OPC PLC
+# simulator over OPC UA client/server and publishes what it reads as OPC UA
+# Part 14 JSON NetworkMessages over MQTT 5 to a Mosquitto, where the provider
+# subscribes to them. A third-party Part 14 publisher, not this crate talking
+# to itself.
+#
+#   docker compose -f docker/compose.opcua.pubsub.yaml up -d --wait
+#   cargo test -p tpp-streams --features opcua,live-tests --test opcua_pubsub_live
+#   docker compose -f docker/compose.opcua.pubsub.yaml down -v
+#
+# OPC Publisher runs in its standards-compliant mode (`--strict`) with the
+# PubSub messaging mode and reversible JSON (`--me=JsonReversible`, so a
+# value keeps its OPC UA type), and its topic templates set to Part 14's
+# layout, opcua/json/data/<PublisherId>/<WriterGroup>/<DataSetWriter>, with
+# metadata retained under opcua/json/metadata/... . Its PublisherId is
+# `opc-publisher`; the WriterGroup and DataSetWriters are in
+# compose.opcua.pubsub.publishednodes.json. `--bi=0 --bs=1` sends each
+# change as it comes rather than batching for ten seconds.
+#
+# The broker is the plain one's configuration (compose.mqtt.mosquitto.conf)
+# on host port 11885, so it can run beside compose.mqtt.yaml. opc-plc is not
+# published on the host at all: only OPC Publisher reads it.
+name: tpp-streams-opcua-pubsub
+services:
+  mqtt:
+    image: eclipse-mosquitto:2
+    container_name: tpp-streams-opcua-pubsub-mqtt
+    ports:
+      - "127.0.0.1:11885:1883"
+    volumes:
+      - ./compose.mqtt.mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    mem_limit: 64m
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$$SYS/broker/uptime", "-C", "1", "-W", "3"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+    restart: "no"
+  opc-plc:
+    image: mcr.microsoft.com/iotedge/opc-plc:2.12.48
+    container_name: tpp-streams-opcua-pubsub-plc
+    hostname: opc-plc
+    command:
+      - --pn=50000
+      - --ut
+      - --aa
+      - --sn=1
+      - --fn=1
+      - --gn=0
+      - --vfbs=0
+      - --loglevel=warn
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/50000' || exit 1"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    restart: "no"
+  opc-publisher:
+    image: mcr.microsoft.com/iotedge/opc-publisher:2.9.15
+    container_name: tpp-streams-opcua-pubsub-publisher
+    depends_on:
+      mqtt:
+        condition: service_healthy
+      opc-plc:
+        condition: service_healthy
+    command:
+      - --pf=/config/publishednodes.json
+      - --mqc=HostName=mqtt;Port=1883;Protocol=v5
+      - -t=Mqtt
+      - --strict
+      - --mm=PubSub
+      - --me=JsonReversible
+      - --id=opc-publisher
+      - --ttt=opcua/json/data/{PublisherId}/{WriterGroup}/{DataSetWriter}
+      - --mdt=opcua/json/metadata/{PublisherId}/{WriterGroup}/{DataSetWriter}
+      - --bi=0
+      - --bs=1
+      - --aa
+      - --loglevel=information
+    volumes:
+      - ./compose.opcua.pubsub.publishednodes.json:/config/publishednodes.json:ro
+    mem_limit: 512m
+    restart: "no"
