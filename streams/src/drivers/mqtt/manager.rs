@@ -1,7 +1,7 @@
 //! The bound half of the MQTT provider: publishing, subscribing, and durable
 //! consumers on one declared stream.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use futures::StreamExt;
@@ -9,20 +9,20 @@ use rumqttc::{
     Outgoing,
     v5::{
         AsyncClient, Event, EventLoop, Incoming,
-        mqttbytes::v5::{Publish, SubscribeReasonCode},
+        mqttbytes::v5::{Filter, Publish, PublishProperties, RetainForwardRule},
     },
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    Acker, Batch, Deliveries, Delivery, Durable, Manager, Options, Payload, Publisher, Result,
-    Stream, StreamError, Subscriber, Subscription,
+    Acker, Batch, Deliveries, Delivery, Durable, Manager, Message, Options, Payload, Publisher,
+    Registry, Result, Stream, StreamError, Subscriber, Subscription,
     provider::{self, Metrics},
 };
 
 use super::{
-    Inner, LINGER, Session, dial, safe_name,
+    Inner, LINGER, Session, Unframed, headers_of, publish_properties, safe_name, subscribe,
     topic::{declares, has_wildcard},
 };
 
@@ -78,17 +78,15 @@ impl MqttManager {
             Some(group) => format!("$share/{group}/{topic}"),
             None => topic,
         };
-        let (client, mut events, resumed) = dial(&self.inner.options, client_id, session).await?;
-        let mut attached = Attached {
-            client,
-            events: None,
-            early: Vec::new(),
-            filter,
-            prefix: self.topic(""),
-            subject: Arc::from(subject),
-            exact: !has_wildcard(subject),
-            durable: matches!(session, Session::Durable { .. }),
-        };
+        let durable = matches!(session, Session::Durable { .. });
+        let mut wanted = Filter::new(filter.clone(), self.inner.config.qos);
+        if durable {
+            // A durable consumer is handed the subject's retained value when
+            // its subscription is new, not again on every resume: a resumed
+            // session subscribes again (below), and the retained value it
+            // already had would otherwise come back as a duplicate each time.
+            wanted.retain_forward_rule = RetainForwardRule::OnNewSubscribe;
+        }
 
         // A resumed session comes back with its subscriptions restored, but
         // subscribe anyway. The client id names a consumer and a subject, not
@@ -98,44 +96,31 @@ impl MqttManager {
         // Subscribing again to a filter the session already holds replaces it
         // in place and keeps the queued messages; whatever the broker
         // redelivers before the SUBACK is held in `early`, not raced.
-        if resumed {
+        let subscribed = subscribe(
+            &self.inner.options,
+            client_id,
+            session,
+            vec![wanted],
+            &format!("mqtt: cannot subscribe to {subject:?}"),
+        )
+        .await?;
+        if subscribed.resumed {
             tracing::debug!(
                 subject,
                 client_id,
-                "mqtt: resumed a session; subscribing again"
+                "mqtt: resumed a session and subscribed again"
             );
         }
-
-        let failed = |error: &dyn std::fmt::Display| {
-            StreamError::Internal(format!("mqtt: cannot subscribe to {subject:?}: {error}"))
-        };
-        attached
-            .client
-            .subscribe(attached.filter.clone(), self.inner.config.qos)
-            .await
-            .map_err(|e| failed(&e))?;
-        // The subscription is active once the broker acknowledges it, and the
-        // contract promises that before returning. Anything delivered in the
-        // meantime is held, not dropped.
-        loop {
-            match events.poll().await.map_err(|e| failed(&e))? {
-                Event::Incoming(Incoming::SubAck(ack)) => {
-                    match ack.return_codes.first() {
-                        Some(SubscribeReasonCode::Success(_)) => break,
-                        // The broker's reason code says why, and is the
-                        // difference between a refused filter and a quota.
-                        code => {
-                            let _ = attached.client.try_disconnect();
-                            return Err(failed(&format_args!("broker reason {code:?}")));
-                        }
-                    }
-                }
-                Event::Incoming(Incoming::Publish(publish)) => attached.early.push(publish),
-                _ => {}
-            }
-        }
-        attached.events = Some(events);
-        Ok(attached)
+        Ok(Attached {
+            client: subscribed.client,
+            events: Some(subscribed.events),
+            early: subscribed.early,
+            filter,
+            prefix: self.topic(""),
+            subject: Arc::from(subject),
+            exact: !has_wildcard(subject),
+            durable,
+        })
     }
 }
 
@@ -251,6 +236,7 @@ impl Attached {
 impl Publisher for MqttManager {
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let topic = self.publish_topic(subject, opts)?;
+        let properties = self.properties(opts)?;
         let id = provider::publish_id(opts);
         let body = Bytes::from(provider::pack(&id, &payload));
         let len = body.len();
@@ -258,7 +244,7 @@ impl Publisher for MqttManager {
             .inner
             .publisher
             .link()
-            .publish(&topic, self.inner.config.qos, body)
+            .send(&topic, self.inner.config.qos, opts.retain, properties, body)
             .await
         {
             tracing::error!(subject, id, %error, "mqtt: could not publish");
@@ -273,9 +259,17 @@ impl Publisher for MqttManager {
 }
 
 impl MqttManager {
+    /// The PUBLISH properties `opts` asks for: the stream's headers and the
+    /// publish's own as user properties, and the expiry as the Message
+    /// Expiry Interval.
+    fn properties(&self, opts: &Options) -> Result<Option<PublishProperties>> {
+        let headers = provider::outgoing(&self.stream, opts)?;
+        Ok(publish_properties(headers, opts.expiry()))
+    }
+
     /// The topic a publish on `subject` goes to, or why nothing can be
     /// published there with `opts`.
-    fn publish_topic(&self, subject: &str, opts: &Options) -> Result<String> {
+    pub(super) fn publish_topic(&self, subject: &str, opts: &Options) -> Result<String> {
         self.check_subject(subject)?;
         if has_wildcard(subject) {
             // A stream may declare a filter, but a message has to land
@@ -319,7 +313,12 @@ impl Subscriber for MqttManager {
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();
         attached.route(tx, move |_, subject, publish| {
-            match provider::unpack_shared(&registry, &subject, publish.payload) {
+            if publish.payload.is_empty() {
+                // A retained value being cleared: no frame, nothing to deliver.
+                tracing::debug!(%subject, "mqtt: skipping an empty message (a retained value cleared)");
+                return None;
+            }
+            match unpack(&registry, &subject, &publish) {
                 Ok(message) => Some(message),
                 Err(error) => {
                     // One bad message is not a reason to end a healthy
@@ -399,7 +398,14 @@ impl Durable for MqttManager {
         let declared = subject.to_owned();
         let consumer = consumer.to_owned();
         attached.route(tx, move |client, subject, publish| {
-            match provider::unpack_shared(&registry, &subject, publish.payload.clone()) {
+            if publish.payload.is_empty() {
+                // A retained value being cleared carries no frame. Settled at
+                // once, or the session would be handed it again forever.
+                tracing::debug!(%subject, "mqtt: acknowledging an empty message (a retained value cleared)");
+                let _ = client.try_ack(&publish);
+                return None;
+            }
+            match unpack(&registry, &subject, &publish) {
                 Ok(message) => {
                     metrics.delivered(&declared, &consumer);
                     Some(Delivery::new(
@@ -447,17 +453,23 @@ impl Batch for MqttManager {
         // identical failures.
         provider::check_batch(opts)?;
         let topic = self.publish_topic(subject, opts)?;
+        let properties = self.properties(opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
-        let bodies = payloads
+        let messages = payloads
             .iter()
             .zip(&ids)
-            .map(|(payload, id)| Bytes::from(provider::pack(id, payload)))
+            .map(|(payload, id)| Unframed {
+                topic: topic.clone(),
+                retain: opts.retain,
+                properties: properties.clone(),
+                body: Bytes::from(provider::pack(id, payload)),
+            })
             .collect();
         let outcomes = self
             .inner
             .publisher
             .link()
-            .publish_all(&topic, self.inner.config.qos, bodies)
+            .send_all(self.inner.config.qos, messages)
             .await;
         let failures: Vec<(usize, StreamError)> = outcomes
             .into_iter()
@@ -513,6 +525,31 @@ impl Acker for MqttAcker {
         self.metrics.settled(&self.subject, &self.consumer, "nak");
         Ok(())
     }
+
+    /// Refused: MQTT has no negative acknowledgement, let alone a delayed
+    /// one. The message stays outstanding, as after [`nak`](Acker::nak), and
+    /// the broker hands it back when the session reconnects, on its own
+    /// schedule, not after `delay`.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        self.metrics.settled(&self.subject, &self.consumer, "nak");
+        Err(StreamError::Unsupported(format!(
+            "mqtt: cannot hold a redelivery back {delay:?}: MQTT has no negative \
+             acknowledgement and no redelivery delay, so the message stays outstanding \
+             until the session reconnects"
+        )))
+    }
+}
+
+/// A delivered PUBLISH as a message: its frame decoded, its user properties
+/// as the message's headers.
+fn unpack(registry: &Registry, subject: &Arc<str>, publish: &Publish) -> Result<Message> {
+    let message = provider::unpack_shared(registry, subject, publish.payload.clone())?;
+    let headers = headers_of(publish);
+    Ok(if headers.is_empty() {
+        message
+    } else {
+        message.with_headers(headers)
+    })
 }
 
 /// The client id a named consumer of one subject connects under.

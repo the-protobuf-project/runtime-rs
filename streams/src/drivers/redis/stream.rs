@@ -79,6 +79,7 @@ fn normalized(id: &str, stream: Stream) -> Result<(Stream, Vec<u8>)> {
 #[async_trait::async_trait]
 impl Streams for RedisProvider {
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let id = if stream.id.is_empty() {
             new_stream_id(&stream.name)
         } else {
@@ -126,6 +127,7 @@ impl Streams for RedisProvider {
     /// never an empty stream. Deleting first would destroy the stream whenever
     /// the rewrite failed.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         self.get(id).await?;
         let (out, body) = normalized(id, stream)?;
         let key = self.inner.keys.stream(id);

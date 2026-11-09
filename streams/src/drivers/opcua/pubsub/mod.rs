@@ -63,6 +63,27 @@
 //! were not published after the subscription, are skipped, as are
 //! keep-alives.
 //!
+//! # Headers and expiry
+//!
+//! Headers ([`Stream::headers`](crate::Stream::headers) and
+//! [`Options::headers`](crate::Options::headers)) travel as MQTT 5 user
+//! properties on the PUBLISH that carries the NetworkMessage, beside its
+//! `application/json` content type; the Part 14 JSON is exactly as it would
+//! be without them, so another Part 14 reader is unaffected, and an MQTT 5
+//! tool sees them. Every message a subscription takes from that
+//! NetworkMessage carries them as [`Message::headers`](crate::Message::headers),
+//! as it does the user properties another publisher set. A batch's
+//! NetworkMessages all carry the same headers. The stream's own headers are
+//! stamped on its `ua-metadata` messages too.
+//!
+//! [`Options::with_expiry`](crate::Options::with_expiry) is the MQTT 5
+//! Message Expiry Interval on the data NetworkMessage, rounded up to whole
+//! seconds as on the MQTT driver: a value nobody was there to read in time
+//! is dropped by the broker rather than delivered stale.
+//! [`Options::with_retain`](crate::Options::with_retain) is refused: Part 14
+//! retains `ua-metadata`, not `ua-data`, and subscribers skip retained data
+//! as not published after they joined.
+//!
 //! # Sequence numbers
 //!
 //! Each DataSetWriter numbers its DataSetMessages, counting up from 1 in this
@@ -113,7 +134,6 @@
 //! Declarations are local, as on MQTT.
 
 mod dataset;
-mod link;
 mod manager;
 mod message;
 
@@ -127,14 +147,17 @@ use std::{
 };
 
 use opentelemetry::metrics::{Counter, Meter};
-use rumqttc::v5::{Event, Incoming};
+use rumqttc::v5::{
+    Event, Incoming,
+    mqttbytes::v5::{Filter, PublishProperties},
+};
 
 pub use opcua::types::{ConfigurationVersionDataType, DataSetMetaDataType, FieldMetaData};
 
 pub use crate::drivers::mqtt::{MqttOptions, QoS};
 use crate::{
-    Manager, Result, Stream, StreamError, Streams,
-    drivers::mqtt::{Session, dial, safe_name},
+    Headers, Manager, Result, Stream, StreamError, Streams,
+    drivers::mqtt::{LINGER, PublishPool, Session, publish_properties, safe_name, subscribe},
     provider,
 };
 
@@ -144,8 +167,20 @@ pub use message::{
     MetaDataMessage, NetworkMessage,
 };
 
-use link::Links;
 use manager::PubSubManager;
+
+/// Part 14 JSON messages are JSON (7.3.5.2): the MQTT 5 content type says so.
+const CONTENT_TYPE: &str = "application/json";
+
+/// The PUBLISH properties of a Part 14 message: JSON's content type and
+/// payload format, `headers` as MQTT 5 user properties, and `expires` as the
+/// Message Expiry Interval. The Part 14 JSON itself is never touched.
+pub(crate) fn properties(headers: Headers, expires: Option<Duration>) -> PublishProperties {
+    let mut properties = publish_properties(headers, expires).unwrap_or_default();
+    properties.payload_format_indicator = Some(1);
+    properties.content_type = Some(CONTENT_TYPE.into());
+    properties
+}
 
 /// The topic prefix Part 14 uses when none is configured.
 pub const DEFAULT_PREFIX: &str = "opcua";
@@ -223,7 +258,7 @@ type WriterKey = (String, String);
 pub(crate) struct Inner {
     options: MqttOptions,
     config: PubSubConfig,
-    links: Links,
+    links: PublishPool,
     declared: RwLock<BTreeMap<String, Stream>>,
     /// The last SequenceNumber each of this publisher's writers sent.
     sequences: Mutex<HashMap<WriterKey, u32>>,
@@ -268,7 +303,7 @@ impl PubSubProvider {
             .client_id
             .clone()
             .unwrap_or_else(|| format!("runtime-rs-pubsub-{}", provider::new_id()));
-        let links = Links::connect(
+        let links = PublishPool::connect(
             &options,
             &client_id,
             config.publish_connections,
@@ -366,13 +401,20 @@ impl PubSubProvider {
         self.inner
             .links
             .link()
-            .publish(
+            .send(
                 &topic,
                 self.inner.config.qos,
                 true,
+                Some(properties(declared.headers.clone(), None)),
                 message.to_json()?.into(),
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                StreamError::internal(
+                    &format!("opcua pubsub: cannot publish metadata on {topic:?}"),
+                    error,
+                )
+            })?;
         lock(&self.inner.versions).insert((group.group, writer.to_owned()), version.clone());
         tracing::info!(stream, writer, topic, "opcua pubsub: metadata published");
         Ok(version)
@@ -385,41 +427,33 @@ impl PubSubProvider {
         let group = self.inner.group_of(&self.declared(stream)?.id);
         let topic = self.inner.topic("metadata", &group, Some(writer));
         let client_id = format!("runtime-rs-pubsub-meta-{}", provider::new_id());
-        let (client, mut events, _) = dial(&self.inner.options, &client_id, Session::Clean).await?;
-        let failed = |e: &dyn std::fmt::Display| {
-            StreamError::Internal(format!("opcua pubsub: cannot read {topic:?}: {e}"))
-        };
-        client
-            .subscribe(topic.clone(), self.inner.config.qos)
-            .await
-            .map_err(|e| failed(&e))?;
+        let context = format!("opcua pubsub: cannot read {topic:?}");
+        let subscribed = subscribe(
+            &self.inner.options,
+            &client_id,
+            Session::Clean,
+            vec![Filter::new(topic.clone(), self.inner.config.qos)],
+            &context,
+        )
+        .await?;
+        let (client, mut events) = (subscribed.client, subscribed.events);
         let read = tokio::time::timeout(self.inner.config.metadata_timeout, async {
+            if let Some(publish) = subscribed.early.first() {
+                return MetaDataMessage::from_json(&publish.payload);
+            }
             loop {
-                match events.poll().await.map_err(|e| failed(&e))? {
-                    Event::Incoming(Incoming::Publish(publish)) => {
-                        return MetaDataMessage::from_json(&publish.payload);
-                    }
-                    Event::Incoming(Incoming::SubAck(ack))
-                        if !ack.return_codes.iter().all(|c| {
-                            matches!(
-                                c,
-                                rumqttc::v5::mqttbytes::v5::SubscribeReasonCode::Success(_)
-                            )
-                        }) =>
-                    {
-                        return Err(failed(&format_args!(
-                            "broker reason {:?}",
-                            ack.return_codes
-                        )));
-                    }
-                    _ => {}
+                let event = events
+                    .poll()
+                    .await
+                    .map_err(|e| StreamError::internal(&context, e))?;
+                if let Event::Incoming(Incoming::Publish(publish)) = event {
+                    return MetaDataMessage::from_json(&publish.payload);
                 }
             }
         })
         .await;
         let _ = client.disconnect().await;
-        let _ = tokio::time::timeout(link::LINGER, async { while events.poll().await.is_ok() {} })
-            .await;
+        let _ = tokio::time::timeout(LINGER, async { while events.poll().await.is_ok() {} }).await;
         read.unwrap_or_else(|_| {
             Err(StreamError::NotFound(format!(
                 "opcua pubsub: no metadata is retained on {topic:?}"
@@ -538,8 +572,10 @@ fn check_level(what: &str, level: &str) -> Result<()> {
     Ok(())
 }
 
-/// Checks a stream's id and subjects, and stores it under `id`, active.
+/// Checks a stream's id, subjects and default headers, and stores it under
+/// `id`, active.
 fn declaration(id: String, stream: Stream) -> Result<Stream> {
+    stream.headers.validate()?;
     match id.split_once('/') {
         Some((publisher, group)) => {
             check_level("the PublisherId", publisher)?;

@@ -9,23 +9,23 @@ use rumqttc::{
     Outgoing,
     v5::{
         AsyncClient, Event, EventLoop, Incoming,
-        mqttbytes::v5::{Filter, Publish, SubscribeReasonCode},
+        mqttbytes::v5::{Filter, Publish, PublishProperties},
     },
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
 use crate::{
-    Batch, Manager, Message, Options, Payload, Publisher, Result, Stream, StreamError, Subscriber,
-    Subscription,
+    Batch, Headers, Manager, Message, Options, Payload, Publisher, Result, Stream, StreamError,
+    Subscriber, Subscription,
     drivers::{
-        mqtt::{Session, dial},
+        mqtt::{LINGER, Session, Unframed, headers_of, subscribe},
         opcua::{CODEC_NAME, OpcUaValue, codec},
     },
     provider,
 };
 
-use super::{DataSet, DataSetMessage, Group, Inner, NetworkMessage, link::LINGER, writer_id};
+use super::{DataSet, DataSetMessage, Group, Inner, NetworkMessage, properties, writer_id};
 
 /// A subject's DataSetWriter, and its field when it names one.
 pub(crate) fn split(subject: &str) -> (&str, Option<&str>) {
@@ -80,7 +80,13 @@ impl PubSubManager {
         ))
     }
 
-    fn check_publish(&self, subject: &str, opts: &Options) -> Result<(String, Option<String>)> {
+    /// The writer and field a publish on `subject` goes to, and the PUBLISH
+    /// properties `opts` asks for, or why nothing can be published with them.
+    fn check_publish(
+        &self,
+        subject: &str,
+        opts: &Options,
+    ) -> Result<(String, Option<String>, PublishProperties)> {
         let (writer, field) = self.check_subject(subject)?;
         check_own(&self.stream.id, &self.group)?;
         if opts.delay().is_some() {
@@ -89,7 +95,20 @@ impl PubSubManager {
                     .into(),
             ));
         }
-        Ok((writer.to_owned(), field.map(str::to_owned)))
+        if opts.retain {
+            return Err(StreamError::Unsupported(
+                "opcua pubsub: a ua-data NetworkMessage is not retained (Part 14 retains \
+                 ua-metadata, which publish_metadata sends), and subscribers skip retained \
+                 data as not published after they joined"
+                    .into(),
+            ));
+        }
+        let headers = provider::outgoing(&self.stream, opts)?;
+        Ok((
+            writer.to_owned(),
+            field.map(str::to_owned),
+            properties(headers, opts.expiry()),
+        ))
     }
 
     /// The fields a payload publishes: one field's value, or a whole DataSet.
@@ -145,47 +164,23 @@ impl PubSubManager {
         filters: &[String],
     ) -> Result<(AsyncClient, EventLoop, Vec<Publish>)> {
         let client_id = format!("runtime-rs-pubsub-sub-{}", provider::new_id());
-        let (client, mut events, _) = dial(&self.inner.options, &client_id, Session::Clean).await?;
-        let failed = |error: &dyn std::fmt::Display| {
-            StreamError::Internal(format!(
-                "opcua pubsub: cannot subscribe to {subject:?}: {error}"
-            ))
-        };
         let qos = self.inner.config.qos;
-        client
-            .subscribe_many(filters.iter().map(|f| Filter::new(f.clone(), qos)))
-            .await
-            .map_err(|e| failed(&e))?;
-        let mut early = Vec::new();
-        loop {
-            match events.poll().await.map_err(|e| failed(&e))? {
-                Event::Incoming(Incoming::SubAck(ack)) => {
-                    if ack.return_codes.len() == filters.len()
-                        && ack
-                            .return_codes
-                            .iter()
-                            .all(|c| matches!(c, SubscribeReasonCode::Success(_)))
-                    {
-                        break;
-                    }
-                    let _ = client.try_disconnect();
-                    return Err(failed(&format_args!(
-                        "broker reasons {:?}",
-                        ack.return_codes
-                    )));
-                }
-                Event::Incoming(Incoming::Publish(publish)) => early.push(publish),
-                _ => {}
-            }
-        }
-        Ok((client, events, early))
+        let subscribed = subscribe(
+            &self.inner.options,
+            &client_id,
+            Session::Clean,
+            filters.iter().map(|f| Filter::new(f.clone(), qos)).collect(),
+            &format!("opcua pubsub: cannot subscribe to {subject:?}"),
+        )
+        .await?;
+        Ok((subscribed.client, subscribed.events, subscribed.early))
     }
 }
 
 #[async_trait::async_trait]
 impl Publisher for PubSubManager {
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
-        let (writer, field) = self.check_publish(subject, opts)?;
+        let (writer, field, properties) = self.check_publish(subject, opts)?;
         let fields = Self::fields(field.as_deref(), &payload)?;
         let id = provider::publish_id(opts);
         let first = self.inner.reserve(&self.group.group, &writer, 1);
@@ -197,11 +192,14 @@ impl Publisher for PubSubManager {
             .inner
             .links
             .link()
-            .publish(&topic, self.inner.config.qos, false, body)
+            .send(&topic, self.inner.config.qos, false, Some(properties), body)
             .await
         {
             tracing::error!(subject, id, %error, "opcua pubsub: could not publish");
-            return Err(error);
+            return Err(StreamError::internal(
+                &format!("opcua pubsub: cannot publish on {subject:?}"),
+                error,
+            ));
         }
         tracing::debug!(
             subject,
@@ -229,7 +227,7 @@ impl Batch for PubSubManager {
         opts: &Options,
     ) -> Result<Vec<String>> {
         provider::check_batch(opts)?;
-        let (writer, field) = self.check_publish(subject, opts)?;
+        let (writer, field, properties) = self.check_publish(subject, opts)?;
         let mut ids: Vec<String> = Vec::with_capacity(payloads.len());
         let mut failures = Vec::new();
         let mut good = Vec::with_capacity(payloads.len());
@@ -267,7 +265,12 @@ impl Batch for PubSubManager {
             sequence = sequence.wrapping_add(indexes.len() as u32);
             match self.network(id, messages).to_json() {
                 Ok(body) => {
-                    networks.push((topic.clone(), Bytes::from(body)));
+                    networks.push(Unframed {
+                        topic: topic.clone(),
+                        retain: false,
+                        properties: Some(properties.clone()),
+                        body: Bytes::from(body),
+                    });
                     members.push(indexes);
                 }
                 Err(error) => failures.extend(indexes.into_iter().map(|i| (i, error.clone()))),
@@ -277,10 +280,14 @@ impl Batch for PubSubManager {
             .inner
             .links
             .link()
-            .publish_all(self.inner.config.qos, networks)
+            .send_all(self.inner.config.qos, networks)
             .await;
         for (indexes, outcome) in members.into_iter().zip(outcomes) {
             if let Err(error) = outcome {
+                let error = StreamError::internal(
+                    &format!("opcua pubsub: cannot publish on {subject:?}"),
+                    error,
+                );
                 failures.extend(indexes.into_iter().map(|i| (i, error.clone())));
             }
         }
@@ -406,6 +413,9 @@ impl Reader {
             }
         };
         let on_group_topic = publish.topic.as_ref() == self.group_topic.as_bytes();
+        // The NetworkMessage's MQTT 5 user properties, on every message it
+        // yields.
+        let headers: Headers = headers_of(publish);
         let id = network.message_id.clone().unwrap_or_else(provider::new_id);
         let several = network.messages.len() > 1;
         for (index, message) in network.messages.iter().enumerate() {
@@ -449,12 +459,17 @@ impl Reader {
                     .entry(name.clone())
                     .or_insert_with(|| Arc::from(format!("{}/{name}", self.writer)))
                     .clone();
-                out.push(Message::new(
+                let message = Message::new(
                     message_id.clone(),
                     subject,
                     self.codec.clone(),
                     codec::encode(value),
-                ));
+                );
+                out.push(if headers.is_empty() {
+                    message
+                } else {
+                    message.with_headers(headers.clone())
+                });
             }
         }
     }

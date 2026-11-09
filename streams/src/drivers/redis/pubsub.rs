@@ -11,10 +11,12 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::{
     Batch, Manager, Message, Options, Payload, Publisher, Result, Stream, StreamError, Subscriber,
     Subscription,
-    provider::{batch_result, check_batch, new_id, pack, prefetch, publish_id, unpack},
+    provider::{
+        batch_result, check_batch, new_id, outgoing, pack_with, prefetch, publish_id, unpack,
+    },
 };
 
-use super::{Inner, Replay, fail, keys::Kind};
+use super::{Inner, Replay, fail, keys::Kind, refuse_unhonoured};
 
 /// Publishes to and subscribes from one immediate or scheduled stream.
 ///
@@ -213,8 +215,11 @@ impl Publisher for PubSubManager {
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.inner.declares(&self.stream, subject)?;
         let delay = self.delay(opts)?;
+        refuse_unhonoured(opts)?;
+        let headers = outgoing(&self.stream, opts)?;
         let id = publish_id(opts);
-        let frame = pack(&id, &payload);
+        // Version 1 when there are no headers, so runtime-go reads it.
+        let frame = pack_with(&id, &payload, &headers);
 
         if let Some(ttl) = delay {
             let mut pipe = redis::pipe();
@@ -299,6 +304,8 @@ impl Batch for PubSubManager {
         check_batch(opts)?;
         self.inner.declares(&self.stream, subject)?;
         let delay = self.delay(opts)?;
+        refuse_unhonoured(opts)?;
+        let headers = outgoing(&self.stream, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| new_id()).collect();
         if ids.is_empty() {
             return Ok(ids);
@@ -310,7 +317,7 @@ impl Batch for PubSubManager {
             pipe.atomic();
         }
         for (id, payload) in ids.iter().zip(&payloads) {
-            let frame = pack(id, payload);
+            let frame = pack_with(id, payload, &headers);
             match delay {
                 Some(ttl) => self.queue_schedule(&mut pipe, subject, id, frame, ttl),
                 None => {

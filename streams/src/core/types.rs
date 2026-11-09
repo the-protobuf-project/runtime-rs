@@ -1,11 +1,11 @@
 //! Values that cross the stream contract: stream metadata and delivered messages.
 
-use std::{fmt, ops::Deref, sync::Arc};
+use std::{fmt, ops::Deref, sync::Arc, time::Duration};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use crate::{Codec, Json, Result, StreamError};
+use crate::{Codec, Headers, Json, Result, StreamError};
 
 /// The metadata describing a stream and the subjects it accepts.
 ///
@@ -34,6 +34,84 @@ pub struct Stream {
     /// Whether the stream is accepting traffic.
     #[serde(default)]
     pub active: bool,
+    /// Headers stamped on every message published through this stream. A
+    /// publish's own [`Options::headers`](crate::Options::headers) are laid on
+    /// top, a key set there winning.
+    ///
+    /// Left out of the stored metadata when empty, so a stream without
+    /// headers is stored exactly as runtime-go stores it.
+    #[serde(default, skip_serializing_if = "Headers::is_empty")]
+    pub headers: Headers,
+}
+
+impl Stream {
+    /// A stream named `name`, to finish with the other builders and hand to
+    /// [`Streams::create`](crate::Streams::create):
+    ///
+    /// ```
+    /// let stream = streams::Stream::named("orders")
+    ///     .subjects(["order.placed", "order.shipped"])
+    ///     .header("lang", "rust")
+    ///     .headers([("site", "plant-3"), ("team", "billing")]);
+    /// assert_eq!(stream.headers.get("lang"), Some("rust"));
+    /// ```
+    pub fn named(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            ..Self::default()
+        }
+    }
+
+    /// Uses `id` instead of letting the provider generate one.
+    pub fn with_id(mut self, id: impl Into<String>) -> Self {
+        self.id = id.into();
+        self
+    }
+
+    /// Accepts `subject` as well.
+    pub fn subject(mut self, subject: impl Into<String>) -> Self {
+        self.subjects.push(subject.into());
+        self
+    }
+
+    /// Accepts each of `subjects` as well.
+    pub fn subjects<S: Into<String>>(mut self, subjects: impl IntoIterator<Item = S>) -> Self {
+        self.subjects.extend(subjects.into_iter().map(Into::into));
+        self
+    }
+
+    /// Describes the stream.
+    pub fn description(mut self, description: impl Into<String>) -> Self {
+        self.description = description.into();
+        self
+    }
+
+    /// Records who owns the stream.
+    pub fn user(mut self, user_id: impl Into<String>) -> Self {
+        self.user_id = user_id.into();
+        self
+    }
+
+    /// Marks the stream as accepting traffic, or not.
+    pub fn active(mut self, active: bool) -> Self {
+        self.active = active;
+        self
+    }
+
+    /// Stamps `key: value` on every message published through the stream.
+    pub fn header(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.insert(key, value);
+        self
+    }
+
+    /// Stamps each of `headers` on every message published through the stream.
+    pub fn headers<K: Into<String>, V: Into<String>>(
+        mut self,
+        headers: impl IntoIterator<Item = (K, V)>,
+    ) -> Self {
+        self.headers.extend(headers);
+        self
+    }
 }
 
 /// One delivered payload.
@@ -49,6 +127,7 @@ pub struct Message {
     subject: Arc<str>,
     codec: Arc<str>,
     data: Bytes,
+    headers: Headers,
 }
 
 impl Message {
@@ -66,7 +145,21 @@ impl Message {
             subject: subject.into(),
             codec: codec.into(),
             data: data.into(),
+            headers: Headers::new(),
         }
+    }
+
+    /// The same message carrying `headers`. Providers attach what arrived
+    /// with the message.
+    pub fn with_headers(mut self, headers: Headers) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// The headers the message was published with: the stream's defaults and
+    /// the publish's own, as they arrived.
+    pub fn headers(&self) -> &Headers {
+        &self.headers
     }
 
     /// The publisher-assigned identifier.
@@ -120,6 +213,7 @@ impl fmt::Debug for Message {
             .field("id", &self.id)
             .field("subject", &self.subject)
             .field("codec", &self.codec)
+            .field("headers", &self.headers)
             .field("len", &self.data.len())
             .finish()
     }
@@ -137,6 +231,23 @@ pub trait Acker: Send + Sync {
 
     /// Returns the message for redelivery.
     async fn nak(self: Box<Self>) -> Result<()>;
+
+    /// Returns the message for redelivery no sooner than `delay` from now.
+    ///
+    /// Only a provider whose broker can hold a redelivery back implements
+    /// it; the default refuses rather than redelivering at once, which would
+    /// be a different thing than the caller asked for.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        let _ = delay;
+        Err(StreamError::Unsupported(
+            "this provider cannot hold a redelivery back; nak redelivers at once".into(),
+        ))
+    }
+
+    /// Whether [`Acker::nak_after`] is implemented.
+    fn delays_nak(&self) -> bool {
+        false
+    }
 }
 
 /// A message that has to be settled.
@@ -191,6 +302,23 @@ impl Delivery {
     /// should ack it and record the failure somewhere it will be seen.
     pub async fn nak(self) -> Result<()> {
         self.acker.nak().await
+    }
+
+    /// Whether [`Delivery::nak_after`] is available on this delivery's
+    /// provider. Check it first: a refused `nak_after` has already given the
+    /// delivery up, and the broker then redelivers it on its own schedule.
+    pub fn can_delay_redelivery(&self) -> bool {
+        self.acker.delays_nak()
+    }
+
+    /// Returns the message for redelivery no sooner than `delay` from now,
+    /// for work that should wait before it is tried again (a device that is
+    /// busy, a dependency that is restarting).
+    ///
+    /// Refused with [`StreamError::Unsupported`] where the broker cannot hold
+    /// a redelivery back; see [`Delivery::can_delay_redelivery`].
+    pub async fn nak_after(self, delay: Duration) -> Result<()> {
+        self.acker.nak_after(delay).await
     }
 }
 

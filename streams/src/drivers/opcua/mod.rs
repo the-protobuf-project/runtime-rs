@@ -69,6 +69,16 @@
 //! - [`Durable`](crate::Durable): a notification is acknowledged by the
 //!   subscription's publish cycle, not by the reader, and a value nobody read
 //!   is replaced by the next one rather than redelivered.
+//! - Headers, on [`Stream::headers`] at `create` and `update` and on
+//!   [`Options::headers`](crate::Options::headers) at publish: a Write sets a
+//!   node's value, status and timestamps, and has nowhere to carry anything
+//!   else, so headers would be dropped without a word. Use
+//!   [`pubsub`], which carries them as MQTT 5 user properties.
+//! - [`Options::expires`](crate::Options::expires): a Write applies at once
+//!   or fails; nothing waits that could expire.
+//! - [`Options::retain`](crate::Options::retain): a node always holds its
+//!   last value, and a new monitored item reports it when
+//!   [`OpcUaConfig::initial_value`] asks; there is no retain flag to set.
 //! - [`Positioned`](crate::Positioned): there is no log to seek. HistoryRead
 //!   reads a historian's archive, where a server has one, by time range; it
 //!   is a query, not a position in a stream, and is left to the session.
@@ -275,9 +285,12 @@ fn not_found(id: &str) -> StreamError {
     StreamError::NotFound(format!("stream {id}"))
 }
 
-/// Checks that every subject is a node id, and stores the stream under `id`,
-/// active.
+/// Checks that every subject is a node id and that the stream has no default
+/// headers, and stores the stream under `id`, active.
 fn declaration(id: String, stream: Stream) -> Result<Stream> {
+    if !stream.headers.is_empty() {
+        return Err(StreamError::Unsupported(manager::NO_HEADERS.into()));
+    }
     for subject in &stream.subjects {
         node::parse(subject)?;
     }

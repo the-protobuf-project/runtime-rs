@@ -214,12 +214,18 @@ fn declaration(id: String, stream: Stream) -> Stream {
         subjects: stream.subjects,
         user_id: stream.user_id,
         active: true,
+        headers: stream.headers,
     }
 }
 
 #[async_trait::async_trait]
 impl Streams for KafkaProvider {
+    /// Declares a stream: its subjects' topics, then its declaration.
+    ///
+    /// Default headers are checked first, so a bad one fails here rather than
+    /// at every publish. Kafka reserves no header names.
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -254,6 +260,7 @@ impl Streams for KafkaProvider {
     /// left in place, because deleting them would discard a log the
     /// declaration never owned exclusively.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let name = safe_name(id);
         self.get(&name).await?;
         let out = declaration(name, stream);
@@ -330,11 +337,38 @@ mod tests {
                 subjects: vec!["a".into()],
                 user_id: "u".into(),
                 active: false,
+                ..Stream::default()
             },
         );
         assert_eq!(out.id, "s-1");
         assert!(out.active);
         assert_eq!((out.name.as_str(), out.user_id.as_str()), ("users", "u"));
+    }
+
+    #[test]
+    fn a_declaration_keeps_its_headers_and_leaves_none_out_of_the_json() {
+        let with = declaration("s".into(), Stream::named("n").header("lang", "rust"));
+        assert_eq!(with.headers.get("lang"), Some("rust"));
+        let json = serde_json::to_value(&with).unwrap();
+        assert_eq!(json["headers"]["lang"], "rust");
+        let back: Stream = serde_json::from_value(json).unwrap();
+        assert_eq!(back.headers, with.headers);
+
+        let without = serde_json::to_value(declaration("s".into(), Stream::default())).unwrap();
+        assert!(without.get("headers").is_none(), "{without}");
+    }
+
+    #[tokio::test]
+    async fn create_and_update_refuse_a_bad_default_header() {
+        let mut client = rdkafka::ClientConfig::new();
+        client.set("bootstrap.servers", "127.0.0.1:1");
+        let provider = KafkaProvider::build(client, super::super::KafkaConfig::default()).unwrap();
+        let bad = || Stream::named("n").subject("a").header("has space", "x");
+        // Refused before any network I/O: the broker here is unreachable.
+        let error = provider.create(bad()).await.unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+        let error = provider.update("s", bad()).await.unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
     }
 
     #[test]

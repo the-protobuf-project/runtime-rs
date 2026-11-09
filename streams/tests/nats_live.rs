@@ -520,8 +520,290 @@ async fn jetstream_is_wire_compatible_with_go() {
         raw.headers.get("Nats-Msg-Id").map(|v| v.as_str()),
         Some("retried-1")
     );
+    assert_eq!(raw.headers.iter().count(), 1, "only Nats-Msg-Id without headers");
+    assert!(!info.config.metadata.contains_key("runtime-go.headers"));
     let message = provider::unpack(&streams::Registry::new(), &subject, raw.payload).unwrap();
     assert_eq!(message.id(), "retried-1");
+    assert!(message.headers().is_empty());
 
     provider.delete(&stream.id).await.unwrap();
+}
+
+// ---------------------------------------------------------------- headers
+
+fn headed(subject: &str) -> Stream {
+    Stream::named("headed")
+        .subjects([subject])
+        .header("lang", "rust")
+        .header("site", "plant-3")
+}
+
+fn invalid_header<T: std::fmt::Debug>(result: streams::Result<T>) {
+    assert!(
+        matches!(result, Err(StreamError::InvalidHeader(_))),
+        "{result:?}"
+    );
+}
+
+fn refused_naming<T: std::fmt::Debug>(result: streams::Result<T>, says: &str) {
+    assert!(
+        matches!(&result, Err(StreamError::Unsupported(e)) if e.contains(says)),
+        "{result:?}"
+    );
+}
+
+/// The stream's headers arrive, a publish's own win, and both are NATS
+/// headers another client reads, outside the payload. A message without any
+/// goes out as a plain PUB, as a Go publisher's does.
+#[tokio::test]
+async fn plain_headers_travel_as_nats_headers() {
+    let nc = client().await;
+    let provider = NatsProvider::new(nc.clone(), NatsConfig::default());
+    let subject = unique(SUBJECT);
+    let stream = provider.create(headed(&subject)).await.unwrap();
+    assert_eq!(provider.get(&stream.id).await.unwrap().headers, stream.headers);
+    let m = provider.bind(&stream.id).await.unwrap();
+    let mut raw = nc.subscribe(subject.clone()).await.unwrap();
+    let mut sub = m.subscribe(&subject, &Options::default()).await.unwrap();
+
+    let opts = Options::default().header("site", "plant-4").header("trace", "00-ab");
+    let id = m.publish(&subject, event("ada"), &opts).await.unwrap();
+    let got = next(&mut sub).await;
+    assert_eq!(got.id(), id);
+    assert_eq!(got.headers().get("lang"), Some("rust"));
+    assert_eq!(got.headers().get("site"), Some("plant-4"));
+    assert_eq!(got.headers().get("trace"), Some("00-ab"));
+    let native = next(&mut raw).await;
+    let headers = native.headers.expect("NATS headers");
+    assert_eq!(headers.get("site").map(|v| v.as_str()), Some("plant-4"));
+    let framed = provider::unpack(&streams::Registry::new(), &subject, native.payload).unwrap();
+    assert!(framed.headers().is_empty(), "headers stayed out of the frame");
+
+    let bare = provider.create(Stream::named("bare").subjects([subject.as_str()])).await.unwrap();
+    let bare = provider.bind(&bare.id).await.unwrap();
+    bare.publish(&subject, event("go"), &Options::default()).await.unwrap();
+    assert!(next(&mut sub).await.headers().is_empty());
+    assert!(next(&mut raw).await.headers.is_none(), "a header-less publish is a plain PUB");
+
+    let ids = as_batch(m.as_ref())
+        .unwrap()
+        .publish_batch(&subject, vec![event("a"), event("b")], &Options::default())
+        .await
+        .unwrap();
+    for id in ids {
+        let got = next(&mut sub).await;
+        assert_eq!((got.id(), got.headers().get("lang")), (id.as_str(), Some("rust")));
+    }
+}
+
+#[tokio::test]
+async fn plain_refuses_bad_headers_expiry_and_retain() {
+    let provider = NatsProvider::new(client().await, NatsConfig::default());
+    let subject = unique(SUBJECT);
+    invalid_header(provider.create(headed(&subject).header("Nats-Msg-Id", "x")).await);
+    let (_, m) = declare(&provider, &[&subject]).await;
+    invalid_header(
+        m.publish(&subject, event("a"), &Options::default().header("Nats-TTL", "1"))
+            .await,
+    );
+    invalid_header(
+        m.publish(&subject, event("a"), &Options::default().header("a b", "1"))
+            .await,
+    );
+    let expiring = Options::default().with_expiry(Duration::from_secs(5));
+    refused_naming(m.publish(&subject, event("a"), &expiring).await, "expire");
+    let retained = Options::default().with_retain();
+    refused_naming(m.publish(&subject, event("a"), &retained).await, "retain");
+}
+
+/// The stream's headers live in its metadata, so another provider binding it
+/// stamps the same ones; they arrive on deliveries, redeliveries included,
+/// and the stored message carries them as NATS headers.
+#[tokio::test]
+async fn jetstream_headers_are_stored_and_redelivered() {
+    let nc = client().await;
+    let provider = jetstream().await;
+    let subject = unique(SUBJECT);
+    let stream = provider.create(headed(&subject)).await.unwrap();
+    let other = JetStreamProvider::new(nc.clone(), NatsConfig::default())
+        .await
+        .unwrap();
+    assert_eq!(other.get(&stream.id).await.unwrap().headers, stream.headers);
+    let m = other.bind(&stream.id).await.unwrap();
+
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(&subject, "headed", &Options::default())
+        .await
+        .unwrap();
+    let opts = Options::default().header("site", "plant-4");
+    let id = m.publish(&subject, event("ada"), &opts).await.unwrap();
+    let first = next(&mut deliveries).await;
+    assert_eq!(first.id(), id);
+    assert_eq!(first.headers().get("lang"), Some("rust"));
+    assert_eq!(first.headers().get("site"), Some("plant-4"));
+    assert!(!first.headers().contains_key("Nats-Msg-Id"), "{:?}", first.headers());
+    first.nak().await.unwrap();
+    let second = next(&mut deliveries).await;
+    assert_eq!((second.id(), second.attempt()), (id.as_str(), 2));
+    assert_eq!(second.headers().get("site"), Some("plant-4"));
+    second.ack().await.unwrap();
+
+    let ids = as_batch(m.as_ref())
+        .unwrap()
+        .publish_batch(&subject, vec![event("a"), event("b")], &opts)
+        .await
+        .unwrap();
+    for id in &ids {
+        let d = next(&mut deliveries).await;
+        assert_eq!(d.id(), id);
+        assert_eq!(d.headers().get("site"), Some("plant-4"));
+        d.ack().await.unwrap();
+    }
+
+    let js = async_nats::jetstream::new(nc);
+    let handle = js.get_stream(safe_name(&stream.id)).await.unwrap();
+    let raw = handle.get_raw_message(1).await.unwrap();
+    assert_eq!(raw.headers.get("lang").map(|v| v.as_str()), Some("rust"));
+    assert_eq!(raw.headers.get("Nats-Msg-Id").map(|v| v.as_str()), Some(id.as_str()));
+
+    // An update replaces the set; one without headers leaves none behind.
+    let updated = provider
+        .update(&stream.id, Stream::named("headed").subjects([subject.as_str()]))
+        .await
+        .unwrap();
+    assert!(updated.headers.is_empty());
+    assert!(provider.get(&stream.id).await.unwrap().headers.is_empty());
+    invalid_header(
+        provider
+            .update(&stream.id, headed(&subject).header("Nats-Expected-Stream", "x"))
+            .await,
+    );
+    drop(deliveries);
+    provider.delete(&stream.id).await.unwrap();
+}
+
+#[tokio::test]
+async fn jetstream_refuses_bad_headers_and_retain() {
+    let provider = jetstream().await;
+    let subject = unique(SUBJECT);
+    invalid_header(provider.create(headed(&subject).header("Nats-TTL", "1")).await);
+    invalid_header(provider.create(headed(&subject).header("", "1")).await);
+    let (stream, m) = declare(&provider, &[&subject]).await;
+    let reserved = Options::default().header("Nats-Msg-Id", "x");
+    invalid_header(m.publish(&subject, event("a"), &reserved).await);
+    invalid_header(
+        as_batch(m.as_ref())
+            .unwrap()
+            .publish_batch(&subject, vec![event("a")], &reserved)
+            .await,
+    );
+    let retained = Options::default().with_retain();
+    refused_naming(m.publish(&subject, event("a"), &retained).await, "retain");
+    let short = Options::default().with_expiry(Duration::from_millis(500));
+    refused_naming(m.publish(&subject, event("a"), &short).await, "whole seconds");
+    provider.delete(&stream.id).await.unwrap();
+}
+
+/// `Nats-TTL`: the server removes the message once its expiry passes, so a
+/// consumer that arrives later never sees it, while one without an expiry
+/// stays.
+#[tokio::test]
+async fn jetstream_expiry_removes_the_message() {
+    let nc = client().await;
+    let provider = jetstream().await;
+    let subject = unique(SUBJECT);
+    let (stream, m) = declare(&provider, &[&subject]).await;
+    let expiring = Options::default().with_expiry(Duration::from_secs(1));
+    let gone = m.publish(&subject, event("late"), &expiring).await.unwrap();
+    let kept = m.publish(&subject, event("kept"), &Options::default()).await.unwrap();
+
+    let js = async_nats::jetstream::new(nc);
+    let raw = js
+        .get_stream(safe_name(&stream.id))
+        .await
+        .unwrap()
+        .get_raw_message(1)
+        .await
+        .unwrap();
+    assert_eq!(raw.headers.get("Nats-TTL").map(|v| v.as_str()), Some("1"));
+
+    let deadline = std::time::Instant::now() + WITHIN;
+    loop {
+        let mut handle = js.get_stream(safe_name(&stream.id)).await.unwrap();
+        if handle.info().await.unwrap().state.messages == 1 {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the message did not expire");
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    let mut deliveries = as_positioned(m.as_ref())
+        .unwrap()
+        .consume_from(&subject, "late", Position::Earliest, &Options::default())
+        .await
+        .unwrap();
+    let d = next(&mut deliveries).await;
+    assert_ne!(d.id(), gone);
+    assert_eq!(d.id(), kept);
+    d.ack().await.unwrap();
+    drop(deliveries);
+    provider.delete(&stream.id).await.unwrap();
+}
+
+/// A delayed nak: the server holds the redelivery back for the delay, rather
+/// than the client sleeping.
+#[tokio::test]
+async fn jetstream_nak_after_holds_the_redelivery_back() {
+    let provider = jetstream().await;
+    let subject = unique(SUBJECT);
+    let (stream, m) = declare(&provider, &[&subject]).await;
+    let mut deliveries = as_durable(m.as_ref())
+        .unwrap()
+        .consume(&subject, "patient", &Options::default())
+        .await
+        .unwrap();
+    let id = m.publish(&subject, event("ada"), &Options::default()).await.unwrap();
+
+    let first = next(&mut deliveries).await;
+    assert!(first.can_delay_redelivery());
+    let naked = std::time::Instant::now();
+    first.nak_after(Duration::from_secs(2)).await.unwrap();
+    nothing(&mut deliveries, Duration::from_millis(1500)).await;
+    let second = next(&mut deliveries).await;
+    assert!(naked.elapsed() >= Duration::from_secs(2), "{:?}", naked.elapsed());
+    assert_eq!((second.id(), second.attempt()), (id.as_str(), 2));
+    second.ack().await.unwrap();
+    drop(deliveries);
+    provider.delete(&stream.id).await.unwrap();
+}
+
+/// A stream some other tool created without `allow_msg_ttl` refuses an
+/// expiry by name, rather than as the server's error, until it is updated
+/// through this provider.
+#[tokio::test]
+async fn jetstream_expiry_needs_allow_msg_ttl() {
+    let nc = client().await;
+    let provider = jetstream().await;
+    let subject = unique(SUBJECT);
+    let id = safe_name(&provider::new_stream_id("foreign"));
+    async_nats::jetstream::new(nc)
+        .create_stream(async_nats::jetstream::stream::Config {
+            name: id.clone(),
+            subjects: vec![subject.clone()],
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let m = provider.bind(&id).await.unwrap();
+    let expiring = Options::default().with_expiry(Duration::from_secs(5));
+    refused_naming(m.publish(&subject, event("a"), &expiring).await, "allow_msg_ttl");
+    assert!(m.publish(&subject, event("a"), &Options::default()).await.is_ok());
+
+    provider
+        .update(&id, Stream::named("foreign").subjects([subject.as_str()]))
+        .await
+        .unwrap();
+    let m = provider.bind(&id).await.unwrap();
+    m.publish(&subject, event("a"), &expiring).await.unwrap();
+    provider.delete(&id).await.unwrap();
 }

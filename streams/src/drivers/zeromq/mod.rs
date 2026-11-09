@@ -44,6 +44,23 @@
 //! Two frames, identical to runtime-go: the topic `"<stream id>|<subject>"`,
 //! then the [`pack`](crate::provider::pack)ed payload. The topic is a frame of
 //! its own so a SUB socket filters on it without touching the payload.
+//!
+//! # Headers
+//!
+//! ZeroMQ frames carry bytes and nothing else, so a message's
+//! [`Headers`](crate::Headers) (the stream's defaults with the publish's own
+//! on top) ride inside the payload frame, as version 2 of
+//! [`pack_with`](crate::provider::pack_with). A message without headers is
+//! still a version-1 frame, byte for byte what runtime-go writes; a Go
+//! subscriber refuses a version-2 frame with an error naming the version
+//! rather than misreading it. A stream's default headers live in its
+//! declaration, so each side sees the defaults it declared, and
+//! [`Streams::create`] and [`Streams::update`] refuse invalid ones.
+//!
+//! [`Options::expires`](crate::Options::expires) and
+//! [`Options::retain`](crate::Options::retain) are refused: there is no queue
+//! to expire a message from and nothing kept to hand a later subscriber. With
+//! no deliveries to settle, there is no delayed nak either.
 
 mod manager;
 
@@ -257,6 +274,7 @@ fn declaration(id: String, stream: Stream) -> Stream {
 #[async_trait::async_trait]
 impl Streams for ZmqProvider {
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -281,6 +299,7 @@ impl Streams for ZmqProvider {
     }
 
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        stream.headers.validate()?;
         let mut declared = self.declared_mut();
         let slot = declared.get_mut(id).ok_or_else(|| not_found(id))?;
         *slot = declaration(id.to_owned(), stream);

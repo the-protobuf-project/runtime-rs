@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use async_nats::Client;
+use async_nats::{Client, HeaderMap};
 use futures::StreamExt;
 use tracing::{debug, info, warn};
 
@@ -14,7 +14,10 @@ use crate::{
     Subscriber, Subscription, provider,
 };
 
-use super::{NatsConfig, check_concrete, check_subject};
+use super::{
+    NatsConfig, check_concrete, check_stream_headers, check_subject, from_header_map, outgoing,
+    refuse_retain, to_header_map,
+};
 
 /// A [`Streams`] backed by core NATS, delivering to whoever is listening at the
 /// time.
@@ -29,7 +32,9 @@ use super::{NatsConfig, check_concrete, check_subject};
 /// processes each declare their own, and a restart forgets. What it buys is the
 /// subject check: publishing to a subject the stream never declared fails at
 /// the call that made the typo. Inventing a registry subject instead would
-/// pretend this provider has storage it does not.
+/// pretend this provider has storage it does not. The stream's default
+/// [`headers`](Stream::headers) are part of that declaration and are kept the
+/// same way.
 ///
 /// Cloning is cheap and clones share the declarations.
 #[derive(Clone)]
@@ -95,6 +100,7 @@ fn not_found(id: &str) -> StreamError {
 #[async_trait::async_trait]
 impl Streams for NatsProvider {
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        check_stream_headers(&stream)?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -119,6 +125,7 @@ impl Streams for NatsProvider {
     }
 
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        check_stream_headers(&stream)?;
         let mut declared_streams = self.write();
         let slot = declared_streams.get_mut(id).ok_or_else(|| not_found(id))?;
         *slot = declared(id.to_owned(), stream);
@@ -163,9 +170,22 @@ impl Publisher for NatsManager {
     /// Sends a payload on a subject.
     ///
     /// It returns once the client has queued the frame, not when the server has
-    /// it: core NATS has no acknowledgement to wait for. [`Options::ttl`] is
-    /// refused, because core NATS delivers immediately and cannot schedule.
+    /// it: core NATS has no acknowledgement to wait for. Headers go out as
+    /// NATS headers. [`Options::ttl`] is refused, because core NATS delivers
+    /// immediately and cannot schedule; [`Options::expires`] and
+    /// [`Options::retain`], because it holds nothing to expire or retain.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
+        let headers = self.check_publish(subject, opts)?;
+        let id = provider::publish_id(opts);
+        self.send(subject, &id, &payload, headers.as_ref()).await?;
+        Ok(id)
+    }
+}
+
+impl NatsManager {
+    /// Refuses what no core publish can do, before anything is sent, and
+    /// returns the headers to send, `None` when there are none.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<Option<HeaderMap>> {
         check_subject(&self.stream, subject)?;
         check_concrete(&self.stream, subject)?;
         if opts.delay().is_some() {
@@ -173,21 +193,41 @@ impl Publisher for NatsManager {
                 "core NATS delivers immediately and cannot schedule".into(),
             ));
         }
+        if opts.expiry().is_some() {
+            return Err(StreamError::Unsupported(
+                "core NATS holds no message that could expire; use JetStream for an expiry".into(),
+            ));
+        }
+        refuse_retain(opts, "core NATS keeps nothing for a later subscriber")?;
+        let headers = outgoing(&self.stream, opts)?;
+        Ok((!headers.is_empty()).then(|| to_header_map(&headers)))
+    }
 
-        let id = provider::publish_id(opts);
-        let body = provider::pack(&id, &payload);
+    /// Hands one frame to the client, with headers when there are any.
+    async fn send(
+        &self,
+        subject: &str,
+        id: &str,
+        payload: &Payload,
+        headers: Option<&HeaderMap>,
+    ) -> Result<()> {
+        let body = provider::pack(id, payload);
         let bytes = body.len();
-        self.shared
-            .client
-            .publish(subject.to_owned(), body.into())
-            .await
-            .map_err(|error| {
-                warn!(subject, id, %error, "could not publish");
-                StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
-            })?;
-
+        let client = &self.shared.client;
+        let sent = match headers {
+            Some(headers) => {
+                client
+                    .publish_with_headers(subject.to_owned(), headers.clone(), body.into())
+                    .await
+            }
+            None => client.publish(subject.to_owned(), body.into()).await,
+        };
+        sent.map_err(|error| {
+            warn!(subject, id, %error, "could not publish");
+            StreamError::internal(&format!("nats: cannot publish on {subject:?}"), error)
+        })?;
         debug!(subject, id, bytes, "published");
-        Ok(id)
+        Ok(())
     }
 }
 
@@ -240,11 +280,13 @@ impl Subscriber for NatsManager {
         let mut last = super::LastSubject::default();
         Ok(raw
             .filter_map(move |message| {
+                let headers = from_header_map(message.headers.as_ref());
                 let decoded = provider::unpack_shared(
                     &registry,
                     last.of(message.subject.as_str()),
                     message.payload,
                 )
+                .map(|decoded| decoded.with_headers(headers))
                 .map_err(|error| {
                     // One bad message is not a reason to tear down a
                     // healthy subscription.
@@ -259,15 +301,25 @@ impl Subscriber for NatsManager {
 
 #[async_trait::async_trait]
 impl Batch for NatsManager {
-    /// Publishes each payload in turn. Core NATS publishes without waiting for
-    /// the server, so that is already as batched as this gets.
+    /// Publishes each payload in turn, every one with the same headers. Core
+    /// NATS publishes without waiting for the server, so that is already as
+    /// batched as this gets.
     async fn publish_batch(
         &self,
         subject: &str,
         payloads: Vec<Payload>,
         opts: &Options,
     ) -> Result<Vec<String>> {
-        provider::publish_each(self, subject, payloads, opts).await
+        provider::check_batch(opts)?;
+        let headers = self.check_publish(subject, opts)?;
+        let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
+        let mut failures = Vec::new();
+        for (index, (payload, id)) in payloads.iter().zip(&ids).enumerate() {
+            if let Err(error) = self.send(subject, id, payload, headers.as_ref()).await {
+                failures.push((index, error));
+            }
+        }
+        provider::batch_result(subject, ids, failures)
     }
 }
 
@@ -405,6 +457,66 @@ mod tests {
             matches!(subscribe, Err(StreamError::UnknownSubject { .. })),
             "{subscribe:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn headers_are_checked_at_create_update_and_publish() {
+        let p = provider().await;
+        for bad in [("Nats-Msg-Id", "x"), ("has space", "x"), ("lang", "two\nlines")] {
+            let refused = p
+                .create(Stream::named("s").subjects(["a"]).header(bad.0, bad.1))
+                .await;
+            assert!(
+                matches!(refused, Err(StreamError::InvalidHeader(_))),
+                "{bad:?}: {refused:?}"
+            );
+        }
+        let s = p
+            .create(Stream::named("s").subjects(["a"]).header("lang", "rust"))
+            .await
+            .unwrap();
+        assert_eq!(p.get(&s.id).await.unwrap().headers.get("lang"), Some("rust"));
+        let refused = p
+            .update(&s.id, Stream::named("s").subjects(["a"]).header("Nats-TTL", "1"))
+            .await;
+        assert!(matches!(refused, Err(StreamError::InvalidHeader(_))), "{refused:?}");
+
+        let m = p.bind(&s.id).await.unwrap();
+        let reserved = Options::default().header("Nats-Expected-Stream", "x");
+        let refused = m.publish("a", json(), &reserved).await;
+        assert!(matches!(refused, Err(StreamError::InvalidHeader(_))), "{refused:?}");
+        let batch = as_batch(m.as_ref()).unwrap();
+        let refused = batch.publish_batch("a", vec![json()], &reserved).await;
+        assert!(matches!(refused, Err(StreamError::InvalidHeader(_))), "{refused:?}");
+        let fine = Options::default().header("trace", "00-ab");
+        assert!(m.publish("a", json(), &fine).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn expiry_and_retain_are_refused_by_name() {
+        let p = provider().await;
+        p.create(Stream {
+            id: "s".into(),
+            subjects: vec!["a".into()],
+            ..Stream::default()
+        })
+        .await
+        .unwrap();
+        let m = p.bind("s").await.unwrap();
+        let expiring = Options::default().with_expiry(Duration::from_secs(5));
+        let refused = m.publish("a", json(), &expiring).await;
+        assert!(
+            matches!(&refused, Err(StreamError::Unsupported(e)) if e.contains("expire")),
+            "{refused:?}"
+        );
+        let retained = Options::default().with_retain();
+        let refused = m.publish("a", json(), &retained).await;
+        assert!(
+            matches!(&refused, Err(StreamError::Unsupported(e)) if e.contains("retain")),
+            "{refused:?}"
+        );
+        let zero = Options::default().with_expiry(Duration::ZERO);
+        assert!(m.publish("a", json(), &zero).await.is_ok());
     }
 
     #[tokio::test]

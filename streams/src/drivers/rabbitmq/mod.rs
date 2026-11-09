@@ -71,6 +71,7 @@
 //! in order whatever channel each takes: the next is not sent until the
 //! previous one is confirmed.
 
+mod headers;
 mod manager;
 mod topic;
 
@@ -347,6 +348,13 @@ pub(crate) fn short(what: &str, value: impl Into<String>) -> Result<ShortString>
     })
 }
 
+/// Refuses default headers no publish could send, so a bad one fails at the
+/// call that set it rather than at every publish after.
+fn check_headers(stream: &Stream) -> Result<()> {
+    stream.headers.validate()?;
+    headers::check(&stream.headers)
+}
+
 /// A stream as stored: the caller's fields under `id`, and active.
 fn stored(id: String, stream: Stream) -> Stream {
     Stream {
@@ -365,6 +373,7 @@ impl Streams for RabbitProvider {
     /// it. Declaring is idempotent, so creating a stream another process
     /// already declared under the same id is how two processes share it.
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        check_headers(&stream)?;
         let id = if stream.id.is_empty() {
             safe_name(&crate::provider::new_stream_id(&stream.name))
         } else {
@@ -408,9 +417,11 @@ impl Streams for RabbitProvider {
         Ok(Arc::new(RabbitManager::new(self.shared.clone(), stream)))
     }
 
-    /// Replaces a stream's metadata, preserving its id. The exchange is
-    /// unchanged; managers already bound keep the subjects they were bound with.
+    /// Replaces a stream's metadata, preserving its id, after checking its
+    /// default headers. The exchange is unchanged; managers already bound keep
+    /// the subjects and default headers they were bound with.
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        check_headers(&stream)?;
         let mut declared = self
             .shared
             .declared

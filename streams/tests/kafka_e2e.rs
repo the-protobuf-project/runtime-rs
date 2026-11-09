@@ -425,17 +425,22 @@ async fn lifecycle(auth: Auth) {
 
     // Explicit id, sanitised the way Go sanitises it.
     let explicit = provider
-        .create(Stream {
-            id: "orders:eu".into(),
-            name: "orders".into(),
-            description: "before".into(),
-            subjects: vec![SUBJECT.into()],
-            user_id: "u-1".into(),
-            active: false,
-        })
+        .create(
+            Stream {
+                id: "orders:eu".into(),
+                name: "orders".into(),
+                description: "before".into(),
+                subjects: vec![SUBJECT.into()],
+                user_id: "u-1".into(),
+                active: false,
+                ..Stream::default()
+            }
+            .header("lang", "rust"),
+        )
         .await
         .unwrap();
     assert_eq!(explicit.id, "orders-eu");
+    assert_eq!(explicit.headers.get("lang"), Some("rust"));
     assert!(explicit.active);
 
     // Generated id.
@@ -463,6 +468,12 @@ async fn lifecycle(auth: Auth) {
     let mut want = vec![explicit.id.clone(), generated.id.clone()];
     want.sort();
     assert_eq!(listed, want, "list is ordered by id and holds both");
+    let listed = provider.list().await.unwrap();
+    let listed = listed.iter().find(|s| s.id == explicit.id).unwrap();
+    assert_eq!(
+        listed.headers, explicit.headers,
+        "list carries the default headers"
+    );
 
     // Update adds a subject, which creates its topic.
     let updated = provider
@@ -474,11 +485,48 @@ async fn lifecycle(auth: Auth) {
                 subjects: vec![SUBJECT.into(), OTHER.into()],
                 user_id: "u-2".into(),
                 ..Stream::default()
-            },
+            }
+            .header("lang", "go"),
         )
         .await
         .unwrap();
     assert_eq!(updated.id, explicit.id);
+    assert_eq!(
+        provider
+            .get(&explicit.id)
+            .await
+            .unwrap()
+            .headers
+            .get("lang"),
+        Some("go")
+    );
+    // A bad default is refused at the call that sets it, and changes nothing.
+    for bad in [
+        Stream::named("bad")
+            .subject(SUBJECT)
+            .header("has space", "x"),
+        Stream::named("bad")
+            .subject(SUBJECT)
+            .header("lang", "two\nlines"),
+    ] {
+        assert!(matches!(
+            provider.create(bad.clone()).await,
+            Err(StreamError::InvalidHeader(_))
+        ));
+        assert!(matches!(
+            provider.update(&explicit.id, bad).await,
+            Err(StreamError::InvalidHeader(_))
+        ));
+    }
+    assert_eq!(
+        provider
+            .get(&explicit.id)
+            .await
+            .unwrap()
+            .headers
+            .get("lang"),
+        Some("go")
+    );
     let got = provider.get(&explicit.id).await.unwrap();
     assert_eq!(
         (
@@ -503,6 +551,11 @@ async fn lifecycle(auth: Auth) {
         .unwrap();
     let message = next_message(&mut messages).await;
     assert_eq!((message.id(), message.subject()), (id.as_str(), OTHER));
+    assert_eq!(
+        message.headers().get("lang"),
+        Some("go"),
+        "the stream's default arrived"
+    );
     assert_eq!(message.codec(), "json");
     assert_eq!(message.json::<Event>().unwrap().action, "deleted");
     drop(messages);
@@ -662,6 +715,45 @@ async fn options_are_honoured_or_refused() {
         )
         .await
         .unwrap();
+
+    // expiry and retain: Kafka has neither per message, so both are refused
+    // by name on publish and batch; so is a header the contract refuses.
+    for (opts, says) in [
+        (
+            Options::default().with_expiry(Duration::from_secs(5)),
+            "expiry",
+        ),
+        (Options::default().with_retain(), "retain"),
+    ] {
+        let batch = as_batch(manager.as_ref()).unwrap();
+        for error in [
+            manager
+                .publish(SUBJECT, event("a", "b"), &opts)
+                .await
+                .unwrap_err(),
+            batch
+                .publish_batch(SUBJECT, vec![event("a", "b")], &opts)
+                .await
+                .unwrap_err(),
+        ] {
+            assert!(
+                matches!(&error, StreamError::Unsupported(why) if why.contains(says)),
+                "{error}"
+            );
+        }
+    }
+    let bad = Options::default().header("has:colon", "x");
+    assert!(matches!(
+        manager.publish(SUBJECT, event("a", "b"), &bad).await,
+        Err(StreamError::InvalidHeader(_))
+    ));
+    assert!(matches!(
+        as_batch(manager.as_ref())
+            .unwrap()
+            .publish_batch(SUBJECT, vec![event("a", "b")], &bad)
+            .await,
+        Err(StreamError::InvalidHeader(_))
+    ));
 
     // id on a batch: one id cannot name several messages.
     assert!(matches!(
@@ -998,6 +1090,147 @@ async fn a_native_batch_delivers_every_entry() {
 }
 
 // ---------------------------------------------------------------------------
+// Headers
+// ---------------------------------------------------------------------------
+
+/// What Kafka's own console consumer, inside the broker container on its
+/// in-container listener, prints for the headers of the first `want` records.
+fn console_headers(topic: &str, want: usize) -> Vec<String> {
+    let out = Command::new("docker")
+        .args([
+            "exec",
+            CONTAINER,
+            "/opt/kafka/bin/kafka-console-consumer.sh",
+        ])
+        .args(["--bootstrap-server", "127.0.0.1:29092", "--topic", topic])
+        .args(["--from-beginning", "--max-messages", &want.to_string()])
+        .args(["--timeout-ms", "20000"])
+        .args(["--property", "print.headers=true"])
+        .args(["--property", "print.value=false"])
+        .output()
+        .expect("docker is not on PATH");
+    assert!(
+        out.status.success(),
+        "kafka-console-consumer failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Over both listeners: the stream's defaults and a publish's own arrive on a
+/// tail, a durable consumer and a batch, as Kafka record headers Kafka's own
+/// tools print; a publish without headers writes none.
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_travel_as_record_headers() {
+    let _broker = BROKER.read().await;
+    for auth in [Auth::Mtls, Auth::Scram] {
+        let (provider, prefix) = provider_as(auth, 1).await;
+        let stream = provider
+            .create(
+                Stream::named("headers")
+                    .subject(SUBJECT)
+                    .headers([("lang", "rust"), ("site", "plant-3")]),
+            )
+            .await
+            .unwrap();
+        let manager = provider.bind(&stream.id).await.unwrap();
+        let mut tail = manager
+            .subscribe(SUBJECT, &Options::default())
+            .await
+            .unwrap();
+        manager
+            .publish(
+                SUBJECT,
+                event("ada", "one"),
+                &Options::default().header("site", "plant-4"),
+            )
+            .await
+            .unwrap();
+        let message = next_message(&mut tail).await;
+        assert_eq!(
+            (message.headers().get("lang"), message.headers().get("site")),
+            (Some("rust"), Some("plant-4")),
+            "{auth:?}"
+        );
+        drop(tail);
+        as_batch(manager.as_ref())
+            .unwrap()
+            .publish_batch(
+                SUBJECT,
+                vec![event("b", "1"), event("b", "2")],
+                &Options::default().header("traceparent", "00-ab-cd-01"),
+            )
+            .await
+            .unwrap();
+
+        let mut deliveries = as_positioned(manager.as_ref())
+            .unwrap()
+            .consume_from(
+                SUBJECT,
+                &auth.consumer("headers"),
+                Position::Earliest,
+                &Options::default(),
+            )
+            .await
+            .unwrap();
+        let first = next(&mut deliveries).await;
+        assert_eq!(first.headers().get("site"), Some("plant-4"), "{auth:?}");
+        assert!(!first.can_delay_redelivery());
+        first.ack().await.unwrap();
+        for _ in 0..2 {
+            let delivery = next(&mut deliveries).await;
+            assert_eq!(delivery.headers().get("traceparent"), Some("00-ab-cd-01"));
+            assert_eq!(delivery.headers().get("site"), Some("plant-3"));
+            delivery.ack().await.unwrap();
+        }
+        drop(deliveries);
+
+        // A Go peer's view: the stream's defaults still apply, so build a
+        // header-less stream for the record Go would write.
+        let plain = provider
+            .create(Stream::named("plain").subject(SUBJECT))
+            .await
+            .unwrap();
+        let plain_manager = provider.bind(&plain.id).await.unwrap();
+        let mut tail = plain_manager
+            .subscribe(SUBJECT, &Options::default())
+            .await
+            .unwrap();
+        plain_manager
+            .publish(SUBJECT, event("go", ""), &Options::default())
+            .await
+            .unwrap();
+        assert!(next_message(&mut tail).await.headers().is_empty());
+        drop(tail);
+
+        let topic = format!("{prefix}.{}.{SUBJECT}", stream.id);
+        let plain_topic = format!("{prefix}.{}.{SUBJECT}", plain.id);
+        let (printed, plain_printed) = tokio::task::spawn_blocking(move || {
+            (console_headers(&topic, 3), console_headers(&plain_topic, 1))
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            printed,
+            [
+                "lang:rust,site:plant-4",
+                "lang:rust,site:plant-3,traceparent:00-ab-cd-01",
+                "lang:rust,site:plant-3,traceparent:00-ab-cd-01",
+            ],
+            "{auth:?}"
+        );
+        assert_eq!(plain_printed, ["NO_HEADERS"], "{auth:?}");
+        for id in [&stream.id, &plain.id] {
+            provider.delete(id).await.unwrap();
+        }
+        provider.close().await.unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Durability across a broker restart
 // ---------------------------------------------------------------------------
 
@@ -1065,13 +1298,21 @@ struct Seeded {
 async fn seed(auth: Auth) -> Seeded {
     let prefix = auth.fresh_prefix();
     let provider = provider_at(auth, &prefix, 1).await;
-    let (stream, manager) = declare(&provider).await;
+    let stream = provider
+        .create(Stream::named("e2e").subject(SUBJECT).header("lang", "rust"))
+        .await
+        .unwrap();
+    let manager = provider.bind(&stream.id).await.unwrap();
     let acked = manager
         .publish(SUBJECT, event("acked", ""), &Options::default())
         .await
         .unwrap();
     let pending = manager
-        .publish(SUBJECT, event("pending", ""), &Options::default())
+        .publish(
+            SUBJECT,
+            event("pending", ""),
+            &Options::default().header("attempt", "first"),
+        )
         .await
         .unwrap();
     let mut deliveries = as_positioned(manager.as_ref())
@@ -1120,6 +1361,11 @@ async fn verify(seeded: Seeded) {
         .await
         .expect("the declaration did not survive");
     assert_eq!(stream.subjects, [SUBJECT]);
+    assert_eq!(
+        stream.headers.get("lang"),
+        Some("rust"),
+        "{auth:?}: the default headers did not survive"
+    );
     let manager = provider.bind(&stream_id).await.unwrap();
 
     // The committed offset survived: the name resumes at the unacked message.
@@ -1133,6 +1379,14 @@ async fn verify(seeded: Seeded) {
         delivery.id(),
         pending,
         "{auth:?}: the acked message came back, or the unacked one did not"
+    );
+    assert_eq!(
+        (
+            delivery.headers().get("lang"),
+            delivery.headers().get("attempt")
+        ),
+        (Some("rust"), Some("first")),
+        "{auth:?}: the redelivery lost its headers"
     );
     delivery.ack().await.unwrap();
     drop(resumed);
@@ -1151,6 +1405,7 @@ async fn verify(seeded: Seeded) {
     for want in [&acked, &pending] {
         let delivery = next(&mut replay).await;
         assert_eq!(delivery.id(), want.as_str());
+        assert_eq!(delivery.headers().get("lang"), Some("rust"));
         delivery.ack().await.unwrap();
     }
     drop(replay);

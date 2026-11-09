@@ -3,7 +3,8 @@
 use std::{collections::HashMap, collections::VecDeque, sync::Arc, time::Duration};
 
 use async_nats::{
-    Client, Subject,
+    Client, HeaderMap, Subject,
+    header::NATS_MESSAGE_TTL,
     jetstream::{
         self, AckKind, ErrorCode,
         consumer::{
@@ -18,14 +19,16 @@ use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    Acker, Batch, Deliveries, Delivery, Durable, Manager, Options, Payload, Position, Positioned,
-    Publisher, Registry, Result, Stream, StreamError, Streams, Subscriber, Subscription, provider,
+    Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Options, Payload, Position,
+    Positioned, Publisher, Registry, Result, Stream, StreamError, Streams, Subscriber,
+    Subscription, provider,
 };
 
 use super::{
     LastSubject, NatsConfig,
     acks::{self, AckError, Acks, Credit, Pending},
-    check_concrete, check_subject,
+    check_concrete, check_stream_headers, check_subject, from_header_map, outgoing,
+    refuse_retain, to_header_map,
 };
 
 /// Metadata key for [`Stream::name`].
@@ -40,6 +43,12 @@ pub const META_NAME: &str = "runtime-go.name";
 pub const META_USER: &str = "runtime-go.user_id";
 /// Metadata key for [`Stream::active`], stored as `"true"`; see [`META_NAME`].
 pub const META_ACTIVE: &str = "runtime-go.active";
+/// Metadata key for [`Stream::headers`]: the headers as one JSON object, as
+/// [`Stream`] serialises them (`{"lang":"rust"}`), and absent when there are
+/// none, so a stream without headers has exactly the metadata runtime-go
+/// writes. One key rather than one per header keeps the set whole: an update
+/// replaces it, never leaves a removed header behind. See [`META_NAME`].
+pub const META_HEADERS: &str = "runtime-go.headers";
 
 /// A [`Streams`] backed by JetStream, which keeps a log and remembers what each
 /// named consumer has handled.
@@ -50,6 +59,11 @@ pub const META_ACTIVE: &str = "runtime-go.active";
 ///
 /// Streams are real server-side objects here: a stream one process creates,
 /// another binds, and a Go service created it just as well.
+///
+/// Every stream it creates or updates has `allow_msg_ttl` set, so
+/// [`Options::expires`] works on it (NATS 2.11 or later). The server will not
+/// turn that off again, so an update that leaves it unset, from an older
+/// runtime-go for one, is refused by the server.
 ///
 /// Cloning is cheap.
 #[derive(Clone)]
@@ -138,6 +152,7 @@ fn not_found(id: &str) -> StreamError {
 #[async_trait::async_trait]
 impl Streams for JetStreamProvider {
     async fn create(&self, stream: Stream) -> Result<Stream> {
+        check_stream_headers(&stream)?;
         let id = if stream.id.is_empty() {
             provider::new_stream_id(&stream.name)
         } else {
@@ -181,6 +196,7 @@ impl Streams for JetStreamProvider {
     }
 
     async fn update(&self, id: &str, stream: Stream) -> Result<Stream> {
+        check_stream_headers(&stream)?;
         let name = safe_name(id);
         self.shared
             .context
@@ -233,15 +249,21 @@ impl Streams for JetStreamProvider {
 
 /// The JetStream config for a declaration.
 fn config_for(name: &str, stream: &Stream) -> stream::Config {
+    let mut metadata = HashMap::from([
+        (META_NAME.to_owned(), stream.name.clone()),
+        (META_USER.to_owned(), stream.user_id.clone()),
+        (META_ACTIVE.to_owned(), "true".to_owned()),
+    ]);
+    if !stream.headers.is_empty() {
+        let json = serde_json::to_string(&stream.headers).expect("a string map serialises");
+        metadata.insert(META_HEADERS.to_owned(), json);
+    }
     stream::Config {
         name: name.to_owned(),
         description: (!stream.description.is_empty()).then(|| stream.description.clone()),
         subjects: stream.subjects.clone(),
-        metadata: HashMap::from([
-            (META_NAME.to_owned(), stream.name.clone()),
-            (META_USER.to_owned(), stream.user_id.clone()),
-            (META_ACTIVE.to_owned(), "true".to_owned()),
-        ]),
+        metadata,
+        allow_message_ttl: true,
         ..stream::Config::default()
     }
 }
@@ -265,7 +287,21 @@ fn to_stream(config: &stream::Config) -> Stream {
         subjects: config.subjects.clone(),
         user_id: meta(META_USER),
         active: meta(META_ACTIVE) == "true",
+        headers: stored_headers(config),
     }
+}
+
+/// The stream headers kept under [`META_HEADERS`]. Ones another tool wrote
+/// that do not parse are left off, with a warning, rather than making the
+/// stream unreadable.
+fn stored_headers(config: &stream::Config) -> Headers {
+    let Some(json) = config.metadata.get(META_HEADERS) else {
+        return Headers::new();
+    };
+    serde_json::from_str(json).unwrap_or_else(|error| {
+        warn!(stream = config.name, %error, "ignoring unreadable stream headers");
+        Headers::new()
+    })
 }
 
 /// Makes an id usable as a JetStream stream or consumer name.
@@ -307,17 +343,22 @@ impl Publisher for JetStreamManager {
     /// The message id goes out as `Nats-Msg-Id`, so a publish retried after an
     /// ambiguous failure is collapsed by the server's duplicate window rather
     /// than appended twice. That is what lets [`with_retry`](crate::with_retry)
-    /// retry safely: the backend recognises the repeat. [`Options::ttl`] is
-    /// refused, because JetStream delivers when it is read, not on a timer.
+    /// retry safely: the backend recognises the repeat. Headers go out as
+    /// NATS headers beside it, and [`Options::expires`] as `Nats-TTL`.
+    /// [`Options::ttl`] is refused, because JetStream delivers when it is
+    /// read, not on a timer, and [`Options::retain`], because its only
+    /// last-value form would cap the stream at one message per subject.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
-        self.check_publish(subject, opts)?;
+        let headers = self.check_publish(subject, opts)?;
         let id = provider::publish_id(opts);
         let target = Subject::from(subject);
         let acks = self.acks().await?;
         let mut credit = Credit::new(acks);
         credit.take(1).await;
         credit.spend();
-        let pending = self.send(acks, &target, &id, &payload).await?;
+        let pending = self
+            .send(acks, &target, &id, headers.as_ref(), &payload)
+            .await?;
         self.stored(subject, &id, pending).await?;
         Ok(id)
     }
@@ -328,8 +369,10 @@ impl Publisher for JetStreamManager {
 const BATCH_IN_FLIGHT: usize = 1024;
 
 impl JetStreamManager {
-    /// Refuses what no JetStream publish can do, before anything is sent.
-    fn check_publish(&self, subject: &str, opts: &Options) -> Result<()> {
+    /// Refuses what no JetStream publish can do, before anything is sent,
+    /// and returns the headers to send beside `Nats-Msg-Id`, `None` when
+    /// there are none.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<Option<HeaderMap>> {
         check_subject(&self.stream, subject)?;
         check_concrete(&self.stream, subject)?;
         if opts.delay().is_some() {
@@ -337,7 +380,33 @@ impl JetStreamManager {
                 "JetStream delivers when it is read, not on a timer".into(),
             ));
         }
-        Ok(())
+        refuse_retain(
+            opts,
+            "JetStream's last-per-subject form caps the stream at one message per subject, \
+             which would discard the log durable consumers read",
+        )?;
+        let ttl = match opts.expiry() {
+            Some(expiry) => {
+                if !self.handle.cached_info().config.allow_message_ttl {
+                    return Err(StreamError::Unsupported(format!(
+                        "stream {} was created without allow_msg_ttl, so it cannot expire a \
+                         message; update it through this provider to enable it",
+                        self.stream.id
+                    )));
+                }
+                Some(ttl_seconds(expiry)?)
+            }
+            None => None,
+        };
+        let headers = outgoing(&self.stream, opts)?;
+        if headers.is_empty() && ttl.is_none() {
+            return Ok(None);
+        }
+        let mut map = to_header_map(&headers);
+        if let Some(ttl) = ttl {
+            map.insert(NATS_MESSAGE_TTL, ttl.to_string());
+        }
+        Ok(Some(map))
     }
 
     /// The connection's PubAck routing, started on first use.
@@ -360,10 +429,11 @@ impl JetStreamManager {
         acks: &Acks,
         subject: &Subject,
         id: &str,
+        headers: Option<&HeaderMap>,
         payload: &Payload,
     ) -> Result<Pending> {
         let body = provider::pack(id, payload);
-        acks.send(subject.clone(), id, body.into())
+        acks.send(subject.clone(), id, headers, body.into())
             .await
             .map_err(|error| publish_failed(subject.as_str(), id, &error))
     }
@@ -376,6 +446,19 @@ impl JetStreamManager {
         debug!(subject, id, "published");
         Ok(())
     }
+}
+
+/// An expiry as `Nats-TTL` seconds. The server counts whole seconds and
+/// refuses less than one, so a fraction rounds up (the message lives at most
+/// that much longer, never shorter) and under a second is refused here, by
+/// name, rather than by the server.
+fn ttl_seconds(expiry: Duration) -> Result<u64> {
+    if expiry < Duration::from_secs(1) {
+        return Err(StreamError::Unsupported(format!(
+            "JetStream expires messages in whole seconds, at least one; {expiry:?} is shorter"
+        )));
+    }
+    Ok(expiry.as_secs() + u64::from(expiry.subsec_nanos() > 0))
 }
 
 fn publish_failed(subject: &str, id: &str, error: &AckError) -> StreamError {
@@ -442,6 +525,7 @@ impl Subscriber for JetStreamManager {
                         last.of(message.subject.as_str()),
                         message.payload.clone(),
                     )
+                    .map(|decoded| decoded.with_headers(from_header_map(message.headers.as_ref())))
                     .map_err(|error| {
                         warn!(subject = %message.subject, %error, "dropping a malformed message");
                     })
@@ -613,7 +697,7 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
                 message.payload.clone(),
             );
             let decoded = match decoded {
-                Ok(decoded) => decoded,
+                Ok(decoded) => decoded.with_headers(from_header_map(message.headers.as_ref())),
                 Err(error) => {
                     // Nothing will ever decode this, so no handler will ever
                     // ack it and it would redeliver forever. Terminate it:
@@ -647,7 +731,8 @@ fn deliveries(raw: Raw, lent: Lent) -> Deliveries {
 
 /// Settles one JetStream delivery. JetStream has a true negative
 /// acknowledgement, so a nak returns the message at once rather than waiting
-/// out the ack timeout.
+/// out the ack timeout, and a delayed one has the server hold the redelivery
+/// back.
 struct JetStreamAck {
     message: jetstream::Message,
     metrics: provider::Metrics,
@@ -675,6 +760,17 @@ impl Acker for JetStreamAck {
     async fn nak(self: Box<Self>) -> Result<()> {
         self.settle(AckKind::Nak(None), "nak").await
     }
+
+    /// A `-NAK` carrying the delay: the server redelivers no sooner than
+    /// `delay` from when it reads it. A zero delay is a plain nak.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        let delay = (!delay.is_zero()).then_some(delay);
+        self.settle(AckKind::Nak(delay), "nak").await
+    }
+
+    fn delays_nak(&self) -> bool {
+        true
+    }
 }
 
 #[async_trait::async_trait]
@@ -689,7 +785,8 @@ impl Batch for JetStreamManager {
     /// `MAX_PENDING` across every publisher. While that limit is reached, the
     /// batch settles its own oldest waits before it waits on anyone else, so
     /// it never holds room it is itself waiting for. Each message carries its
-    /// own id as `Nats-Msg-Id`, so a retried batch is collapsed by the
+    /// own id as `Nats-Msg-Id`, beside the same headers and expiry as every
+    /// other message of the batch, so a retried batch is collapsed by the
     /// duplicate window just as a retried single publish is. A message that
     /// fails is reported by index in [`StreamError::PartialBatch`]; the others
     /// stand.
@@ -700,7 +797,7 @@ impl Batch for JetStreamManager {
         opts: &Options,
     ) -> Result<Vec<String>> {
         provider::check_batch(opts)?;
-        self.check_publish(subject, opts)?;
+        let headers = self.check_publish(subject, opts)?;
         let target = Subject::from(subject);
         let acks = self.acks().await?;
         let mut credit = Credit::new(acks);
@@ -728,7 +825,10 @@ impl Batch for JetStreamManager {
                 }
             }
             credit.spend();
-            match self.send(acks, &target, id, payload).await {
+            match self
+                .send(acks, &target, id, headers.as_ref(), payload)
+                .await
+            {
                 Ok(pending) => waiting.push_back((index, pending)),
                 Err(error) => {
                     credit.finish();
@@ -791,6 +891,7 @@ mod tests {
             subjects: vec!["orders.*".into()],
             user_id: "ada".into(),
             active: false,
+            ..Stream::default()
         };
         let config = config_for("S-1", &stream);
         assert_eq!(config.name, "S-1");
@@ -800,6 +901,39 @@ mod tests {
 
         let back = to_stream(&config);
         assert_eq!(back, stream_from("S-1".into(), stream));
+    }
+
+    #[test]
+    fn stream_headers_live_in_one_metadata_key() {
+        let plain = config_for("S", &Stream::named("orders"));
+        assert!(!plain.metadata.contains_key(META_HEADERS), "Go's metadata, unchanged");
+        assert!(plain.allow_message_ttl);
+        assert!(to_stream(&plain).headers.is_empty());
+
+        let stream = Stream::named("orders")
+            .subjects(["orders.*"])
+            .headers([("lang", "rust"), ("site", "plant-3")]);
+        let config = config_for("S", &stream);
+        assert_eq!(
+            config.metadata[META_HEADERS],
+            r#"{"lang":"rust","site":"plant-3"}"#
+        );
+        assert_eq!(to_stream(&config).headers, stream.headers);
+
+        let mut garbled = config;
+        garbled
+            .metadata
+            .insert(META_HEADERS.to_owned(), "not json".to_owned());
+        assert!(to_stream(&garbled).headers.is_empty());
+    }
+
+    #[test]
+    fn expiry_is_whole_seconds_rounded_up() {
+        assert_eq!(ttl_seconds(Duration::from_secs(5)).unwrap(), 5);
+        assert_eq!(ttl_seconds(Duration::from_millis(1500)).unwrap(), 2);
+        assert_eq!(ttl_seconds(Duration::from_secs(1)).unwrap(), 1);
+        let error = ttl_seconds(Duration::from_millis(999)).unwrap_err();
+        assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
     }
 
     #[test]

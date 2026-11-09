@@ -1,7 +1,7 @@
 //! A stream bound to its exchange: publishing, subscribing, and durable
 //! consumers.
 
-use std::{sync::Arc, task::Poll};
+use std::{sync::Arc, task::Poll, time::Duration};
 
 use futures::StreamExt;
 use lapin::{
@@ -21,7 +21,7 @@ use crate::{
 };
 
 use super::{
-    Shared, queue_name, short,
+    Shared, headers, queue_name, short,
     topic::{declares, has_wildcard, safe_name},
 };
 
@@ -183,17 +183,21 @@ impl Publisher for RabbitManager {
     /// is for.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let id = provider::publish_id(opts);
-        self.check_publish(subject, opts)?;
+        let properties = self.check_publish(subject, opts)?;
         let channel = self.shared.publish_channel().await?;
-        let pending = self.send(&channel, subject, &id, &payload).await?;
+        let pending = self
+            .send(&channel, subject, &id, &payload, properties)
+            .await?;
         confirmed(subject, &id, pending).await?;
         Ok(id)
     }
 }
 
 impl RabbitManager {
-    /// Refuses what a publish cannot honour, before anything is sent.
-    fn check_publish(&self, subject: &str, opts: &Options) -> Result<()> {
+    /// Refuses what a publish cannot honour, before anything is sent, and
+    /// returns the properties every message of the call goes out with: the
+    /// stream's and the publish's headers, and the expiry.
+    fn check_publish(&self, subject: &str, opts: &Options) -> Result<BasicProperties> {
         self.check_subject(subject)?;
         if has_wildcard(subject) {
             // A binding key routes nothing when published on; it is declared
@@ -211,13 +215,32 @@ impl RabbitManager {
                     .into(),
             ));
         }
-        Ok(())
+        if opts.retain {
+            return Err(StreamError::Unsupported(
+                "RabbitMQ has no last value per routing key: a queue hands each message to \
+                 one consumer and then forgets it, and a subscriber that binds later starts \
+                 empty"
+                    .into(),
+            ));
+        }
+        let outgoing = provider::outgoing(&self.stream, opts)?;
+        headers::check(&outgoing)?;
+        let mut properties = BasicProperties::default()
+            .with_delivery_mode(PERSISTENT)
+            .with_content_type(CONTENT_TYPE.into());
+        if let Some(table) = headers::table(&outgoing) {
+            properties = properties.with_headers(table);
+        }
+        if let Some(expires) = opts.expiry() {
+            properties = properties.with_expiration(headers::expiration(expires)?);
+        }
+        Ok(properties)
     }
 
-    /// Hands one persistent message to `channel` and returns its pending
-    /// confirmation without waiting for it, so a batch can send everything
-    /// before awaiting anything. The caller has run
-    /// [`check_publish`](Self::check_publish).
+    /// Hands one persistent message to `channel` under `properties`, from
+    /// [`check_publish`](Self::check_publish), with its id added, and returns
+    /// its pending confirmation without waiting for it, so a batch can send
+    /// everything before awaiting anything.
     ///
     /// Nothing is sent until the returned future is first polled; that poll
     /// numbers the message for confirmation and queues its frames, so futures
@@ -228,12 +251,12 @@ impl RabbitManager {
         subject: &str,
         id: &str,
         payload: &Payload,
+        properties: BasicProperties,
     ) -> Result<PublisherConfirm> {
+        // Headers travel in the properties, never in the frame, so the body is
+        // runtime-go's version-1 frame whatever the headers.
         let body = provider::pack(id, payload);
-        let properties = BasicProperties::default()
-            .with_message_id(short("message id", id)?)
-            .with_delivery_mode(PERSISTENT)
-            .with_content_type(CONTENT_TYPE.into());
+        let properties = properties.with_message_id(short("message id", id)?);
         let exchange = short("exchange name", self.exchange.as_str())?;
         let routing_key = short("routing key", subject)?;
         channel
@@ -335,6 +358,7 @@ impl Subscriber for RabbitManager {
         let messages = consumer.filter_map(move |delivery| {
             let message = match delivery {
                 Ok(d) => provider::unpack_shared(&registry, last.of(d.routing_key.as_str()), d.data)
+                    .map(|message| message.with_headers(headers::received(&d.properties)))
                     .inspect_err(|e| {
                         tracing::warn!(subject = %wanted, error = %e, "rabbitmq: dropping a malformed message");
                     })
@@ -400,10 +424,12 @@ impl Durable for RabbitManager {
                         routing_key,
                         data,
                         acker,
+                        properties,
                         ..
                     } = d;
                     match provider::unpack_shared(&registry, last.of(routing_key.as_str()), data) {
                         Ok(message) => {
+                            let message = message.with_headers(headers::received(&properties));
                             metrics.delivered(&subject, &consumer);
                             let acker = AmqpAck {
                                 acker,
@@ -459,13 +485,13 @@ impl Batch for RabbitManager {
         opts: &Options,
     ) -> Result<Vec<String>> {
         provider::check_batch(opts)?;
-        self.check_publish(subject, opts)?;
+        let properties = self.check_publish(subject, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
         let channel = self.shared.publish_channel().await?;
         let sends = payloads
             .iter()
             .zip(&ids)
-            .map(|(payload, id)| self.send(&channel, subject, id, payload));
+            .map(|(payload, id)| self.send(&channel, subject, id, payload, properties.clone()));
         let pending = in_order(sends).await;
         let mut failures = Vec::new();
         for (index, (sent, id)) in pending.into_iter().zip(&ids).enumerate() {
@@ -585,6 +611,32 @@ impl Acker for AmqpAck {
             })
             .await;
         self.settled(sent, "return the message", "nak")
+    }
+
+    /// Refused: RabbitMQ cannot hold a requeued message back.
+    ///
+    /// A nack requeues at once, and the two ways to wait need what this
+    /// provider does not assume: the delayed-message exchange plugin, or a
+    /// dead-letter exchange with a TTL'd retry queue per consumer, which adds
+    /// queues runtime-go does not know and lets the retried message overtake or
+    /// fall behind the rest. The message is requeued now rather than left
+    /// unsettled, where it would hold a prefetch slot until the consumer
+    /// closed, and RabbitMQ's delivery timeout would close the consumer's
+    /// channel. The error says so.
+    async fn nak_after(self: Box<Self>, delay: Duration) -> Result<()> {
+        let sent = self
+            .acker
+            .nack(BasicNackOptions {
+                requeue: true,
+                ..Default::default()
+            })
+            .await;
+        self.settled(sent, "return the message", "nak")?;
+        Err(StreamError::Unsupported(format!(
+            "RabbitMQ cannot hold a redelivery back for {delay:?} without the \
+             delayed-message plugin or a dead-letter retry queue; the message was requeued \
+             for immediate redelivery"
+        )))
     }
 }
 

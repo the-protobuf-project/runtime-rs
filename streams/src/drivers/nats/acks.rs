@@ -11,7 +11,7 @@
 //! fails the ones that wait too long.
 //!
 //! On the wire nothing changes: the same subject, the same `Nats-Msg-Id`
-//! header, the same frame, and a reply subject under the client's inbox
+//! header beside the message's own, the same frame, and a reply subject under the client's inbox
 //! prefix, so the user permissions a JetStream publisher already needs
 //! (`_INBOX.>`) still cover it.
 
@@ -193,13 +193,14 @@ impl Acks {
         })
     }
 
-    /// Sends `payload` to `subject` under `id`, returning once it is on its
-    /// way. The receiver resolves when the server has stored it, or refused,
-    /// or `ACK_TIMEOUT` has passed.
+    /// Sends `payload` to `subject` under `id`, with `headers` beside
+    /// `Nats-Msg-Id`, returning once it is on its way. The receiver resolves
+    /// when the server has stored it, or refused, or `ACK_TIMEOUT` has passed.
     pub(super) async fn send(
         &self,
         subject: Subject,
         id: &str,
+        headers: Option<&HeaderMap>,
         payload: Bytes,
     ) -> Result<Pending, AckError> {
         let token = self.inner.next.fetch_add(1, Ordering::Relaxed);
@@ -221,7 +222,7 @@ impl Acks {
                 "the connection's JetStream ack subscription has ended".into(),
             ));
         }
-        let mut headers = HeaderMap::new();
+        let mut headers = headers.cloned().unwrap_or_default();
         headers.insert(NATS_MESSAGE_ID, id);
         let reply = format!("{}{token}", self.inner.prefix);
         if let Err(error) = self

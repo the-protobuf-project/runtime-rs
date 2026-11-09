@@ -14,14 +14,16 @@ use rdkafka::{
         BaseConsumer, CommitMode, Consumer, ConsumerContext, RebalanceProtocol, StreamConsumer,
     },
     error::KafkaError,
+    message::{Header, OwnedHeaders},
     producer::{FutureProducer, FutureRecord},
     types::{RDKafkaErrorCode, RDKafkaRespErr},
 };
 use tokio::sync::{Notify, mpsc};
 
 use crate::{
-    Acker, Batch, Deliveries, Delivery, Durable, Manager, Message, Options, Payload, Position,
-    Positioned, Publisher, Result, Stream, StreamError, Subscriber, Subscription, provider,
+    Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Message, Options, Payload,
+    Position, Positioned, Publisher, Result, Stream, StreamError, Subscriber, Subscription,
+    provider,
 };
 
 use super::{DIAL_TIMEOUT, Inner, blocking, reader_group, safe_name};
@@ -97,27 +99,47 @@ impl KafkaManager {
         ))
     }
 
-    /// Refuses a delayed delivery, which Kafka has no way to schedule.
-    fn check_ttl(opts: &Options) -> Result<()> {
+    /// Refuses what Kafka cannot do per message: deliver later, expire, or
+    /// keep a last value.
+    fn check_options(opts: &Options) -> Result<()> {
         if opts.delay().is_some() {
             return Err(StreamError::Unsupported(
                 "Kafka delivers when it is read, not on a timer".into(),
+            ));
+        }
+        if opts.expiry().is_some() {
+            return Err(StreamError::Unsupported(
+                "Kafka has no per-message expiry: a record stays readable until the topic's \
+                 retention removes it, whoever has or has not read it"
+                    .into(),
+            ));
+        }
+        if opts.retain {
+            return Err(StreamError::Unsupported(
+                "Kafka has no per-message retain: the nearest thing, a compacted topic, keeps \
+                 only the newest record per key for the whole subject, which would change \
+                 what every reader of the stream sees"
+                    .into(),
             ));
         }
         Ok(())
     }
 
     /// Appends one framed payload to `topic` through `producer`, keyed by the
-    /// partition key.
+    /// partition key, carrying `headers` as its record headers.
     async fn send(
         producer: &FutureProducer,
         topic: &str,
         frame: &[u8],
         key: Option<&str>,
+        headers: Option<OwnedHeaders>,
     ) -> Result<()> {
         let mut record = FutureRecord::<str, [u8]>::to(topic).payload(frame);
         if let Some(key) = key {
             record = record.key(key);
+        }
+        if let Some(headers) = headers {
+            record = record.headers(headers);
         }
         producer
             .send(record, QUEUE_TIMEOUT)
@@ -265,6 +287,7 @@ impl KafkaManager {
                 };
                 let (partition, offset) = (record.partition(), record.offset());
                 let frame = Bytes::copy_from_slice(record.payload().unwrap_or_default());
+                let headers = received(record.headers(), &subject, offset);
                 drop(record);
                 commits.delivered(partition, offset);
                 let settle = Settle {
@@ -276,7 +299,7 @@ impl KafkaManager {
                     name: Arc::clone(&name),
                 };
                 let message = match provider::unpack_shared(&registry, &subject, frame) {
-                    Ok(message) => message,
+                    Ok(message) => message.with_headers(headers),
                     Err(error) => {
                         // Nothing will ever decode this, so no handler will ever
                         // acknowledge it and the group would stall on it
@@ -439,6 +462,71 @@ impl Start {
     }
 }
 
+/// `headers` as Kafka record headers, each value its UTF-8 bytes; none when
+/// there are none, so a header-less record is exactly what runtime-go writes.
+fn record_headers(headers: &Headers) -> Option<OwnedHeaders> {
+    if headers.is_empty() {
+        return None;
+    }
+    Some(headers.iter().fold(
+        OwnedHeaders::new_with_capacity(headers.len()),
+        |out, (key, value)| {
+            out.insert(Header {
+                key,
+                value: Some(value),
+            })
+        },
+    ))
+}
+
+/// The headers a record arrived with.
+///
+/// Kafka headers are bytes and may repeat a key; this contract's are one
+/// string per key. A repeated key takes its last value, as Kafka's own
+/// `lastHeader` does, and a null value reads as empty. A header that is not
+/// UTF-8 can only come from another producer and cannot be represented, so it
+/// is skipped with a warning rather than costing the message its payload.
+fn received(
+    headers: Option<&impl rdkafka::message::Headers>,
+    subject: &str,
+    offset: i64,
+) -> Headers {
+    let mut out = Headers::new();
+    let Some(headers) = headers else {
+        return out;
+    };
+    for index in 0..headers.count() {
+        // rdkafka unwraps a header key's UTF-8 conversion, so a foreign
+        // producer's binary key would panic and end the reading task; caught
+        // here it costs only that header.
+        let header = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            headers.try_get(index).map(|header| {
+                (
+                    header.key.to_owned(),
+                    header.value.map(<[u8]>::to_vec).unwrap_or_default(),
+                )
+            })
+        }));
+        match header {
+            Ok(Some((key, value))) => match String::from_utf8(value) {
+                Ok(value) => {
+                    out.insert(key, value);
+                }
+                Err(_) => tracing::warn!(subject, offset, key = %key,
+                    "skipping a header whose value is not UTF-8"),
+            },
+            Ok(None) => {}
+            Err(_) => tracing::warn!(
+                subject,
+                offset,
+                index,
+                "skipping a header whose key is not UTF-8"
+            ),
+        }
+    }
+    out
+}
+
 /// Turns a channel into the stream a caller holds. Dropping the stream drops
 /// the receiver, which is what tells the reading task to stop.
 fn receive<T: Send + 'static>(rx: mpsc::Receiver<T>) -> futures::stream::BoxStream<'static, T> {
@@ -454,15 +542,17 @@ impl Publisher for KafkaManager {
     /// acknowledge it.
     ///
     /// The partition key becomes the record key, which decides the partition
-    /// and so what is ordered relative to what.
+    /// and so what is ordered relative to what. Headers become record headers.
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         self.check_subject(subject)?;
-        Self::check_ttl(opts)?;
+        Self::check_options(opts)?;
+        let headers = record_headers(&provider::outgoing(&self.stream, opts)?);
         let id = provider::publish_id(opts);
         let frame = provider::pack(&id, &payload);
         let topic = self.topic(subject);
         let key = opts.partition_key.as_deref();
-        if let Err(error) = Self::send(self.inner.producer(key), &topic, &frame, key).await {
+        if let Err(error) = Self::send(self.inner.producer(key), &topic, &frame, key, headers).await
+        {
             tracing::error!(subject, id = %id, error = %error, "could not publish");
             return Err(error);
         }
@@ -489,7 +579,8 @@ impl Batch for KafkaManager {
     ) -> Result<Vec<String>> {
         self.check_subject(subject)?;
         provider::check_batch(opts)?;
-        Self::check_ttl(opts)?;
+        Self::check_options(opts)?;
+        let headers = record_headers(&provider::outgoing(&self.stream, opts)?);
 
         let topic = self.topic(subject);
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
@@ -504,7 +595,9 @@ impl Batch for KafkaManager {
         let results = join_all(
             frames
                 .iter()
-                .map(|frame| Self::send(producer, &topic, frame, key)),
+                // Every record carries the same headers; librdkafka takes
+                // ownership of each record's own copy.
+                .map(|frame| Self::send(producer, &topic, frame, key, headers.clone())),
         )
         .await;
         let failures = results
@@ -553,9 +646,10 @@ impl Subscriber for KafkaManager {
                     Ok(record) => {
                         let offset = record.offset();
                         let frame = Bytes::copy_from_slice(record.payload().unwrap_or_default());
+                        let headers = received(record.headers(), &subject, offset);
                         drop(record);
                         match provider::unpack_shared(&registry, &subject, frame) {
-                            Ok(message) => message,
+                            Ok(message) => message.with_headers(headers),
                             Err(error) => {
                                 tracing::warn!(subject = %subject, offset, error = %error,
                                     "dropping a malformed message");
@@ -849,7 +943,7 @@ impl Acker for Settle {
 
 #[cfg(test)]
 mod tests {
-    use rdkafka::ClientConfig;
+    use rdkafka::{ClientConfig, message::Headers as _};
 
     use super::*;
     use crate::drivers::kafka::{KafkaConfig, KafkaProvider};
@@ -929,6 +1023,110 @@ mod tests {
             batch(Options::default(), "typo").await,
             Err(StreamError::UnknownSubject { .. })
         ));
+    }
+
+    #[test]
+    fn expiry_and_retain_are_refused_by_name() {
+        let refused = |opts: Options| match KafkaManager::check_options(&opts) {
+            Err(StreamError::Unsupported(why)) => why,
+            other => panic!("{other:?}"),
+        };
+        assert!(refused(Options::default().with_expiry(Duration::from_secs(5))).contains("expiry"));
+        assert!(refused(Options::default().with_retain()).contains("compacted"));
+        // A zero expiry is none, as a zero TTL is.
+        assert!(
+            KafkaManager::check_options(&Options::default().with_expiry(Duration::ZERO)).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_and_batch_refuse_expiry_retain_and_bad_headers() {
+        let manager = manager();
+        for opts in [
+            Options::default().with_expiry(Duration::from_secs(5)),
+            Options::default().with_retain(),
+        ] {
+            let error = manager
+                .publish(SUBJECT, payload(), &opts)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
+            let error = manager
+                .publish_batch(SUBJECT, vec![payload()], &opts)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
+        }
+        let bad = Options::default().header("lang", "two\nlines");
+        let error = manager.publish(SUBJECT, payload(), &bad).await.unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+        let error = manager
+            .publish_batch(SUBJECT, vec![payload()], &bad)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StreamError::InvalidHeader(_)), "{error}");
+    }
+
+    #[test]
+    fn headers_map_to_record_headers_and_back() {
+        let sent: Headers = [("lang", "rust"), ("traceparent", "00-ab-cd-01")]
+            .into_iter()
+            .collect();
+        let record = record_headers(&sent).unwrap();
+        assert_eq!(record.count(), 2);
+        let first = record.get(0);
+        assert_eq!((first.key, first.value), ("lang", Some(&b"rust"[..])));
+        assert_eq!(received(Some(&record), SUBJECT, 0), sent);
+        assert!(
+            record_headers(&Headers::new()).is_none(),
+            "no headers, no header block"
+        );
+        assert!(received(None::<&OwnedHeaders>, SUBJECT, 0).is_empty());
+    }
+
+    #[test]
+    fn a_foreign_record_header_is_read_as_kafka_reads_it() {
+        let record = OwnedHeaders::new()
+            .insert(Header {
+                key: "site",
+                value: Some("plant-3"),
+            })
+            .insert(Header {
+                key: "site",
+                value: Some("plant-4"),
+            })
+            .insert(Header::<&str> {
+                key: "flag",
+                value: None,
+            })
+            .insert(Header {
+                key: "binary",
+                value: Some(&[0xff_u8, 0xfe][..]),
+            });
+        let headers = received(Some(&record), SUBJECT, 0);
+        assert_eq!(headers.get("site"), Some("plant-4"), "the last value wins");
+        assert_eq!(headers.get("flag"), Some(""), "a null value reads as empty");
+        assert!(
+            !headers.contains_key("binary"),
+            "a non-UTF-8 value is skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delivery_cannot_delay_its_redelivery() {
+        let commits = Arc::new(Commits::new("t".into()));
+        commits.delivered(0, 1);
+        let delivery = Delivery::new(
+            Message::new("id", SUBJECT, "json", Bytes::new()),
+            0,
+            settle(&commits, 0, 1),
+        );
+        assert!(!delivery.can_delay_redelivery());
+        let error = delivery
+            .nak_after(Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, StreamError::Unsupported(_)), "{error}");
     }
 
     #[tokio::test]

@@ -17,6 +17,11 @@ use super::{
     node::{self, NodeRef},
 };
 
+/// Why headers are refused, at `create` and at publish.
+pub(crate) const NO_HEADERS: &str = "opcua: a Write sets a node's value, status and timestamps \
+     and has nowhere to carry headers, so they would be dropped; OPC UA PubSub \
+     (drivers::opcua::pubsub) carries them as MQTT 5 user properties";
+
 /// Writes and monitors the nodes one stream declares.
 pub(crate) struct OpcUaManager {
     inner: Arc<Inner>,
@@ -57,14 +62,31 @@ impl OpcUaManager {
         })
     }
 
-    /// Refuses a scheduled write.
-    fn check_publish(opts: &Options) -> Result<()> {
+    /// Refuses what a Write cannot do: schedule, expire, retain, or carry
+    /// headers.
+    fn check_publish(stream: &Stream, opts: &Options) -> Result<()> {
         if opts.delay().is_some() {
             return Err(StreamError::Unsupported(
                 "opcua: a Write applies at once; OPC UA cannot schedule one, so a TTL has no \
                  meaning here"
                     .into(),
             ));
+        }
+        if opts.expiry().is_some() {
+            return Err(StreamError::Unsupported(
+                "opcua: a Write applies at once or fails, so nothing waits that could expire"
+                    .into(),
+            ));
+        }
+        if opts.retain {
+            return Err(StreamError::Unsupported(
+                "opcua: a node always holds its last value and has no retain flag to set; \
+                 OpcUaConfig::initial_value hands it to a new subscription"
+                    .into(),
+            ));
+        }
+        if !provider::outgoing(stream, opts)?.is_empty() {
+            return Err(StreamError::Unsupported(NO_HEADERS.into()));
         }
         Ok(())
     }
@@ -132,7 +154,7 @@ fn check(subject: &str, status: StatusCode) -> Result<()> {
 impl Publisher for OpcUaManager {
     async fn publish(&self, subject: &str, payload: Payload, opts: &Options) -> Result<String> {
         let node = self.node(subject)?;
-        Self::check_publish(opts)?;
+        Self::check_publish(&self.stream, opts)?;
         let value = OpcUaValue::decode_payload(&payload)?;
         // OPC UA has no message id; this one is the caller's receipt only.
         let id = provider::publish_id(opts);
@@ -184,7 +206,7 @@ impl Batch for OpcUaManager {
     ) -> Result<Vec<String>> {
         let node = self.node(subject)?;
         provider::check_batch(opts)?;
-        Self::check_publish(opts)?;
+        Self::check_publish(&self.stream, opts)?;
         let ids: Vec<String> = payloads.iter().map(|_| provider::new_id()).collect();
         let mut failures = Vec::new();
         let mut values = Vec::with_capacity(payloads.len());
@@ -234,12 +256,23 @@ mod tests {
     }
 
     #[test]
-    fn a_ttl_is_refused() {
-        let opts = Options::default().with_ttl(std::time::Duration::from_secs(1));
-        assert!(matches!(
-            OpcUaManager::check_publish(&opts),
-            Err(StreamError::Unsupported(_))
-        ));
-        assert!(OpcUaManager::check_publish(&Options::default()).is_ok());
+    fn what_a_write_cannot_do_is_refused() {
+        let stream = Stream::default();
+        let second = std::time::Duration::from_secs(1);
+        for (opts, says) in [
+            (Options::default().with_ttl(second), "schedule"),
+            (Options::default().with_expiry(second), "expire"),
+            (Options::default().with_retain(), "retain"),
+            (Options::default().header("lang", "rust"), "headers"),
+        ] {
+            match OpcUaManager::check_publish(&stream, &opts) {
+                Err(StreamError::Unsupported(why)) => assert!(why.contains(says), "{why}"),
+                other => panic!("{says}: {other:?}"),
+            }
+        }
+        assert!(OpcUaManager::check_publish(&stream, &Options::default()).is_ok());
+        // A zero expiry is none, as a zero TTL is.
+        let zero = Options::default().with_expiry(std::time::Duration::ZERO);
+        assert!(OpcUaManager::check_publish(&stream, &zero).is_ok());
     }
 }

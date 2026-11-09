@@ -83,8 +83,9 @@ pub mod typed;
 pub use codec::Protobuf;
 pub use codec::{Codec, Json, Payload, Registry};
 pub use core::{
-    Acker, Batch, Deliveries, Delivery, Durable, Manager, Message, Options, Position, Positioned,
-    Publisher, Stream, Streams, Subscriber, Subscription, as_batch, as_durable, as_positioned,
+    Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Message, Options, Position,
+    Positioned, Publisher, Stream, Streams, Subscriber, Subscription, as_batch, as_durable,
+    as_positioned,
 };
 pub use error::{Result, StreamError};
 pub use logging::{with_logging, with_logging_middleware, with_subscriber_logging};
