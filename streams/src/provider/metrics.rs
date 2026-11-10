@@ -1,6 +1,6 @@
 //! Delivery-side instruments shared by durable providers.
 
-use opentelemetry::{
+use tpp_telemetry::opentelemetry::{
     KeyValue,
     metrics::{Counter, Gauge, Meter, UpDownCounter},
 };

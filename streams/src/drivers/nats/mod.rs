@@ -79,7 +79,7 @@ mod plain;
 
 use std::{sync::Arc, time::Duration};
 
-use opentelemetry::metrics::Meter;
+use tpp_telemetry::opentelemetry::metrics::Meter;
 use tracing::error;
 
 use async_nats::HeaderMap;

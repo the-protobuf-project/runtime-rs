@@ -88,7 +88,11 @@ fn parse(header: &str) -> Option<(TraceId, SpanId, TraceFlags)> {
     if trace_id == TraceId::INVALID || span_id == SpanId::INVALID {
         return None;
     }
-    Some((trace_id, span_id, TraceFlags::new(flags) & TraceFlags::SAMPLED))
+    Some((
+        trace_id,
+        span_id,
+        TraceFlags::new(flags) & TraceFlags::SAMPLED,
+    ))
 }
 
 #[cfg(test)]

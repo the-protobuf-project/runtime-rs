@@ -46,7 +46,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-opentelemetry = { workspace = true }
+# Named by its package: this crate has a telemetry module of its own.
+tpp_telemetry = { package = "tpp-telemetry", path = "../telemetry", version = "0.1.0" }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

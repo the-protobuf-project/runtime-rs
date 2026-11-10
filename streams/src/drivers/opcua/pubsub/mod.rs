@@ -146,7 +146,7 @@ use std::{
     time::Duration,
 };
 
-use opentelemetry::metrics::{Counter, Meter};
+use tpp_telemetry::opentelemetry::metrics::{Counter, Meter};
 use rumqttc::v5::{
     Event, Incoming,
     mqttbytes::v5::{Filter, PublishProperties},
@@ -563,8 +563,8 @@ impl Inner {
             counter.add(
                 missed,
                 &[
-                    opentelemetry::KeyValue::new("publisher", publisher.to_owned()),
-                    opentelemetry::KeyValue::new("writer", writer.to_owned()),
+                    tpp_telemetry::opentelemetry::KeyValue::new("publisher", publisher.to_owned()),
+                    tpp_telemetry::opentelemetry::KeyValue::new("writer", writer.to_owned()),
                 ],
             );
         }

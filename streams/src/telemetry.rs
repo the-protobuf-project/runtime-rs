@@ -6,7 +6,7 @@
 
 use std::{sync::Arc, time::Instant};
 
-use opentelemetry::{
+use tpp_telemetry::opentelemetry::{
     KeyValue,
     metrics::{Counter, Histogram, Meter},
 };
