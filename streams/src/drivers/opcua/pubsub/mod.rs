@@ -91,7 +91,7 @@
 //! jump forward is a gap, logged as a warning, counted in
 //! [`PubSubProvider::sequence_gaps`], and added to the
 //! `streams_opcua_pubsub_sequence_gaps_total` counter when a
-//! [`meter`](PubSubConfig::meter) is given. A repeat of the last number is a
+//! [`telemetry`](PubSubConfig::telemetry) is given. A repeat of the last number is a
 //! QoS 1 redelivery and is dropped; a jump back is a publisher that restarted,
 //! and counting starts again there.
 //!
@@ -146,7 +146,7 @@ use std::{
     time::Duration,
 };
 
-use tpp_telemetry::opentelemetry::metrics::{Counter, Meter};
+use tpp_telemetry::{Telemetry, opentelemetry::metrics::Counter};
 use rumqttc::v5::{
     Event, Incoming,
     mqttbytes::v5::{Filter, PublishProperties},
@@ -224,8 +224,8 @@ pub struct PubSubConfig {
     /// How long [`PubSubProvider::metadata`] waits for the retained message.
     pub metadata_timeout: Duration,
 
-    /// Where the sequence-gap counter is recorded. `None` records nothing.
-    pub meter: Option<Meter>,
+    /// Where the sequence-gap counter is recorded. The default records nothing.
+    pub telemetry: Telemetry,
 }
 
 impl Default for PubSubConfig {
@@ -240,7 +240,7 @@ impl Default for PubSubConfig {
             publish_connections: 4,
             max_dataset_messages: DEFAULT_MAX_DATASET_MESSAGES,
             metadata_timeout: Duration::from_secs(5),
-            meter: None,
+            telemetry: Telemetry::default(),
         }
     }
 }
@@ -319,7 +319,7 @@ impl PubSubProvider {
             config.publish_timeout,
         )
         .await?;
-        let gap_counter = config.meter.as_ref().map(|meter| {
+        let gap_counter = config.telemetry.meter().map(|meter| {
             meter
                 .u64_counter("streams_opcua_pubsub_sequence_gaps_total")
                 .with_description("DataSetMessages a subscriber missed, by SequenceNumber")

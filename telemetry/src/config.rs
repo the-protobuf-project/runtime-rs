@@ -46,6 +46,11 @@ impl Telemetry {
         self
     }
 
+    /// The meter, for instruments a component needs beyond the shared ones.
+    pub fn meter(&self) -> Option<&Meter> {
+        self.meter.as_ref()
+    }
+
     /// Whether any signal has explicitly been supplied.
     pub fn is_enabled(&self) -> bool {
         self.meter.is_some() || self.tracer.is_some() || self.logs.is_some()

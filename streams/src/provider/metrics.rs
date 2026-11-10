@@ -1,14 +1,17 @@
 //! Delivery-side instruments shared by durable providers.
 
-use tpp_telemetry::opentelemetry::{
-    KeyValue,
-    metrics::{Counter, Gauge, Meter, UpDownCounter},
+use tpp_telemetry::{
+    Telemetry,
+    opentelemetry::{
+        KeyValue,
+        metrics::{Counter, Gauge, UpDownCounter},
+    },
 };
 
 /// Counts deliveries, settlements, messages in flight, and consumer lag.
 ///
-/// Built once per provider from a caller-supplied Meter; `Metrics::default()`
-/// records nothing, so a provider without a Meter pays no instrument cost.
+/// Built once per provider from the caller's [`Telemetry`]; `Metrics::default()`,
+/// or telemetry without a meter, records nothing and costs nothing.
 #[derive(Clone, Default)]
 pub struct Metrics {
     instruments: Option<Instruments>,
@@ -23,8 +26,11 @@ struct Instruments {
 }
 
 impl Metrics {
-    /// Builds the instruments from `meter`.
-    pub fn new(meter: &Meter) -> Self {
+    /// Builds the instruments from `telemetry`'s meter.
+    pub fn new(telemetry: &Telemetry) -> Self {
+        let Some(meter) = telemetry.meter() else {
+            return Self::default();
+        };
         Self {
             instruments: Some(Instruments {
                 delivered: meter
