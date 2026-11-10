@@ -146,6 +146,42 @@ pub fn as_batch(manager: &dyn Manager) -> Result<&dyn Batch> {
     })
 }
 
+/// An optional capability a caller can insist on up front, with [`require`],
+/// rather than discover at the first call that needs it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Capability {
+    /// Durable consumers with ack and nak; see [`as_durable`].
+    Durable,
+    /// Consuming from a chosen position; see [`as_positioned`].
+    Positioned,
+    /// Native batch publishing; see [`as_batch`].
+    Batch,
+}
+
+/// Checks that `manager` has every capability in `capabilities`, failing with
+/// the first missing one's [`StreamError::Unsupported`].
+///
+/// It is the startup half of [`as_durable`], [`as_positioned`], and
+/// [`as_batch`], and answers in their sentences: a service that cannot run
+/// without redelivery should refuse to start on a provider without it, not
+/// serve traffic until the first consumer is opened.
+pub fn require(manager: &dyn Manager, capabilities: &[Capability]) -> Result<()> {
+    for capability in capabilities {
+        match capability {
+            Capability::Durable => {
+                as_durable(manager)?;
+            }
+            Capability::Positioned => {
+                as_positioned(manager)?;
+            }
+            Capability::Batch => {
+                as_batch(manager)?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The lifecycle contract every provider satisfies.
 ///
 /// Providers take a client the caller owns, so nothing here dials or closes a

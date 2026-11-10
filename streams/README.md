@@ -24,6 +24,7 @@ NATS beside RabbitMQ, by changing which provider it builds and nothing else.
 - [Security](#security)
 - [Errors](#errors)
 - [Middleware and typed views](#middleware-and-typed-views)
+- [Generated topics](#generated-topics)
 - [Interoperating with runtime-go](#interoperating-with-runtime-go)
 - [Further reading](#further-reading)
 
@@ -588,6 +589,7 @@ Each takes `(redis::Client, RedisConfig)`.
 | `max_len` | unbounded | approximate cap on messages a durable subject keeps |
 | `reclaim_after` | 30 s | how long a message may sit unacknowledged before another consumer takes it; also the longest delayed nak |
 | `confirm_acks` | true | whether `ack()` waits for Redis to answer the XACK |
+| `connections` | 1 | how many shared connections commands are spread over; raise it (16 to 64) for a TLS Redis with `appendfsync always`, which syncs about once per command per TLS connection |
 | `registry` | JSON | codec names this program decodes |
 | `metrics` | none | delivery instruments for durable consumers |
 
@@ -708,6 +710,70 @@ let orders = typed::<Order>(manager).with_publisher(publisher);
 `chain` makes the last middleware outermost. `typed::<T>` encodes and decodes
 JSON, `typed_with(manager, codec)` any codec, and a message that does not
 decode is skipped with a warning rather than ending the subscription.
+
+## Generated topics
+
+`streams::topic` is the typed view's richer sibling, and the runtime
+[protoc-gen-streams](https://github.com/the-protobuf-project/streams) generates
+against. A `Topic<T, C>` is fixed to one subject by a `TopicSpec<T>`: a
+`static` holding the subject and every default a publish or receive starts
+from, so generated code is constants and the behaviour lives here.
+
+```mermaid
+flowchart LR
+    Spec["TopicSpec&lt;T&gt; (static)<br/>subject, consumer, group,<br/>headers, header_fields, partition_key,<br/>expiry, retain, prefetch, batch"] --> Topic["Topic&lt;T, C&gt;"]
+    M["Arc&lt;dyn Manager&gt;"] --> Topic
+    Topic --> Pub["Publisher<br/>publish, publish_with, publish_batch"]
+    Topic --> Sub["Subscriber<br/>subscribe, subscribe_with"]
+    Topic --> Con["Consumer<br/>consume, consume_from"]
+    Pub --> Sink["BatchSink<br/>by BatchPolicy"]
+    Con --> D["Delivery&lt;T&gt;<br/>message, raw, attempt, ack, nak, nak_after"]
+```
+
+| Item | What it does |
+| --- | --- |
+| `topic::bind(provider, stream, &[Capability])` | gets the stream, creating it when `NotFound`; adds subjects it lacks (never removes one, which another build may still use); binds it; checks the capabilities with `require` |
+| `require(manager, &[Capability])` | fails with the first missing capability's `Unsupported`, in `as_durable`'s, `as_positioned`'s or `as_batch`'s own sentence |
+| `Publisher` | lays the spec's key, expiry, retain and headers (static, then read from the message) under the call's own options; `publish_batch` uses `as_batch` and publishes one at a time where it is `Unsupported` |
+| `Subscriber` | at most once; a message that does not decode is skipped with a warning |
+| `Consumer` | at least once; a delivery that does not decode is acknowledged with a warning, since redelivering it would loop forever |
+| `BatchSink` | flushes at `max_size` values or when the oldest has waited `max_delay`; `send_all` flushes on time while its source is idle |
+
+```rust
+use std::time::Duration;
+use streams::{Capability, Topic, topic::{self, BatchPolicy, TopicSpec}};
+
+fn order_id(order: &Order) -> Option<String> { Some(order.order_id.clone()) }
+
+static PLACED: TopicSpec<Order> = TopicSpec {
+    subject: "order.placed",
+    consumer: "billing",
+    group: None,
+    headers: &[("source", "checkout")],
+    header_fields: &[],
+    partition_key: Some(order_id),
+    expiry: None,
+    retain: false,
+    prefetch: None,
+    batch: BatchPolicy { max_size: 100, max_delay: Duration::from_millis(10) },
+};
+
+let stream = Stream::named("orders").with_id("orders").subjects(["order.placed"]);
+let manager = topic::bind(&provider, stream, &[Capability::Durable]).await?;
+let placed: Topic<Order> = Topic::new(manager, streams::Protobuf, &PLACED);
+placed.publisher().publish(&order).await?;          // key = order_id, header source
+let mut billing = placed.consumer().consume("billing").await?;
+```
+
+The codec parameter `C` defaults to `Protobuf` with the `protobuf` feature
+and has no default without it, so `Topic<Order>` means the same thing in every
+build where it compiles and enabling the feature never changes it; without the
+feature write the codec, `Topic<Order, Json>`.
+
+protoc-gen-streams writes one stream type per proto service, its `TopicSpec`
+statics from `streams.yaml`, and one accessor per RPC returning a `Topic`, and
+depends on this crate with `features = ["protobuf"]`; the generated crate
+carries no runtime of its own.
 
 ## Interoperating with runtime-go
 

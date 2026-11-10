@@ -34,13 +34,25 @@
 //! # Ok(()) }
 //! ```
 //!
+//! # Generated topics
+//!
+//! [`topic`] is Typed's richer sibling: a [`Topic`] is fixed to one subject by
+//! a static [`TopicSpec`] carrying its defaults (consumer name, headers, a
+//! partition key read from each message, batching), and hands out a typed
+//! publisher, subscriber, durable consumer and [`BatchSink`].
+//! [`topic::bind`] declares a stream, adding subjects it lacks, and checks the
+//! [`Capability`] set a caller [`require`]s. protoc-gen-streams generates one
+//! stream type per proto service over it, so generated code holds names and
+//! defaults and the behaviour lives here.
+//!
 //! # Capabilities
 //!
 //! [`Publisher`] and [`Subscriber`] are what every backend can honestly do.
 //! [`Durable`] consumers with ack/nak, [`Positioned`] replay, and native
 //! [`Batch`] publishing are reached through [`as_durable`], [`as_positioned`],
 //! and [`as_batch`], which fail with [`StreamError::Unsupported`] naming the
-//! gap rather than silently downgrading delivery.
+//! gap rather than silently downgrading delivery. [`require`] checks a set of
+//! them at once, so a service that needs one can refuse to start without it.
 //!
 //! | Capability | Kafka | NATS | RabbitMQ | Redis | MQTT | ZeroMQ | OPC UA |
 //! | --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
@@ -81,19 +93,23 @@ pub mod middleware;
 pub mod provider;
 pub mod retry;
 pub mod telemetry;
+pub mod topic;
 pub mod typed;
 
 #[cfg(feature = "protobuf")]
 pub use codec::Protobuf;
 pub use codec::{Codec, Json, Payload, Registry};
 pub use core::{
-    Acker, Batch, Deliveries, Delivery, Durable, Headers, MAX_KEY, MAX_TOTAL, MAX_VALUE, Manager,
-    Message, Options, Position, Positioned, Publisher, Stream, Streams, Subscriber, Subscription,
-    as_batch, as_durable, as_positioned,
+    Acker, Batch, Capability, Deliveries, Delivery, Durable, Headers, MAX_KEY, MAX_TOTAL,
+    MAX_VALUE, Manager, Message, Options, Position, Positioned, Publisher, Stream, Streams,
+    Subscriber, Subscription, as_batch, as_durable, as_positioned, require,
 };
 pub use error::{Result, StreamError};
 pub use logging::{with_logging, with_logging_middleware, with_subscriber_logging};
 pub use middleware::{Middleware, chain};
 pub use retry::{with_retry, with_retry_middleware};
 pub use telemetry::{with_telemetry, with_telemetry_middleware};
+// The topic's Publisher, Subscriber, Consumer and Delivery stay under `topic::`:
+// the first two would shadow the contract's traits of the same name.
+pub use topic::{BatchPolicy, BatchSink, FieldFn, Topic, TopicSpec};
 pub use typed::{Typed, typed, typed_with};

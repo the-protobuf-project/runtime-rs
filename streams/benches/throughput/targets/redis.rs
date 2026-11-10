@@ -13,6 +13,8 @@
 //! part of a multi-id XACK instead of waiting a round trip; at-least-once is
 //! unchanged, see `RedisConfig::confirm_acks`). `REDIS_CONFIRM_ACKS=1` measures
 //! the driver's default, where every ack waits for its XACK reply.
+//! `REDIS_CONNECTIONS` sets `RedisConfig::connections`, how many shared
+//! connections commands are spread over (default 1, the driver's default).
 
 use streams::{
     Registry,
@@ -37,6 +39,7 @@ pub async fn connect(durable: bool, profile: &str, registry: Registry) -> Result
         prefix: prefix.into(),
         registry,
         confirm_acks: env("REDIS_CONFIRM_ACKS", "0") == "1",
+        connections: env("REDIS_CONNECTIONS", "1").parse()?,
         ..RedisConfig::default()
     };
     Ok(Conn::one(if durable {

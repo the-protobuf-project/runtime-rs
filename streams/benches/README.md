@@ -114,21 +114,21 @@ stateDiagram-v2
 | NATS JetStream | TLS, sync every message | fanout |  |  |  | 2,037 |  |  | 0 |
 | NATS JetStream | TLS, sync every message | batch |  |  |  | 2,133 |  |  | 0 |
 | NATS JetStream | TLS, sync every message | durable |  |  |  | 1,744 |  |  | 0 |
-| Redis pub/sub | Plaintext | fanout | 19,992 | 49,983 | 99,961 | 190,339 | 0.7 | 2.6 | 0 |
-| Redis pub/sub | Plaintext | batch | 20,030 | 49,917 | 99,766 | 953,608 |  |  | 0 |
-| Redis pub/sub | TLS, production durability | fanout | 19,992 | 49,981 | 71,222 no | 71,038 | 0.8 | 2.6 | 0 |
-| Redis pub/sub | TLS, production durability | batch | 20,078 | 49,928 | 99,797 | 644,868 |  |  | 0 |
-| Redis pub/sub | TLS, sync every message | fanout |  |  |  | 61,407 |  |  | 0 |
-| Redis pub/sub | TLS, sync every message | batch |  |  |  | 453,783 |  |  | 0 |
-| Redis Streams | Plaintext | fanout | 19,943 | 49,876 | 99,727 | 204,763 | 0.9 | 2.9 | 0 |
-| Redis Streams | Plaintext | batch | 20,038 | 49,930 | 99,786 | 622,348 |  |  | 0 |
-| Redis Streams | Plaintext | durable | 19,944 | 49,871 | 99,752 | 189,900 | 2.5 | 5.2 | 0 |
-| Redis Streams | TLS, production durability | fanout | 19,995 | 49,866 | 99,637 | 173,632 | 1.0 | 3.2 | 0 |
-| Redis Streams | TLS, production durability | batch | 20,028 | 49,947 | 99,812 | 464,949 |  |  | 0 |
-| Redis Streams | TLS, production durability | durable | 19,949 | 49,884 | 99,707 | 116,933 | 2.9 | 7.3 | 0 |
-| Redis Streams | TLS, sync every message | fanout |  |  |  | 2,899 |  |  | 0 |
-| Redis Streams | TLS, sync every message | batch |  |  |  | 53,076 |  |  | 0 |
-| Redis Streams | TLS, sync every message | durable |  |  |  | 3,023 |  |  | 0 |
+| Redis pub/sub | Plaintext | fanout | 19,993 | 49,984 | 99,925 | 174,197 | 0.7 | 3.1 | 0 |
+| Redis pub/sub | Plaintext | batch | 20,033 | 49,946 | 99,794 | 842,238 |  |  | 0 |
+| Redis pub/sub | TLS, production durability | fanout | 19,995 | 49,988 | 72,083 no | 75,432 | 0.8 | 2.5 | 0 |
+| Redis pub/sub | TLS, production durability | batch | 20,033 | 49,950 | 99,822 | 702,616 |  |  | 0 |
+| Redis pub/sub | TLS, sync every message | fanout |  |  |  | 50,465 |  |  | 0 |
+| Redis pub/sub | TLS, sync every message | batch |  |  |  | 425,774 |  |  | 0 |
+| Redis Streams | Plaintext | fanout | 19,947 | 49,882 | 99,729 | 212,858 | 0.9 | 2.8 | 0 |
+| Redis Streams | Plaintext | batch | 20,031 | 49,932 | 99,799 | 604,063 |  |  | 0 |
+| Redis Streams | Plaintext | durable | 19,950 | 49,863 | 99,715 | 196,413 | 2.5 | 5.3 | 0 |
+| Redis Streams | TLS, production durability | fanout | 19,995 | 49,877 | 99,745 | 177,260 | 1.0 | 3.4 | 0 |
+| Redis Streams | TLS, production durability | batch | 20,032 | 49,942 | 99,818 | 478,006 |  |  | 0 |
+| Redis Streams | TLS, production durability | durable | 19,949 | 49,855 | 99,420 | 134,636 | 2.8 | 5.9 | 0 |
+| Redis Streams | TLS, sync every message | fanout |  |  |  | 23,250 |  |  | 0 |
+| Redis Streams | TLS, sync every message | batch |  |  |  | 232,007 |  |  | 0 |
+| Redis Streams | TLS, sync every message | durable |  |  |  | 20,545 |  |  | 0 |
 | Kafka | Plaintext | fanout | 19,936 | 49,814 | 72,183 no | 69,513 | 5.5 | 43.1 | 0 |
 | Kafka | Plaintext | batch | 20,028 | 49,928 | 99,755 | 1,118,949 |  |  | 0 |
 | Kafka | Plaintext | durable | 19,916 | 44,252 no | 44,303 no | 47,321 | 11.2 | 41.3 | 80 |
@@ -182,7 +182,7 @@ stateDiagram-v2
 xychart-beta horizontal
     x-axis ["ZeroMQ", "NATS core", "NATS JetStream", "Redis pub/sub", "Redis Streams", "Kafka", "RabbitMQ", "MQTT", "OPC UA client/server", "OPC UA PubSub"]
     y-axis "msg/s" 0 --> 696740
-    bar [633400, 450359, 97964, 190338, 204763, 69512, 97895, 96232, 15083, 70434]
+    bar [633400, 450359, 97964, 174196, 212857, 69512, 97895, 96232, 15083, 70434]
 ```
 
 ### Unpaced batch, plaintext, msg/s
@@ -191,7 +191,7 @@ xychart-beta horizontal
 xychart-beta horizontal
     x-axis ["ZeroMQ", "NATS core", "NATS JetStream", "Redis pub/sub", "Redis Streams", "Kafka", "RabbitMQ", "MQTT", "OPC UA client/server", "OPC UA PubSub"]
     y-axis "msg/s" 0 --> 1455914
-    bar [69734, 1323558, 124505, 953607, 622348, 1118949, 171349, 220965, 15437, 598420]
+    bar [69734, 1323558, 124505, 842237, 604063, 1118949, 171349, 220965, 15437, 598420]
 ```
 
 ### Unpaced durable, plaintext, msg/s
@@ -199,8 +199,8 @@ xychart-beta horizontal
 ```mermaid
 xychart-beta horizontal
     x-axis ["NATS JetStream", "Redis Streams", "Kafka", "RabbitMQ", "MQTT"]
-    y-axis "msg/s" 0 --> 208890
-    bar [91506, 189900, 47320, 52898, 83274]
+    y-axis "msg/s" 0 --> 216053
+    bar [91506, 196412, 47320, 52898, 83274]
 ```
 
 ### Unpaced fanout, tls, production durability, msg/s
@@ -209,7 +209,7 @@ xychart-beta horizontal
 xychart-beta horizontal
     x-axis ["NATS core", "NATS JetStream", "Redis pub/sub", "Redis Streams", "Kafka", "RabbitMQ", "MQTT", "OPC UA client/server", "OPC UA PubSub"]
     y-axis "msg/s" 0 --> 445136
-    bar [404669, 91627, 71038, 173632, 53147, 94074, 73652, 13672, 82359]
+    bar [404669, 91627, 75432, 177259, 53147, 94074, 73652, 13672, 82359]
 ```
 
 ### Unpaced batch, tls, production durability, msg/s
@@ -218,7 +218,7 @@ xychart-beta horizontal
 xychart-beta horizontal
     x-axis ["NATS core", "NATS JetStream", "Redis pub/sub", "Redis Streams", "Kafka", "RabbitMQ", "MQTT", "OPC UA client/server", "OPC UA PubSub"]
     y-axis "msg/s" 0 --> 1614012
-    bar [1467284, 124999, 644867, 464948, 585783, 173770, 111480, 13640, 589328]
+    bar [1467284, 124999, 702615, 478005, 585783, 173770, 111480, 13640, 589328]
 ```
 
 ### Unpaced durable, tls, production durability, msg/s
@@ -226,8 +226,8 @@ xychart-beta horizontal
 ```mermaid
 xychart-beta horizontal
     x-axis ["NATS JetStream", "Redis Streams", "Kafka", "RabbitMQ", "MQTT"]
-    y-axis "msg/s" 0 --> 128625
-    bar [81427, 116932, 34739, 51918, 81778]
+    y-axis "msg/s" 0 --> 148099
+    bar [81427, 134635, 34739, 51918, 81778]
 ```
 
 ## Against each broker's own tool

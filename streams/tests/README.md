@@ -8,6 +8,7 @@ broker-free logic.
 
 | File | Needs | Run with |
 | --- | --- | --- |
+| `topic.rs` | nothing: an in-memory provider whose durable and batch capabilities are switches | `cargo test -p tpp-streams --features protobuf` |
 | `zeromq.rs` | nothing: real sockets on `127.0.0.1` | `cargo test -p tpp-streams --features zeromq` |
 | `mqtt.rs` | nothing: an in-process `rumqttd` broker | `cargo test -p tpp-streams --features mqtt` |
 | `mqtt_e2e.rs` | Mosquitto from `compose.mqtt.secure.yaml`, mTLS on both ports: 18883 (cert CN is the username) and 18884 (username/password plus ACLs, users `e2e-app` and `e2e-other`); runs `mosquitto_sub` in that container (`docker exec`) to show headers are user properties; restart test needs `STREAMS_E2E_RESTART=1` | `--features mqtt,tls,live-tests` |

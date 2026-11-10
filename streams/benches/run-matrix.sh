@@ -72,8 +72,13 @@ run() {  # feature backend profile scenario rate
   # second, so strict gets one unpaced measurement of a smaller run.
   [ "$profile" = tls-strict ] && messages=20000
   local cli_profile="$profile"; [ "$profile" != plain ] && cli_profile=tls
+  # A Redis that syncs every write takes about one command per TLS connection
+  # per sync, so strict spreads commands over a pool (RedisConfig::connections);
+  # one pipelined connection is faster everywhere else.
+  local connections="${REDIS_CONNECTIONS:-1}"
+  [ "$profile" = tls-strict ] && connections="${REDIS_STRICT_CONNECTIONS:-32}"
   printf '%-14s %-10s %-8s %7s/s ... ' "$backend" "$profile" "$scenario" "$rate"
-  cargo bench -q -p tpp-streams --features "kafka,nats,rabbitmq,redis,mqtt,zeromq,opcua,protobuf,live-tests,tls" --bench throughput -- \
+  REDIS_CONNECTIONS="$connections" cargo bench -q -p tpp-streams --features "kafka,nats,rabbitmq,redis,mqtt,zeromq,opcua,protobuf,live-tests,tls" --bench throughput -- \
     --backend "$backend" --profile "$cli_profile" --scenario "$scenario" \
     --messages "$messages" --rate "$rate" --publishers "$(publishers "$backend" "$scenario")" --batch 500 --consumers "$([ "$scenario" = group ] || [ "$scenario" = durable ] && echo 2 || echo 1)" \
     $(extra "$backend") --timeout 180 --label "$label/$profile" >/dev/null 2>"$root/target/bench-last.log" \
