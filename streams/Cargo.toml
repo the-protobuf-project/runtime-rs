@@ -12,6 +12,7 @@ categories = ["asynchronous", "network-programming"]
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/streams"
+use-for = "Publish and consume messages over Kafka, NATS, RabbitMQ, Redis, MQTT, ZeroMQ or OPC UA"
 
 [lib]
 name = "streams"

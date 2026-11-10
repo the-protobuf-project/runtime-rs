@@ -13,9 +13,45 @@ rumqttc = { path = "vendor/rumqttc" }
 
 # Consumed by tools/docgen, which generates README.md in full.
 [workspace.metadata.docgen]
+headline = "The Rust runtime underneath code generated from your `.proto` files."
 tagline = """
-A Rust port of [runtime-go](https://github.com/the-protobuf-project/runtime-go), built the Rust \
-way rather than as a line-for-line translation."""
+The protobuf project's plugins turn a proto service into storage, messaging, APIs and agent \
+tools. What they generate is thin: names, types and specs. The work happens here, in small \
+traits with a driver for each backend, so a program written against one database or broker moves \
+to another by changing one line. It is the Rust twin of \
+[runtime-go](https://github.com/the-protobuf-project/runtime-go), built the Rust way rather than \
+as a line-for-line translation, and the two agree on the wire: a message a Go program publishes, \
+a Rust one receives, and a trace started in one continues in the other."""
+example = """
+let orders = streams::typed::<Order>(manager);
+let mut placed = orders.subscribe("order.placed", &Default::default()).await?;
+orders.publish("order.placed", &Order { user: "ada".into(), total: 42 }, &Default::default()).await?;
+let order = placed.next().await;"""
+example-intro = "A taste of the streams contract, typed to your own model:"
+example-outro = """
+Swap the provider behind `manager`, Kafka for NATS or Redis for RabbitMQ, and the rest of the \
+program stays as it is."""
+telemetry = """
+Every crate reports through one handle, [`telemetry`](telemetry): a `Telemetry` holding a meter, \
+a tracer and a log sink the application owns, so no application names an OpenTelemetry type or \
+adds it to its own `Cargo.toml`. Build it from the telemetry SDK with `Telemetry::from_tpp`, then \
+hand the same one to every crate:
+
+| Crate | Turn it on |
+| --- | --- |
+| streams | `streams::instrument(provider, &telemetry, "nats")`, and `Topic::with_telemetry` for typed topics |
+| database | `store::instrument(db, telemetry)` |
+| cache | `cache::with_observability(document, telemetry)` |
+| network | `ConnectionOptions { telemetry, .. }` |
+| agents | `Config { telemetry, .. }` |
+| grpc | on by default for every call; `HybridServer::with_telemetry` to choose the signals |
+
+Each unit of work is a span named `<component>.<operation>` and a share of the same metrics in \
+every crate, `runtime.operation.count`, `.duration` and `.active`, `runtime.records.read` and \
+`.written`, labeled component, backend, operation and outcome, exactly as runtime-go reports them. \
+Traces cross every process boundary in W3C `traceparent` headers: a stream message, an HTTP or \
+GraphQL request, a gRPC call. `telemetry`'s `testing` feature records all three signals in memory \
+for tests."""
 
 [workspace.package]
 edition = "2024"

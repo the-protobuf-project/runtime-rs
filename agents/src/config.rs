@@ -48,6 +48,12 @@ pub struct Config {
     /// How long [`crate::Runtime::start`] waits for one service to report itself mounted.
     /// `None` means [`DEFAULT_READY_TIMEOUT`](crate::DEFAULT_READY_TIMEOUT).
     pub ready_timeout: Option<Duration>,
+
+    /// Traces, measures and logs every request the runtime's own listeners serve: a server
+    /// span, `agents.request`, continuing the caller's trace from its W3C `traceparent`
+    /// header. A host that owns the server through [`Config::mux`] instruments it itself.
+    /// The default reports nothing.
+    pub telemetry: telemetry::Telemetry,
 }
 
 impl fmt::Debug for Config {
@@ -60,6 +66,7 @@ impl fmt::Debug for Config {
             .field("mux", &self.mux.is_some())
             .field("grpc_routes", &self.grpc_routes.is_some())
             .field("ready_timeout", &self.ready_timeout)
+            .field("telemetry", &self.telemetry.is_enabled())
             .finish()
     }
 }

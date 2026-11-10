@@ -50,6 +50,9 @@ pub use observe::{Observer, is_server_error};
 pub use rest::{GatewayFn, RestGateway};
 pub use status::Status;
 pub use stream_intercept::{StreamCall, StreamInterceptor, StreamNext};
+/// The signals [`HybridServer::with_telemetry`] and [`Observer::with_telemetry`] report
+/// through, so a caller configures them without naming the telemetry crate.
+pub use telemetry::Telemetry;
 pub use types::{GatewayTarget, GrpcServiceFn, HttpGatewayFn, UnaryInterceptorFn};
 pub use validation::Validator;
 pub use validation::{ProtoValidator, ValidationInterceptor};

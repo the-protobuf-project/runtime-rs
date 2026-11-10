@@ -133,7 +133,7 @@ impl Runtime {
             let Some(group) = groups.get(group) else {
                 continue;
             };
-            let mut router = group.mux.router();
+            let mut router = crate::observe::traced(group.mux.router(), &self.config().telemetry);
             // net/http bounds the read and the write phases separately; hyper does not
             // split them, so the nearest honest equivalent is one bound on the whole
             // exchange. The larger of the two is used so neither is tightened silently.

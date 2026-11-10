@@ -73,18 +73,33 @@ impl WebSocketClient {
         let path_index = self.0.state.read().await.path_index;
         let full_url =
             build_full_url(&opts.url, path_index).map_err(|e| Error::BuildUrl(Box::new(e)))?;
-        let request = build_ws_request(&full_url, &opts.url.host, &opts.headers)?;
+        let observer = crate::transport::observer(&opts.telemetry);
+        let traced = crate::transport::Traced::start(
+            observer.as_ref(),
+            "websocket",
+            "dial",
+            "GET",
+            &full_url,
+        );
+        let mut headers = opts.headers.clone();
+        headers.extend(traced.headers.iter().cloned());
+        let request = build_ws_request(&full_url, &opts.url.host, &headers)?;
 
         let dial = tokio_tungstenite::connect_async(request);
         let (ws_stream, _resp) = match tokio::time::timeout(opts.timeout, dial).await {
-            Ok(Ok(pair)) => pair,
+            Ok(Ok(pair)) => {
+                traced.answered(pair.1.status().as_u16());
+                pair
+            }
             Ok(Err(err)) => {
+                traced.failed(false);
                 return Err(Error::WsConnect {
                     host: opts.url.host.clone(),
                     source: Box::new(err),
                 });
             }
             Err(_) => {
+                traced.failed(true);
                 let timeout_err = tungstenite::Error::Io(std::io::Error::new(
                     std::io::ErrorKind::TimedOut,
                     "WebSocket handshake timed out",

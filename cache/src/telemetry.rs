@@ -1,12 +1,13 @@
-//! OpenTelemetry metrics middleware for raw Document operations.
+//! Metrics middleware for raw Document operations.
 //!
-//! The caller supplies a Meter, retaining ownership of provider, reader, and
-//! exporter configuration. The wrapper records bounded operation attributes
+//! The caller supplies a tpp-telemetry `Telemetry` and keeps ownership of the
+//! provider, reader and exporter behind it; no OpenTelemetry type appears in
+//! this API. The wrapper records bounded operation attributes
 //! and never includes IDs, values, options, addresses, or error messages.
 
 use std::{sync::Arc, time::Instant};
 
-use opentelemetry::{
+use ::telemetry::opentelemetry::{
     KeyValue,
     metrics::{Counter, Histogram, Meter},
 };
@@ -168,8 +169,16 @@ impl Document for TelemetryDocument {
 /// provider; exporter effects belong to caller configuration.
 /// **When to use**: Measuring aggregate Document traffic, outcomes, latency,
 /// and cache effectiveness without high-cardinality labels.
-pub fn with_telemetry(document: Arc<dyn Document>, meter: Meter) -> Arc<dyn Document> {
-    Arc::new(TelemetryDocument::new(document, meter))
+///
+/// Telemetry without a meter returns `document` unchanged.
+pub fn with_telemetry(
+    document: Arc<dyn Document>,
+    telemetry: &::telemetry::Telemetry,
+) -> Arc<dyn Document> {
+    match telemetry.meter() {
+        Some(meter) => Arc::new(TelemetryDocument::new(document, meter.clone())),
+        None => document,
+    }
 }
 
 /// Returns [`with_telemetry`] as reusable Document [`Middleware`].
@@ -179,8 +188,8 @@ pub fn with_telemetry(document: Arc<dyn Document>, meter: Meter) -> Arc<dyn Docu
 ///
 /// **Cost/side effects**: Applying the middleware constructs three synchronous
 /// instruments but performs no Document operation and starts no exporter.
-pub fn with_telemetry_middleware(meter: Meter) -> Middleware {
-    Arc::new(move |document| with_telemetry(document, meter.clone()))
+pub fn with_telemetry_middleware(telemetry: ::telemetry::Telemetry) -> Middleware {
+    Arc::new(move |document| with_telemetry(document, &telemetry))
 }
 
 #[cfg(test)]
@@ -194,7 +203,7 @@ mod tests {
         time::Duration,
     };
 
-    use opentelemetry::{
+    use ::telemetry::opentelemetry::{
         KeyValue,
         metrics::{
             Counter, Histogram, HistogramBuilder, InstrumentBuilder, InstrumentProvider,
@@ -204,6 +213,11 @@ mod tests {
 
     use super::*;
     use crate::{chain, with_retry_middleware};
+
+    /// `meter` as the signals the wrapper takes.
+    fn signals(meter: Meter) -> ::telemetry::Telemetry {
+        ::telemetry::Telemetry::default().with_meter(meter)
+    }
 
     /// Instrument registration captured before any operation runs.
     #[derive(Debug, Eq, PartialEq)]
@@ -438,7 +452,7 @@ mod tests {
     fn test_telemetry_constructs_three_document_instruments_once() {
         let (meter, state) = capture_meter();
 
-        let _document = with_telemetry(TestDocument::successful(), meter);
+        let _document = with_telemetry(TestDocument::successful(), &signals(meter));
 
         assert_eq!(
             *state.registrations.lock().unwrap(),
@@ -469,7 +483,7 @@ mod tests {
     fn test_telemetry_all_operations_delegate_and_record_once() {
         let (meter, state) = capture_meter();
         let concrete = TestDocument::successful();
-        let document = with_telemetry(concrete.clone(), meter);
+        let document = with_telemetry(concrete.clone(), &signals(meter));
 
         futures::executor::block_on(async {
             assert_eq!(
@@ -520,7 +534,7 @@ mod tests {
     #[test]
     fn test_telemetry_get_hit_records_hit_and_ok() {
         let (meter, state) = capture_meter();
-        let document = with_telemetry(TestDocument::successful(), meter);
+        let document = with_telemetry(TestDocument::successful(), &signals(meter));
 
         futures::executor::block_on(document.get("private-id", &mut Vec::new())).unwrap();
 
@@ -535,7 +549,10 @@ mod tests {
     #[test]
     fn test_telemetry_get_not_found_records_miss_and_ok() {
         let (meter, state) = capture_meter();
-        let document = with_telemetry(TestDocument::failing(CacheError::NotFound, 1), meter);
+        let document = with_telemetry(
+            TestDocument::failing(CacheError::NotFound, 1),
+            &signals(meter),
+        );
 
         let result = futures::executor::block_on(document.get("missing", &mut Vec::new()));
 
@@ -561,7 +578,7 @@ mod tests {
         let (meter, state) = capture_meter();
         let document = with_telemetry(
             TestDocument::failing(CacheError::Internal("credential-secret".to_owned()), 1),
-            meter,
+            &signals(meter),
         );
 
         let result = futures::executor::block_on(document.get("private-id", &mut Vec::new()));
@@ -578,7 +595,10 @@ mod tests {
     #[test]
     fn test_telemetry_non_get_not_found_records_error() {
         let (meter, state) = capture_meter();
-        let document = with_telemetry(TestDocument::failing(CacheError::NotFound, 1), meter);
+        let document = with_telemetry(
+            TestDocument::failing(CacheError::NotFound, 1),
+            &signals(meter),
+        );
 
         let result = futures::executor::block_on(document.ttl("missing"));
 
@@ -600,7 +620,7 @@ mod tests {
             TestDocument::failing(CacheError::Internal("transient".to_owned()), 1),
             [
                 with_retry_middleware(2, Duration::ZERO),
-                with_telemetry_middleware(outer_meter),
+                with_telemetry_middleware(signals(outer_meter)),
             ],
         );
         runtime.block_on(outer.get("id", &mut Vec::new())).unwrap();
@@ -613,7 +633,7 @@ mod tests {
         let inner = chain(
             TestDocument::failing(CacheError::Internal("transient".to_owned()), 1),
             [
-                with_telemetry_middleware(inner_meter),
+                with_telemetry_middleware(signals(inner_meter)),
                 with_retry_middleware(2, Duration::ZERO),
             ],
         );
@@ -628,7 +648,7 @@ mod tests {
     fn test_telemetry_noop_meter_is_transparent() {
         let meter = NoopMeterProvider::new().meter("runtime-cache-test");
         let concrete = TestDocument::successful();
-        let document = with_telemetry(concrete.clone(), meter);
+        let document = with_telemetry(concrete.clone(), &signals(meter));
 
         futures::executor::block_on(document.delete("id")).unwrap();
 

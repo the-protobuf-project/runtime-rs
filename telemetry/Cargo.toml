@@ -9,6 +9,7 @@ repository = "https://github.com/the-protobuf-project/runtime-rs"
 
 [package.metadata.docgen]
 go-source = "runtime-go/telemetry"
+use-for = "Trace, measure and log all of the above"
 
 [lib]
 name = "telemetry"

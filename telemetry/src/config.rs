@@ -46,6 +46,23 @@ impl Telemetry {
         self
     }
 
+    /// The tracer, for a component whose spans are named by the call they cover
+    /// (a gRPC method) rather than by a bounded operation.
+    pub fn tracer(&self) -> Option<Arc<BoxedTracer>> {
+        self.tracer.clone()
+    }
+
+    /// Snapshots OpenTelemetry's global meter and tracer under `scope`, for a
+    /// component that has always reported through whatever the application
+    /// installed globally. An explicit opt-in: no other constructor here reads
+    /// a global, and this one installs none.
+    pub fn global(scope: impl Into<std::borrow::Cow<'static, str>>) -> Self {
+        let scope = opentelemetry::InstrumentationScope::builder(scope).build();
+        Self::default()
+            .with_meter(opentelemetry::global::meter_with_scope(scope.clone()))
+            .with_tracer(opentelemetry::global::tracer_with_scope(scope))
+    }
+
     /// The meter, for instruments a component needs beyond the shared ones.
     pub fn meter(&self) -> Option<&Meter> {
         self.meter.as_ref()

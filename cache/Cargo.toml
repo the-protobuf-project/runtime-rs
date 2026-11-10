@@ -12,6 +12,7 @@ categories = ["caching", "asynchronous"]
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/cache"
+use-for = "Cache records in Redis, Dragonfly or memcached"
 
 [lib]
 name = "cache"
@@ -27,7 +28,6 @@ serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-opentelemetry = { workspace = true }
 bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }

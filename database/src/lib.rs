@@ -56,4 +56,7 @@ pub use collection::collection;
 pub use ingest::{BatchWriter, IngestConfig};
 pub use mirror::mirror;
 pub use store::{DB, Error, Provider, Result};
+/// The signals [`store::instrument`] and the ingest workers report through, so a caller
+/// configures them without naming the telemetry crate.
+pub use telemetry::Telemetry;
 pub use typed_ingest::TypedBatchWriter;

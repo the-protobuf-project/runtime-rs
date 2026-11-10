@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::Error;
@@ -122,11 +121,13 @@ pub struct ConnectionOptions {
     /// Overrides the query used to verify a GraphQL server is reachable. If `None`,
     /// [`crate::graphql::DEFAULT_GRAPHQL_CONNECTIVITY_QUERY`] is used.
     pub graphql_connectivity_query: Option<String>,
-    /// When set, injects the calling span's context into every outgoing GraphQL and HTTP request
-    /// as headers, so a downstream service that continues the same propagator sees this request as
-    /// a child span. `None` (the default) injects nothing.
-    pub trace_propagator:
-        Option<Arc<dyn opentelemetry::propagation::TextMapPropagator + Send + Sync>>,
+    /// Traces, measures and logs every request: each HTTP or GraphQL request is a client span,
+    /// `network.request`, and a share of `runtime.operation.count` and
+    /// `runtime.operation.duration`, labeled component `network`, backend `http`, `graphql` or
+    /// `websocket`, operation and outcome; it carries its trace to the server in W3C
+    /// `traceparent` and `tracestate` headers. A WebSocket handshake is one `network.dial`
+    /// span carrying the same headers. The default reports nothing and injects nothing.
+    pub telemetry: telemetry::Telemetry,
 }
 
 impl fmt::Debug for ConnectionOptions {
@@ -142,7 +143,7 @@ impl fmt::Debug for ConnectionOptions {
                 "graphql_connectivity_query",
                 &self.graphql_connectivity_query,
             )
-            .field("trace_propagator", &self.trace_propagator.is_some())
+            .field("telemetry", &self.telemetry.is_enabled())
             .finish()
     }
 }

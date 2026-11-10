@@ -13,7 +13,7 @@ mod ws_protocol;
 
 use crate::error::{Error, Result};
 use crate::options::{ConnectionOptions, DEFAULT_TIMEOUT};
-use crate::transport::{HeaderCarrier, new_pooled_client};
+use crate::transport::{Traced, new_pooled_client};
 use crate::url::build_full_url;
 
 pub use batch::BatchOp;
@@ -61,6 +61,8 @@ pub type GraphQLResult<T> = Result<T>;
 #[derive(Default)]
 pub struct GraphQLClient {
     pub(crate) http: Option<reqwest::Client>,
+    /// Reports every request; built once, at connect, from the options' telemetry.
+    pub(crate) observer: Option<telemetry::Observer>,
     pub(crate) endpoint: Option<String>,
     /// The options this client was last connected with.
     pub options: ConnectionOptions,
@@ -81,6 +83,7 @@ impl GraphQLClient {
 
         self.http = Some(http);
         self.endpoint = Some(endpoint);
+        self.observer = crate::transport::observer(&opts.telemetry);
         self.options = opts;
 
         self.verify_connectivity().await
@@ -141,26 +144,36 @@ impl GraphQLClient {
             body.insert("variables".to_string(), v.clone());
         }
 
+        let traced = Traced::start(
+            self.observer.as_ref(),
+            "graphql",
+            "request",
+            "POST",
+            endpoint,
+        );
         let mut builder = client.post(endpoint).json(&body);
         for (k, v) in &self.options.headers {
             builder = builder.header(k, v);
         }
-        if let Some(propagator) = &self.options.trace_propagator {
-            let mut carrier = HeaderCarrier::default();
-            let cx = opentelemetry::Context::current();
-            propagator.inject_context(&cx, &mut carrier);
-            for (k, v) in carrier.0 {
-                builder = builder.header(k, v);
-            }
+        for (k, v) in &traced.headers {
+            builder = builder.header(k, v);
         }
 
         let send = builder.send();
-        let resp = tokio::time::timeout(self.options.timeout, send)
-            .await
-            .map_err(|_| Error::Timeout)?
-            .map_err(Error::SendRequest)?;
+        let resp = match tokio::time::timeout(self.options.timeout, send).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(err)) => {
+                traced.failed(err.is_timeout());
+                return Err(Error::SendRequest(err));
+            }
+            Err(_) => {
+                traced.failed(true);
+                return Err(Error::Timeout);
+            }
+        };
 
         let status = resp.status();
+        traced.answered(status.as_u16());
         let payload: serde_json::Value = resp.json().await.map_err(Error::ReadBody)?;
 
         if let Some(errors) = payload.get("errors").and_then(|e| e.as_array()) {

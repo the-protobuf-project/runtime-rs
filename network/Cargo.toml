@@ -13,6 +13,7 @@ categories = ["network-programming", "web-programming::http-client", "asynchrono
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/network"
+use-for = "Call HTTP, GraphQL and WebSocket APIs"
 
 [lib]
 name = "network"
@@ -28,11 +29,11 @@ serde_json = { workspace = true }
 url = { workspace = true }
 thiserror = { workspace = true }
 futures-util = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry-http = { workspace = true }
+telemetry = { workspace = true }
 http = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
 futures-util = { workspace = true }
 wiremock = { workspace = true }
+telemetry = { workspace = true, features = ["testing"] }

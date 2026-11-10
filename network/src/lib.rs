@@ -58,3 +58,7 @@ pub use network::{Client, Network};
 pub use options::{ClientType, ConnectionOptions, DEFAULT_TIMEOUT, Id, UrlOptions, UrlScheme};
 pub use url::{url_from_std, websocket_url};
 pub use websocket::{Message, WebSocketClient};
+
+/// The signals [`ConnectionOptions::telemetry`] reports through, so a caller
+/// configures them without naming the telemetry crate.
+pub use telemetry::Telemetry;
