@@ -2,12 +2,12 @@
 //!
 //! An application never names an OpenTelemetry type: it builds one
 //! [`Telemetry`] (from its SDK, with `Telemetry::from_tpp`) and hands it to
-//! [`instrument`](crate::instrument), to a provider's config, or to
+//! [`instrument`](crate::instrument()), to a provider's config, or to
 //! [`with_telemetry`]. Everything a caller needs is re-exported here.
 //!
 //! [`with_telemetry`] is the older publish-only middleware: a count and a
 //! latency per publish, labeled by subject and outcome. Ids and payloads are
-//! never recorded. [`instrument`](crate::instrument) traces every operation
+//! never recorded. [`instrument`](crate::instrument()) traces every operation
 //! as well, and carries the trace across the broker.
 
 use std::{sync::Arc, time::Instant};

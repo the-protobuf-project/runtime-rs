@@ -132,7 +132,7 @@ pub struct Message {
 }
 
 /// The span an instrumented provider started on receiving a message; see
-/// [`instrument`](crate::instrument). Equal whatever it holds, so two copies
+/// [`instrument`](crate::instrument()). Equal whatever it holds, so two copies
 /// of one message compare equal however they were received.
 #[derive(Clone, Default)]
 struct Trace(Option<tpp_telemetry::Context>);

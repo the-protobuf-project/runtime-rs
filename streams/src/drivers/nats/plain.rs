@@ -53,7 +53,7 @@ struct Shared {
 impl NatsProvider {
     /// A core NATS provider over `client`.
     ///
-    /// [`NatsConfig::meter`] is accepted and unused: core NATS has no durable
+    /// [`NatsConfig::telemetry`] is accepted and unused: core NATS has no durable
     /// deliveries to count.
     pub fn new(client: Client, config: NatsConfig) -> Self {
         Self {

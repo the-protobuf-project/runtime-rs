@@ -216,7 +216,7 @@ where
     /// The topic reporting through `telemetry`, as `backend`, the steps a
     /// provider cannot see: `streams.send` around each publish, with
     /// `streams.encode` and the provider's own `streams.publish` (when it is
-    /// [`instrument`](crate::instrument)ed) inside, and `streams.decode` for each
+    /// [`instrument`](crate::instrument())ed) inside, and `streams.decode` for each
     /// message received, the child of the provider's receive or deliver span,
     /// or of the publisher's when the provider is not instrumented.
     ///

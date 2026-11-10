@@ -376,7 +376,9 @@ fn render(ws: &Workspace) -> String {
 
     if !published.is_empty() {
         b.push_str("## Install\n\n");
-        b.push_str("Each crate is added on its own, so a service that stores records never builds a\n");
+        b.push_str(
+            "Each crate is added on its own, so a service that stores records never builds a\n",
+        );
         b.push_str("Kafka client:\n\n```bash\n");
         let width = published
             .iter()
@@ -406,7 +408,9 @@ fn render(ws: &Workspace) -> String {
     }
 
     b.push_str("## Crates\n\n");
-    b.push_str("Every crate declares a `description` in its `Cargo.toml` and carries crate-level\n");
+    b.push_str(
+        "Every crate declares a `description` in its `Cargo.toml` and carries crate-level\n",
+    );
     b.push_str("`//!` docs; this table is generated from those and verified on every push.\n\n");
     b.push_str("| Crate | What it is for | Docs |\n| --- | --- | --- |\n");
     for c in &ws.crates {
