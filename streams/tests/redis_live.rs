@@ -594,6 +594,49 @@ async fn consume_delivers_and_acknowledges() {
     got.ack().await.unwrap();
 }
 
+/// Commands spread over several shared connections still append each
+/// concurrent publish once, and its acks still settle it.
+#[tokio::test]
+async fn several_connections_append_every_publish_once() {
+    let provider = durable_with(RedisConfig {
+        connections: 4,
+        ..config()
+    })
+    .await;
+    let (_, m) = bind(&provider, &[SUBJECT]).await;
+    let d = as_durable(m.as_ref()).unwrap();
+    let mut deliveries = d
+        .consume(SUBJECT, "workers", &Options::default())
+        .await
+        .unwrap();
+
+    const N: usize = 200;
+    let publishes = (0..N).map(|i| {
+        let m = m.clone();
+        tokio::spawn(async move {
+            m.publish(
+                SUBJECT,
+                event(&i.to_string(), "created"),
+                &Options::default(),
+            )
+            .await
+            .unwrap();
+        })
+    });
+    for publish in futures::future::join_all(publishes).await {
+        publish.unwrap();
+    }
+
+    let mut seen = HashSet::new();
+    for _ in 0..N {
+        let got = recv_delivery(&mut deliveries, WITHIN).await;
+        let user = got.json::<Event>().unwrap().user;
+        assert!(seen.insert(user.clone()), "{user} appended twice");
+        got.ack().await.unwrap();
+    }
+    silent(&mut deliveries, Duration::from_millis(500)).await;
+}
+
 /// The whole reason to reach for Durable: a consumer that dies holding a
 /// message must not be the last word on it.
 #[tokio::test]

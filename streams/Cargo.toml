@@ -79,6 +79,11 @@ rustls = { workspace = true }
 # tests/nats_e2e.rs makes an NKey the server has never heard of. async-nats uses the same crate.
 nkeys = "0.4"
 
+# Typed topics over an in-memory provider; the messages are prost types.
+[[test]]
+name = "topic"
+required-features = ["protobuf"]
+
 [[test]]
 name = "zeromq"
 required-features = ["zeromq"]

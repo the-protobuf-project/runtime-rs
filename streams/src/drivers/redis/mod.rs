@@ -117,7 +117,13 @@ mod keys;
 mod pubsub;
 mod stream;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use redis::{
     ProtocolVersion, RedisError, RedisResult,
@@ -197,6 +203,19 @@ pub struct RedisConfig {
     /// tolerate. NATS JetStream's plain ack makes the same trade.
     pub confirm_acks: bool,
 
+    /// How many shared connections ordinary commands (publishes, acks,
+    /// lifecycle) are spread over, round-robin. At least one; 1 by default.
+    ///
+    /// One multiplexed connection pipelines every concurrent command, which
+    /// is the fastest way to reach a server that answers at once. Over TLS a
+    /// server that syncs each write to disk (`appendfsync always`) is
+    /// different: it reads about one command from a TLS connection per pass
+    /// of its event loop and syncs before the next, so one connection gets
+    /// one disk sync per command. Several connections each contribute a
+    /// command to every pass, and one sync covers them all. Blocking reads
+    /// always take connections of their own and are not counted here.
+    pub connections: usize,
+
     /// The codecs a received frame may name. JSON is always accepted.
     pub registry: Registry,
 
@@ -206,7 +225,7 @@ pub struct RedisConfig {
 
 impl Default for RedisConfig {
     /// No prefix, the client's own database, no length cap, the default reclaim
-    /// interval, and confirmed acks.
+    /// interval, confirmed acks, and one shared connection.
     fn default() -> Self {
         Self {
             prefix: String::new(),
@@ -214,6 +233,7 @@ impl Default for RedisConfig {
             max_len: None,
             reclaim_after: DEFAULT_RECLAIM,
             confirm_acks: true,
+            connections: 1,
             registry: Registry::new(),
             metrics: Metrics::default(),
         }
@@ -233,9 +253,14 @@ pub struct RedisProvider {
 pub(super) struct Inner {
     /// The caller's client, from which dedicated connections are opened.
     client: redis::Client,
-    /// The shared, reconnecting connection for ordinary commands. Opened on
-    /// first use so constructing a provider does no I/O, as in Go.
-    commands: OnceCell<ConnectionManager>,
+    /// The shared, reconnecting connections for ordinary commands, handed out
+    /// round-robin. Opened on first use so constructing a provider does no
+    /// I/O, as in Go.
+    commands: OnceCell<Vec<ConnectionManager>>,
+    /// How many `commands` holds; see [`RedisConfig::connections`].
+    connections: usize,
+    /// The next of `commands` to hand out.
+    next: AtomicUsize,
     keys: Keys,
     kind: Kind,
     database: i64,
@@ -285,6 +310,8 @@ impl RedisProvider {
             inner: Arc::new(Inner {
                 client,
                 commands: OnceCell::new(),
+                connections: config.connections.max(1),
+                next: AtomicUsize::new(0),
                 keys: Keys::new(&config.prefix, kind),
                 kind,
                 database,
@@ -338,45 +365,58 @@ impl Replay {
 }
 
 impl Inner {
-    /// The shared command connection, opened on first use.
+    /// One of the shared command connections, opened on first use and handed
+    /// out in turn.
     ///
     /// A clone of a [`ConnectionManager`] addresses the same multiplexed
     /// connection, so handing one out per call costs nothing and lets commands
     /// run concurrently.
     async fn manager(&self) -> RedisResult<ConnectionManager> {
-        self.commands
+        let pool = self
+            .commands
             .get_or_try_init(|| async {
-                let config = ConnectionManagerConfig::new()
-                    .set_number_of_retries(RECONNECT_ATTEMPTS)
-                    .set_max_delay(RECONNECT_WAIT_UP_TO)
-                    .set_response_timeout(Some(COMMAND_TIMEOUT));
-                let info = self.client.get_connection_info();
-                if info.redis_settings().protocol().supports_resp3() {
-                    return self.client.get_connection_manager_with_config(config).await;
+                let mut pool = Vec::with_capacity(self.connections);
+                for _ in 0..self.connections {
+                    pool.push(self.open_manager().await?);
                 }
-                let resp3 = redis::Client::open(
-                    info.clone().set_redis_settings(
-                        info.redis_settings()
-                            .clone()
-                            .set_protocol(ProtocolVersion::RESP3),
-                    ),
-                )?;
-                // One plain attempt first, because the manager retries every
-                // failure for seconds, a refused HELLO included.
-                let client = match resp3.get_multiplexed_async_connection().await {
-                    Err(error) if error.kind() == redis::ErrorKind::RESP3NotSupported => {
-                        tracing::info!("redis: server predates RESP3; using the client's protocol");
-                        self.client.clone()
-                    }
-                    _ => resp3,
-                };
-                client.get_connection_manager_with_config(config).await
+                Ok::<_, RedisError>(pool)
             })
-            .await
-            .cloned()
+            .await?;
+        let turn = self.next.fetch_add(1, Ordering::Relaxed) % pool.len();
+        Ok(pool[turn].clone())
     }
 
-    /// Runs one command on the shared connection, repeating it once on the
+    /// Opens one shared command connection, over RESP3 where the server
+    /// speaks it.
+    async fn open_manager(&self) -> RedisResult<ConnectionManager> {
+        let config = ConnectionManagerConfig::new()
+            .set_number_of_retries(RECONNECT_ATTEMPTS)
+            .set_max_delay(RECONNECT_WAIT_UP_TO)
+            .set_response_timeout(Some(COMMAND_TIMEOUT));
+        let info = self.client.get_connection_info();
+        if info.redis_settings().protocol().supports_resp3() {
+            return self.client.get_connection_manager_with_config(config).await;
+        }
+        let resp3 = redis::Client::open(
+            info.clone().set_redis_settings(
+                info.redis_settings()
+                    .clone()
+                    .set_protocol(ProtocolVersion::RESP3),
+            ),
+        )?;
+        // One plain attempt first, because the manager retries every
+        // failure for seconds, a refused HELLO included.
+        let client = match resp3.get_multiplexed_async_connection().await {
+            Err(error) if error.kind() == redis::ErrorKind::RESP3NotSupported => {
+                tracing::info!("redis: server predates RESP3; using the client's protocol");
+                self.client.clone()
+            }
+            _ => resp3,
+        };
+        client.get_connection_manager_with_config(config).await
+    }
+
+    /// Runs one command on a shared connection, repeating it once on the
     /// replacement connection when the first one had dropped and `replay`
     /// allows it.
     pub(super) async fn query<T: redis::FromRedisValue>(

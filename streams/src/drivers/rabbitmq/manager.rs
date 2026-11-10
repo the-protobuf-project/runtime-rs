@@ -143,9 +143,11 @@ impl RabbitManager {
             .await
             .map_err(|e| fail("bind", e))?;
 
-        // A subscription auto-acknowledges, as in runtime-go: it promised no
-        // redelivery, and the channel closing ends it either way. A durable
-        // consumer leaves acknowledgement to the caller.
+        // A subscription auto-acknowledges: it promised no redelivery, and the
+        // channel closing ends it either way. runtime-go acknowledges each
+        // message as it hands it over instead, so prefetch bounds what the
+        // broker pushes ahead of its reader. A durable consumer leaves
+        // acknowledgement to the caller.
         channel
             .basic_consume(
                 queue.name().clone(),

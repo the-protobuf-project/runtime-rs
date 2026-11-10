@@ -22,7 +22,8 @@ fn cert(name: &str) -> String {
 }
 
 /// Connects `plain` or mutual-TLS `tls` with ten partitions per topic, so
-/// subjects spread across partitions; `KAFKA_PRODUCERS` sets the producer pool.
+/// subjects spread across partitions; `KAFKA_PRODUCERS` sets the producer pool,
+/// and `KAFKA_CONFIG` (`key=value,key=value`) sets librdkafka properties on top.
 pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
     let mut client = ClientConfig::new();
     match profile {
@@ -42,6 +43,10 @@ pub async fn connect(profile: &str, registry: Registry) -> Result<Conn, Error> {
                 .set("ssl.key.location", cert("client.key"));
         }
         other => return Err(unknown_profile("kafka", other)),
+    }
+    for pair in env("KAFKA_CONFIG", "").split(',').filter(|p| !p.is_empty()) {
+        let (key, value) = pair.split_once('=').expect("KAFKA_CONFIG is key=value,...");
+        client.set(key, value);
     }
     let config = KafkaConfig {
         prefix: "bench".into(),
