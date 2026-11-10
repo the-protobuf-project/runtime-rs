@@ -47,6 +47,8 @@ struct Crate {
     package: String,
     /// The runtime-go package this crate ports, from `[package.metadata.docgen]`.
     go_source: Option<String>,
+    /// What a reader would reach for it to do, from `[package.metadata.docgen] use-for`.
+    use_for: Option<String>,
     /// `package.description` from the manifest.
     description: Option<String>,
     /// The crate is published to crates.io (`publish` is not `false`).
@@ -59,8 +61,16 @@ struct Crate {
 struct Workspace {
     /// Repo name, taken from the workspace root directory.
     title: String,
-    /// One-line summary from `[workspace.metadata.docgen] tagline`.
+    /// One-line summary from `[workspace.metadata.docgen] headline`, shown bold.
+    headline: Option<String>,
+    /// The opening paragraph, from `[workspace.metadata.docgen] tagline`.
     tagline: Option<String>,
+    /// A short Rust example, and the sentences around it, from the same table.
+    example: Option<String>,
+    example_intro: Option<String>,
+    example_outro: Option<String>,
+    /// The Telemetry section's body, from the same table.
+    telemetry: Option<String>,
     /// Repository URL, used for the CI badge.
     repository: Option<String>,
     /// SPDX licence expression, e.g. `Apache-2.0`.
@@ -233,6 +243,7 @@ fn collect(root: &Path) -> Result<Workspace, String> {
                 .ok_or("a package has no `name`")?
                 .to_string(),
             go_source: text(&pkg["metadata"]["docgen"]["go-source"]),
+            use_for: text(&pkg["metadata"]["docgen"]["use-for"]),
             description: text(&pkg["description"]),
             // `publish = false` serialises as an empty array; absent (the
             // default, meaning publishable anywhere) serialises as null.
@@ -247,7 +258,12 @@ fn collect(root: &Path) -> Result<Workspace, String> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .ok_or("the workspace root has no directory name")?,
+        headline: text(&metadata["metadata"]["docgen"]["headline"]),
         tagline: text(&metadata["metadata"]["docgen"]["tagline"]),
+        example: text(&metadata["metadata"]["docgen"]["example"]),
+        example_intro: text(&metadata["metadata"]["docgen"]["example-intro"]),
+        example_outro: text(&metadata["metadata"]["docgen"]["example-outro"]),
+        telemetry: text(&metadata["metadata"]["docgen"]["telemetry"]),
         // Inherited from workspace.package, so any member carries it.
         repository: packages.iter().find_map(|p| text(&p["repository"])),
         license: packages.iter().find_map(|p| text(&p["license"])),
@@ -324,82 +340,106 @@ fn render(ws: &Workspace) -> String {
         b.push('\n');
     }
 
+    if let Some(headline) = &ws.headline {
+        b.push_str(&format!("**{headline}**\n\n"));
+    }
     if let Some(tagline) = &ws.tagline {
         b.push_str(tagline);
         b.push_str("\n\n");
     }
+    b.push_str("```mermaid\nflowchart LR\n");
+    b.push_str("    proto[\".proto\"] --> plugins[\"protoc-gen-* plugins\"]\n");
+    b.push_str("    plugins --> gen[\"generated code\"]\n");
+    b.push_str("    gen --> rt[\"runtime-rs\"]\n");
+    b.push_str("    rt --> backends[\"InfluxDB, Redis,<br/>Kafka, NATS, MQTT, ...\"]\n");
+    b.push_str("```\n\n");
 
-    b.push_str("## Crates\n\n");
-    b.push_str(&format!(
-        "{} crates. Each declares a `description` in its `Cargo.toml` and carries crate-level\n",
-        ws.crates.len()
-    ));
-    b.push_str("`//!` docs; this table is generated from those and verified on every push.\n\n");
-    b.push_str("| Crate | Published as | Go source | Summary |\n");
-    b.push_str("| --- | --- | --- | --- |\n");
-    for c in &ws.crates {
+    let published: Vec<&Crate> = ws.crates.iter().filter(|c| c.publishable).collect();
+
+    b.push_str("## Start here\n\n");
+    b.push_str("| I want to | Crate | Go twin |\n| --- | --- | --- |\n");
+    for c in &published {
         b.push_str(&format!(
-            "| [`{}`]({}) | `{}` | {} | {} |\n",
+            "| {} | [`{}`]({}) | {} |\n",
+            c.use_for
+                .as_deref()
+                .or(c.description.as_deref())
+                .unwrap_or("_(no description)_"),
             c.rel,
             c.rel,
-            c.package,
             c.go_source
                 .as_ref()
                 .map_or_else(|| "—".to_string(), |s| format!("`{s}`")),
-            c.description.as_deref().unwrap_or("_(no description)_"),
         ));
     }
-    b.push('\n');
+    b.push_str("\nEach crate's guide walks through it with examples, and its rustdoc says how it works.\n\n");
 
-    let published: Vec<&Crate> = ws.crates.iter().filter(|c| c.publishable).collect();
     if !published.is_empty() {
-        b.push_str("## Installation\n\n```bash\n");
+        b.push_str("## Install\n\n");
+        b.push_str(
+            "Each crate is added on its own, so a service that stores records never builds a\n",
+        );
+        b.push_str("Kafka client:\n\n```bash\n");
         let width = published
             .iter()
             .map(|c| c.package.len())
             .max()
             .unwrap_or_default();
         for c in &published {
-            match &c.description {
-                Some(d) => b.push_str(&format!(
-                    "cargo add {:<width$}  # {}\n",
-                    c.package,
-                    d,
-                    width = width
-                )),
-                None => b.push_str(&format!("cargo add {}\n", c.package)),
-            }
-        }
-        b.push_str("```\n\n");
-
-        b.push_str("## Documentation\n\n");
-        b.push_str(
-            "Start with a module guide for setup and copyable code snippets. Source guides\n",
-        );
-        b.push_str(
-            "trace execution and shutdown; test guides explain verification and fixtures.\n\n",
-        );
-        b.push_str(
-            "| Module | Usage and examples | Implementation | Verification | API reference |\n",
-        );
-        b.push_str("| --- | --- | --- | --- | --- |\n");
-        for c in &published {
             b.push_str(&format!(
-                "| `{0}` | [Guide]({0}/README.md) | [Source]({0}/src/README.md) | [Tests]({0}/tests/README.md) | [{1}](https://docs.rs/{1}) |\n",
-                c.rel, c.package
+                "cargo add {:<width$}  # {}\n",
+                c.package,
+                c.rel,
+                width = width
             ));
         }
-        b.push('\n');
-        b.push_str("Runtime composition: `grpc` hosts services and gateways and drives `agents`\n");
-        b.push_str(
-            "for MCP/A2A. Applications can use `network` clients, `cache` strategies, and\n",
-        );
-        b.push_str(
-            "`database` stores independently. Cache/database operations can share caller-owned\n",
-        );
-        b.push_str(
-            "`telemetry` handles; applications drain work before shutting down providers.\n\n",
-        );
+        b.push_str("```\n\n");
+    }
+    if let Some(example) = &ws.example {
+        if let Some(intro) = &ws.example_intro {
+            b.push_str(intro);
+            b.push_str("\n\n");
+        }
+        b.push_str(&format!("```rust\n{example}\n```\n\n"));
+        if let Some(outro) = &ws.example_outro {
+            b.push_str(outro);
+            b.push_str("\n\n");
+        }
+    }
+
+    b.push_str("## Crates\n\n");
+    b.push_str(
+        "Every crate declares a `description` in its `Cargo.toml` and carries crate-level\n",
+    );
+    b.push_str("`//!` docs; this table is generated from those and verified on every push.\n\n");
+    b.push_str("| Crate | What it is for | Docs |\n| --- | --- | --- |\n");
+    for c in &ws.crates {
+        let docs = if c.publishable {
+            format!(
+                "[Guide]({0}/README.md) · [Source]({0}/src/README.md) · [Tests]({0}/tests/README.md) · [API](https://docs.rs/{1})",
+                c.rel, c.package
+            )
+        } else {
+            format!("[Guide]({}/README.md)", c.rel)
+        };
+        b.push_str(&format!(
+            "| [`{}`]({}) <br/>`{}` | {} | {} |\n",
+            c.rel,
+            c.rel,
+            c.package,
+            c.description.as_deref().unwrap_or("_(no description)_"),
+            docs,
+        ));
+    }
+    b.push('\n');
+    b.push_str("`grpc` hosts services and gateways and drives `agents` for MCP and A2A.\n");
+    b.push_str("`network` clients, `cache` strategies and `database` stores stand on their own,\n");
+    b.push_str("and every crate shares the application's `telemetry` handle.\n\n");
+
+    if let Some(telemetry) = &ws.telemetry {
+        b.push_str("## Telemetry\n\n");
+        b.push_str(telemetry);
+        b.push_str("\n\n");
     }
 
     b.push_str("## Development\n\n```bash\n");

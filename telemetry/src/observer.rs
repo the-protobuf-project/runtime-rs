@@ -7,13 +7,30 @@ use opentelemetry::{
     Context, KeyValue,
     trace::{Link, SpanContext, SpanKind, TraceContextExt, Tracer},
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Instant, SystemTime},
+};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 pub(crate) struct State {
     pub telemetry: Telemetry,
     pub component: &'static str,
     pub metrics: Option<Metrics>,
+}
+
+/// How [`Observer::start_with`] begins an operation; the default is
+/// [`Observer::start`]'s: the current context, now, no extra attributes.
+#[derive(Clone, Debug, Default)]
+pub struct Start {
+    /// The parent context; the current one when unset.
+    pub parent: Option<Context>,
+    /// When the work began, for a span opened after it did.
+    pub time: Option<SystemTime>,
+    /// Span-only attributes. Metric labels stay the bounded four.
+    pub attributes: Vec<KeyValue>,
+    /// Producer spans this one follows from; at most 32 are kept.
+    pub links: Vec<SpanContext>,
 }
 
 /// Cheap, shareable component observer; no tasks or lifecycle ownership.
@@ -27,6 +44,11 @@ impl Observer {
             component,
             metrics,
         }))
+    }
+
+    /// The meter, for instruments a component needs beyond the shared ones.
+    pub fn meter(&self) -> Option<&opentelemetry::metrics::Meter> {
+        self.0.telemetry.meter.as_ref()
     }
 
     /// Whether this observer has any configured signal.
@@ -52,25 +74,55 @@ impl Observer {
         kind: SpanKind,
         links: &[SpanContext],
     ) -> Operation {
-        let mut parent = Context::current();
-        if !parent.span().span_context().is_valid() && self.0.telemetry.tracer.is_some() {
-            parent = tracing::Span::current().context();
-        }
+        self.start_with(
+            backend,
+            operation,
+            kind,
+            Start {
+                links: links.to_vec(),
+                ..Start::default()
+            },
+        )
+    }
+
+    /// Starts one operation as `start` says: under an explicit parent (a remote
+    /// one [`extract`](crate::extract)ed from a message or request), at a time
+    /// that has already passed, with span-only attributes and links.
+    pub fn start_with(
+        &self,
+        backend: &'static str,
+        operation: &'static str,
+        kind: SpanKind,
+        start: Start,
+    ) -> Operation {
+        let parent = match start.parent {
+            Some(parent) => parent,
+            None => {
+                let mut parent = Context::current();
+                if !parent.span().span_context().is_valid() && self.0.telemetry.tracer.is_some() {
+                    parent = tracing::Span::current().context();
+                }
+                parent
+            }
+        };
         let attributes = labels(self.0.component, backend, operation);
         let context = if let Some(tracer) = &self.0.telemetry.tracer {
-            let links = links
-                .iter()
+            let links = start
+                .links
+                .into_iter()
                 .filter(|sc| sc.is_valid())
                 .take(32)
-                .cloned()
                 .map(|sc| Link::new(sc, Vec::new(), 0))
                 .collect();
-            let span = tracer
+            let mut builder = tracer
                 .span_builder(format!("{}.{}", self.0.component, operation))
                 .with_kind(kind)
-                .with_attributes(attributes.clone())
-                .with_links(links)
-                .start_with_context(tracer.as_ref(), &parent);
+                .with_attributes(attributes.iter().cloned().chain(start.attributes))
+                .with_links(links);
+            if let Some(time) = start.time {
+                builder = builder.with_start_time(time);
+            }
+            let span = builder.start_with_context(tracer.as_ref(), &parent);
             parent.with_span(span)
         } else {
             parent

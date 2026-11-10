@@ -24,17 +24,22 @@ mod metrics;
 mod observer;
 mod operation;
 mod outcome;
+mod propagation;
+#[cfg(feature = "testing")]
+pub mod testing;
 #[cfg(feature = "tpp-sdk")]
 mod tpp;
 pub use config::Telemetry;
 pub use logging::{LogSink, Severity, TracingLogs};
 pub use observer::Observer;
+pub use observer::Start;
 pub use opentelemetry::{
     self, Context, KeyValue,
     trace::{FutureExt, SpanKind},
 };
 pub use operation::Operation;
 pub use outcome::Outcome;
+pub use propagation::{TRACEPARENT, TRACESTATE, extract, extract_into, inject, trace_id};
 
 /// Application SDK re-export; available only with the explicit tpp-sdk feature.
 #[cfg(feature = "tpp-sdk")]

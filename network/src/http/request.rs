@@ -170,21 +170,31 @@ impl super::HttpClient {
         headers: &HashMap<String, String>,
     ) -> Result<Vec<u8>> {
         let client = self.client.as_ref().ok_or(Error::HttpNotConnected)?;
-        let mut builder = client.request(method.into(), full_url).body(body);
+        let method: reqwest::Method = method.into();
+        let traced = crate::transport::Traced::start(
+            self.observer.as_ref(),
+            "http",
+            "request",
+            method.as_str(),
+            full_url,
+        );
+        let mut builder = client.request(method, full_url).body(body);
         for (k, v) in headers {
             builder = builder.header(k, v);
         }
-        if let Some(propagator) = &self.options.trace_propagator {
-            let mut carrier = crate::transport::HeaderCarrier::default();
-            let cx = opentelemetry::Context::current();
-            propagator.inject_context(&cx, &mut carrier);
-            for (k, v) in carrier.0 {
-                builder = builder.header(k, v);
-            }
+        for (k, v) in &traced.headers {
+            builder = builder.header(k, v);
         }
 
-        let resp = builder.send().await.map_err(Error::SendRequest)?;
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(err) => {
+                traced.failed(err.is_timeout());
+                return Err(Error::SendRequest(err));
+            }
+        };
         let status = resp.status();
+        traced.answered(status.as_u16());
         let data = resp.bytes().await.map_err(Error::ReadBody)?.to_vec();
         validate_status_code(status.as_u16())?;
         Ok(data)

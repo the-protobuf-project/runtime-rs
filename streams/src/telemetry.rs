@@ -1,19 +1,26 @@
-//! OpenTelemetry metrics around publishing.
+//! Telemetry for streams, through tpp-telemetry only.
 //!
-//! The caller supplies a Meter and keeps ownership of the provider, reader, and
-//! exporter. Attributes are bounded: the subject, which a stream declares up
-//! front, and the outcome. Ids and payloads are never recorded.
+//! An application never names an OpenTelemetry type: it builds one
+//! [`Telemetry`] (from its SDK, with `Telemetry::from_tpp`) and hands it to
+//! [`instrument`](crate::instrument()), to a provider's config, or to
+//! [`with_telemetry`]. Everything a caller needs is re-exported here.
+//!
+//! [`with_telemetry`] is the older publish-only middleware: a count and a
+//! latency per publish, labeled by subject and outcome. Ids and payloads are
+//! never recorded. [`instrument`](crate::instrument()) traces every operation
+//! as well, and carries the trace across the broker.
 
 use std::{sync::Arc, time::Instant};
 
-use opentelemetry::{
+use tpp_telemetry::opentelemetry::{
     KeyValue,
-    metrics::{Counter, Histogram, Meter},
+    metrics::{Counter, Histogram},
 };
+pub use tpp_telemetry::{Outcome, Telemetry};
 
 use crate::{Middleware, Options, Payload, Publisher, Result};
 
-/// Publisher holding instruments built once from one Meter.
+/// Publisher holding instruments built once from one meter.
 struct TelemetryPublisher {
     next: Arc<dyn Publisher>,
     published: Counter<u64>,
@@ -21,8 +28,11 @@ struct TelemetryPublisher {
 }
 
 /// Counts publishes and records their latency, partitioned by subject and
-/// outcome.
-pub fn with_telemetry(next: Arc<dyn Publisher>, meter: &Meter) -> Arc<dyn Publisher> {
+/// outcome, on `telemetry`'s meter; returns `next` unchanged when it has none.
+pub fn with_telemetry(next: Arc<dyn Publisher>, telemetry: &Telemetry) -> Arc<dyn Publisher> {
+    let Some(meter) = telemetry.meter() else {
+        return next;
+    };
     Arc::new(TelemetryPublisher {
         next,
         published: meter
@@ -39,8 +49,8 @@ pub fn with_telemetry(next: Arc<dyn Publisher>, meter: &Meter) -> Arc<dyn Publis
 }
 
 /// [`with_telemetry`] as [`Middleware`].
-pub fn with_telemetry_middleware(meter: Meter) -> Middleware {
-    Arc::new(move |next| with_telemetry(next, &meter))
+pub fn with_telemetry_middleware(telemetry: Telemetry) -> Middleware {
+    Arc::new(move |next| with_telemetry(next, &telemetry))
 }
 
 #[async_trait::async_trait]

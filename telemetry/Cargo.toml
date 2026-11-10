@@ -9,6 +9,7 @@ repository = "https://github.com/the-protobuf-project/runtime-rs"
 
 [package.metadata.docgen]
 go-source = "runtime-go/telemetry"
+use-for = "Trace, measure and log all of the above"
 
 [lib]
 name = "telemetry"
@@ -16,11 +17,14 @@ name = "telemetry"
 [features]
 default = []
 tpp-sdk = ["dep:telemetry-sdk"]
+# In-memory signals for other crates' tests; see the testing module.
+testing = ["dep:opentelemetry_sdk"]
 
 [dependencies]
 opentelemetry.workspace = true
 tracing.workspace = true
 tracing-opentelemetry = "0.34"
+opentelemetry_sdk = { version = "0.33", features = ["testing"], optional = true }
 telemetry-sdk = { package = "telemetry", git = "https://github.com/the-protobuf-project/telemetry", rev = "5b18b2cb02bb88d7dd1948333efb8e29ee688489", optional = true }
 
 [dev-dependencies]

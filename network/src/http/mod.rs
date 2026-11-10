@@ -58,6 +58,8 @@ impl From<HttpMethod> for reqwest::Method {
 #[derive(Default)]
 pub struct HttpClient {
     pub(crate) client: Option<reqwest::Client>,
+    /// Reports every request; built once, at connect, from the options' telemetry.
+    pub(crate) observer: Option<telemetry::Observer>,
     /// The options this client was last connected with.
     pub options: ConnectionOptions,
 }
@@ -80,6 +82,7 @@ impl HttpClient {
 
         let client = new_pooled_client(opts.timeout)?;
         self.client = Some(client);
+        self.observer = crate::transport::observer(&opts.telemetry);
         self.options = opts;
 
         if self.options.skip_connectivity_check {

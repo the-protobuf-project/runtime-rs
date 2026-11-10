@@ -7,12 +7,12 @@
 //! [`crate::Loopback`], so it sees a call an interceptor refuses, and a REST call as the gRPC
 //! call it becomes, just as Go's stats handler sees the gateway's dial.
 //!
-//! An embedder that keeps its own providers for its own signals passes separate ones to
-//! [`HybridServer::with_telemetry_providers`], or opts out with
+//! An embedder that keeps its own providers for its own signals passes a
+//! [`Telemetry`] to [`HybridServer::with_telemetry`], or opts out with
 //! [`HybridServer::without_telemetry`], so the runtime's spans and metrics do not land in the
-//! embedder's export. Either way the global providers are not touched. The global text-map
-//! propagator is still read to continue a caller's trace: it decides a header format and
-//! exports nothing.
+//! embedder's export. Either way the global providers are not touched, and the caller's trace
+//! is continued from its W3C `traceparent` header by tpp-telemetry, with no global propagator
+//! involved. Nothing here names an OpenTelemetry type an application would have to import.
 //!
 //! With no provider installed the instruments are no-ops, which is the cost argument Go makes
 //! for leaving this on unconditionally. No exporter is added: that is the application's job,
@@ -43,12 +43,15 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use http_body::Frame;
-use opentelemetry::context::{Context, FutureExt as _};
-use opentelemetry::global::{self, BoxedTracer, ObjectSafeTracerProvider};
-use opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider};
-use opentelemetry::trace::{SpanKind, Status as SpanStatus, TraceContextExt as _, Tracer as _};
-use opentelemetry::{InstrumentationScope, KeyValue};
-use opentelemetry_http::HeaderExtractor;
+use telemetry::Telemetry;
+use telemetry::opentelemetry::KeyValue;
+use telemetry::opentelemetry::context::{Context, FutureExt as _};
+use telemetry::opentelemetry::global::BoxedTracer;
+use telemetry::opentelemetry::metrics::{Counter, Histogram, Meter, MeterProvider as _};
+use telemetry::opentelemetry::propagation::Extractor;
+use telemetry::opentelemetry::trace::{
+    SpanKind, Status as SpanStatus, TraceContextExt as _, Tracer as _,
+};
 use tonic::body::Body;
 use tonic::{Code, Status};
 
@@ -84,7 +87,7 @@ const SIZE_BOUNDARIES: [f64; 14] = [
 ];
 
 struct Instruments {
-    tracer: BoxedTracer,
+    tracer: Arc<BoxedTracer>,
     started: Counter<u64>,
     duration: Histogram<f64>,
     sent: Histogram<u64>,
@@ -94,14 +97,13 @@ struct Instruments {
 impl Instruments {
     fn global() -> Self {
         tracing::debug!(scope = SCOPE, "gRPC: resolving OpenTelemetry instruments");
-        let scope = scope();
-        Self::new(
-            global::tracer_with_scope(scope.clone()),
-            &global::meter_with_scope(scope),
-        )
+        Self::new(&Telemetry::global(SCOPE))
     }
 
-    fn new(tracer: BoxedTracer, meter: &Meter) -> Self {
+    /// The instruments `telemetry` gives; a signal it lacks is a no-op.
+    fn new(telemetry: &Telemetry) -> Self {
+        let (tracer, meter) = handles(telemetry);
+        let meter = &meter;
         Self {
             tracer,
             started: meter
@@ -127,10 +129,30 @@ impl Instruments {
     }
 }
 
-fn scope() -> InstrumentationScope {
-    InstrumentationScope::builder(SCOPE)
-        .with_version(env!("CARGO_PKG_VERSION"))
-        .build()
+/// `telemetry`'s tracer and meter, a no-op standing in for either it lacks.
+pub(crate) fn handles(telemetry: &Telemetry) -> (Arc<BoxedTracer>, Meter) {
+    let tracer = telemetry.tracer().unwrap_or_else(|| {
+        Arc::new(BoxedTracer::new(Box::new(
+            telemetry::opentelemetry::trace::noop::NoopTracer::new(),
+        )))
+    });
+    let meter = telemetry.meter().cloned().unwrap_or_else(|| {
+        telemetry::opentelemetry::metrics::NoopMeterProvider::new().meter(SCOPE)
+    });
+    (tracer, meter)
+}
+
+/// Reads a request's headers for the caller's trace.
+pub(crate) struct HeaderExtractor<'a>(pub &'a http::HeaderMap);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.keys().map(http::HeaderName::as_str).collect()
+    }
 }
 
 /// Where a server's instruments come from.
@@ -171,23 +193,17 @@ impl OtelLayer {
 }
 
 impl HybridServer {
-    /// Records the always-on gRPC spans and metrics through these providers rather than the
-    /// global ones, so an embedder decides whether they join its own export.
+    /// Records the always-on gRPC spans and metrics through `telemetry` rather than the
+    /// global providers, so an embedder decides whether they join its own export.
     ///
     /// Go's server takes its global providers from the application; this is for the
     /// application that keeps global providers for itself. It covers this layer only: an
-    /// [`Observer`](crate::Observer) takes its providers from
-    /// [`Observer::with_providers`](crate::Observer::with_providers).
+    /// [`Observer`](crate::Observer) takes its signals from
+    /// [`Observer::with_telemetry`](crate::Observer::with_telemetry).
     #[must_use]
-    pub fn with_telemetry_providers<T, M>(mut self, tracers: &T, meters: &M) -> Self
-    where
-        T: ObjectSafeTracerProvider + ?Sized,
-        M: MeterProvider + ?Sized,
-    {
-        let tracer = BoxedTracer::new(tracers.boxed_tracer(scope()));
-        let meter = meters.meter_with_scope(scope());
+    pub fn with_telemetry(mut self, telemetry: &Telemetry) -> Self {
         self.telemetry = OtelLayer {
-            source: Source::Explicit(Arc::new(Instruments::new(tracer, &meter))),
+            source: Source::Explicit(Arc::new(Instruments::new(telemetry))),
         };
         self
     }
@@ -247,9 +263,7 @@ where
             .unwrap_or((full_method.as_str(), ""));
 
         // The caller's trace, when it sent one, as `otelgrpc` reads it.
-        let parent = global::get_text_map_propagator(|propagator| {
-            propagator.extract(&HeaderExtractor(request.headers()))
-        });
+        let parent = telemetry::extract(&HeaderExtractor(request.headers()));
         let span = instruments
             .tracer
             .span_builder(full_method.clone())
@@ -259,7 +273,7 @@ where
                 KeyValue::new("rpc.service", service.to_string()),
                 KeyValue::new("rpc.method", method.to_string()),
             ])
-            .start_with_context(&instruments.tracer, &parent);
+            .start_with_context(instruments.tracer.as_ref(), &parent);
         let context = parent.with_span(span);
 
         let attribute = KeyValue::new("grpc.method", full_method);

@@ -12,6 +12,7 @@ categories = ["network-programming", "asynchronous"]
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/agents"
+use-for = "Let AI agents call a service over MCP or A2A"
 
 [lib]
 name = "agents"
@@ -45,6 +46,7 @@ tonic = { workspace = true }
 tower-http = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+telemetry = { workspace = true }
 async-trait = { workspace = true }
 http = { workspace = true }
 
@@ -91,6 +93,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
+telemetry = { workspace = true, features = ["testing"] }
 tokio = { workspace = true, features = ["test-util"] }
 # A real MCP client over a Unix socket, for tests/mcp_unix.rs.
 rmcp = { version = "3.9", features = ["client", "transport-streamable-http-client-unix-socket"] }

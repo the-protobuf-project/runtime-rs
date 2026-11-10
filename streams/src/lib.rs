@@ -88,6 +88,7 @@ pub mod codec;
 pub mod core;
 pub mod drivers;
 pub mod error;
+pub mod instrument;
 pub mod logging;
 pub mod middleware;
 pub mod provider;
@@ -105,10 +106,11 @@ pub use core::{
     Subscriber, Subscription, as_batch, as_durable, as_positioned, require,
 };
 pub use error::{Result, StreamError};
+pub use instrument::{SENT_AT_HEADER, instrument};
 pub use logging::{with_logging, with_logging_middleware, with_subscriber_logging};
 pub use middleware::{Middleware, chain};
 pub use retry::{with_retry, with_retry_middleware};
-pub use telemetry::{with_telemetry, with_telemetry_middleware};
+pub use telemetry::{Telemetry, with_telemetry, with_telemetry_middleware};
 // The topic's Publisher, Subscriber, Consumer and Delivery stay under `topic::`:
 // the first two would shadow the contract's traits of the same name.
 pub use topic::{BatchPolicy, BatchSink, FieldFn, Topic, TopicSpec};

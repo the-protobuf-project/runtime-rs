@@ -68,6 +68,10 @@ use std::{fmt, sync::Arc, time::Duration};
 
 use futures::{StreamExt, stream::BoxStream};
 use tokio::time::Instant;
+use tpp_telemetry::{
+    FutureExt, KeyValue, Observer, Operation, Outcome, SpanKind, Start, Telemetry, extract,
+    opentelemetry::propagation::Extractor,
+};
 
 #[cfg(feature = "protobuf")]
 use crate::Protobuf;
@@ -175,6 +179,7 @@ pub struct Topic<
     manager: Arc<dyn Manager>,
     codec: C,
     spec: &'static TopicSpec<T>,
+    telemetry: Option<Arc<TopicTelemetry>>,
 }
 
 impl<T, C: Clone> Clone for Topic<T, C> {
@@ -184,6 +189,7 @@ impl<T, C: Clone> Clone for Topic<T, C> {
             manager: self.manager.clone(),
             codec: self.codec.clone(),
             spec: self.spec,
+            telemetry: self.telemetry.clone(),
         }
     }
 }
@@ -203,7 +209,27 @@ where
             manager,
             codec,
             spec,
+            telemetry: None,
         }
+    }
+
+    /// The topic reporting through `telemetry`, as `backend`, the steps a
+    /// provider cannot see: `streams.send` around each publish, with
+    /// `streams.encode` and the provider's own `streams.publish` (when it is
+    /// [`instrument`](crate::instrument())ed) inside, and `streams.decode` for each
+    /// message received, the child of the provider's receive or deliver span,
+    /// or of the publisher's when the provider is not instrumented.
+    ///
+    /// Each is a share of `runtime.operation.count` and
+    /// `runtime.operation.duration`; telemetry without a signal changes nothing.
+    pub fn with_telemetry(mut self, telemetry: &Telemetry, backend: &'static str) -> Self {
+        if telemetry.is_enabled() {
+            self.telemetry = Some(Arc::new(TopicTelemetry {
+                observer: telemetry.observer("streams"),
+                backend,
+            }));
+        }
+        self
     }
 
     /// The subject it publishes and subscribes on.
@@ -322,11 +348,40 @@ where
     /// or header set here wins for this message.
     pub async fn publish_with(&self, value: &T, opts: Options) -> Result<String> {
         let opts = self.topic.publish_options(value, opts);
-        let payload = Payload::encode(&self.topic.codec, value)?;
-        self.topic
-            .manager
-            .publish(self.topic.spec.subject, payload, &opts)
-            .await
+        let topic = &self.topic;
+        let Some(tel) = &topic.telemetry else {
+            let payload = Payload::encode(&topic.codec, value)?;
+            return topic
+                .manager
+                .publish(topic.spec.subject, payload, &opts)
+                .await;
+        };
+        let send = tel.start(
+            &topic.codec,
+            topic.spec.subject,
+            "send",
+            SpanKind::Producer,
+            None,
+        );
+        let payload = tel.encode(
+            Some(send.context()),
+            &topic.codec,
+            topic.spec.subject,
+            std::slice::from_ref(value),
+        );
+        let result = match payload {
+            Ok(mut payloads) => {
+                let payload = payloads.pop().expect("one value, one payload");
+                topic
+                    .manager
+                    .publish(topic.spec.subject, payload, &opts)
+                    .with_context(send.context())
+                    .await
+            }
+            Err(error) => Err(error),
+        };
+        TopicTelemetry::finish(send, &result);
+        result
     }
 
     /// Publishes `values` in order and returns their ids, one per value.
@@ -357,11 +412,43 @@ where
 
     /// Publishes values that share one set of options.
     async fn publish_run(&self, values: &[T], opts: &Options) -> Result<Vec<String>> {
+        let Some(tel) = &self.topic.telemetry else {
+            return self.publish_encoded(values, opts).await;
+        };
+        let topic = &self.topic;
+        let mut send = tel.start(
+            &topic.codec,
+            topic.spec.subject,
+            "send",
+            SpanKind::Producer,
+            None,
+        );
+        send.set_attribute(KeyValue::new(
+            "messaging.batch.message_count",
+            values.len() as i64,
+        ));
+        let result = self
+            .publish_encoded(values, opts)
+            .with_context(send.context())
+            .await;
+        if let Ok(ids) = &result {
+            send.written_rows(ids.len());
+        }
+        TopicTelemetry::finish(send, &result);
+        result
+    }
+
+    /// Encodes values, as one encode operation under the send in the current
+    /// context when the topic has telemetry, and publishes them as one run.
+    async fn publish_encoded(&self, values: &[T], opts: &Options) -> Result<Vec<String>> {
         let subject = self.topic.spec.subject;
-        let payloads = values
-            .iter()
-            .map(|value| Payload::encode(&self.topic.codec, value))
-            .collect::<Result<Vec<_>>>()?;
+        let payloads = match &self.topic.telemetry {
+            Some(tel) => tel.encode(None, &self.topic.codec, subject, values)?,
+            None => values
+                .iter()
+                .map(|value| Payload::encode(&self.topic.codec, value))
+                .collect::<Result<Vec<_>>>()?,
+        };
         match as_batch(&*self.topic.manager) {
             Ok(batch) => batch.publish_batch(subject, payloads, opts).await,
             Err(StreamError::Unsupported(_)) => {
@@ -417,9 +504,10 @@ where
             .subscribe(self.topic.spec.subject, &opts)
             .await?;
         let codec = self.topic.codec.clone();
+        let telemetry = self.topic.telemetry.clone();
         Ok(messages
             .filter_map(move |message| {
-                let decoded = match message.decode(&codec) {
+                let decoded = match TopicTelemetry::decode(telemetry.as_deref(), &message, &codec) {
                     Ok(value) => Some(value),
                     Err(error) => {
                         tracing::warn!(
@@ -504,11 +592,14 @@ where
     /// up on the consumer, then do the same to the next one.
     fn decode(&self, deliveries: Deliveries) -> BoxStream<'static, Delivery<T>> {
         let codec = self.topic.codec.clone();
+        let telemetry = self.topic.telemetry.clone();
         deliveries
             .filter_map(move |delivery| {
                 let codec = codec.clone();
+                let telemetry = telemetry.clone();
                 async move {
-                    let decoded: Result<T> = delivery.message().decode(&codec);
+                    let decoded: Result<T> =
+                        TopicTelemetry::decode(telemetry.as_deref(), delivery.message(), &codec);
                     match decoded {
                         Ok(value) => Some(Delivery { value, delivery }),
                         Err(error) => {
@@ -697,5 +788,111 @@ where
     fn overdue(&self) -> bool {
         self.oldest
             .is_some_and(|oldest| oldest.elapsed() >= self.policy.max_delay)
+    }
+}
+
+/// What a topic reports through; see [`Topic::with_telemetry`].
+struct TopicTelemetry {
+    observer: Observer,
+    backend: &'static str,
+}
+
+impl TopicTelemetry {
+    /// Starts one operation on `subject` under `parent`, or the current context.
+    fn start<T, C: Codec<T>>(
+        &self,
+        codec: &C,
+        subject: &'static str,
+        operation: &'static str,
+        kind: SpanKind,
+        parent: Option<tpp_telemetry::Context>,
+    ) -> Operation {
+        self.observer.start_with(
+            self.backend,
+            operation,
+            kind,
+            Start {
+                parent,
+                attributes: vec![
+                    KeyValue::new("messaging.destination.name", subject),
+                    KeyValue::new("streams.codec", codec.name()),
+                ],
+                ..Start::default()
+            },
+        )
+    }
+
+    /// Encodes `values` as one encode operation.
+    fn encode<T, C: Codec<T>>(
+        &self,
+        parent: Option<tpp_telemetry::Context>,
+        codec: &C,
+        subject: &'static str,
+        values: &[T],
+    ) -> Result<Vec<Payload>> {
+        let mut op = self.start(codec, subject, "encode", SpanKind::Internal, parent);
+        let result = values
+            .iter()
+            .map(|value| Payload::encode(codec, value))
+            .collect::<Result<Vec<_>>>();
+        if let Ok(payloads) = &result {
+            op.written_rows(payloads.len());
+        }
+        Self::finish(op, &result);
+        result
+    }
+
+    /// Decodes `message` as one decode operation when there is telemetry: the
+    /// child of the provider's receive span, or of the publisher's when the
+    /// provider is not instrumented.
+    fn decode<T, C: Codec<T>>(telemetry: Option<&Self>, message: &Message, codec: &C) -> Result<T> {
+        let Some(tel) = telemetry else {
+            return message.decode(codec);
+        };
+        let parent = if message.traced() {
+            message.context()
+        } else {
+            extract(&HeaderExtractor(message.headers()))
+        };
+        let mut op = tel.observer.start_with(
+            tel.backend,
+            "decode",
+            SpanKind::Internal,
+            Start {
+                parent: Some(parent),
+                attributes: vec![
+                    KeyValue::new("messaging.destination.name", message.subject().to_owned()),
+                    KeyValue::new("streams.codec", message.codec().to_owned()),
+                ],
+                ..Start::default()
+            },
+        );
+        let result = message.decode(codec);
+        if result.is_ok() {
+            op.read_rows(1);
+        }
+        Self::finish(op, &result);
+        result
+    }
+
+    fn finish<V>(op: Operation, result: &Result<V>) {
+        op.finish(match result {
+            Ok(_) => Outcome::Ok,
+            Err(StreamError::Codec(_)) => Outcome::Invalid,
+            Err(StreamError::Unsupported(_)) => Outcome::Unsupported,
+            Err(_) => Outcome::Error,
+        });
+    }
+}
+
+struct HeaderExtractor<'a>(&'a crate::Headers);
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        self.0.get(key)
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.0.iter().map(|(k, _)| k).collect()
     }
 }

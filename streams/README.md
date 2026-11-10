@@ -23,6 +23,7 @@ NATS beside RabbitMQ, by changing which provider it builds and nothing else.
 - [Configuration](#configuration)
 - [Security](#security)
 - [Errors](#errors)
+- [Telemetry](#telemetry)
 - [Middleware and typed views](#middleware-and-typed-views)
 - [Generated topics](#generated-topics)
 - [Interoperating with runtime-go](#interoperating-with-runtime-go)
@@ -566,7 +567,7 @@ defaults unless your `ClientConfig` sets them.
 | `max_deliver` | server default (unlimited) | deliveries of one message before JetStream gives up |
 | `inactive_threshold` | client default (30 s) | how long an idle subscription's consumer lives on the server |
 | `registry` | JSON | codec names this program decodes |
-| `meter` | none | where durable deliveries are counted |
+| `telemetry` | none | where durable deliveries are counted |
 
 ### RabbitMQ: `RabbitProvider::new(Arc<Connection>, RabbitConfig)`
 
@@ -646,7 +647,7 @@ data-change monitored item.
 | `publish_connections` | 4 | connections, chosen by topic, so each writer keeps its sequence |
 | `max_dataset_messages` | 100 | DataSetMessages per NetworkMessage in a batch |
 | `metadata_timeout` | 5 s | how long `metadata()` waits for the retained metadata |
-| `meter` | none | where sequence gaps are counted |
+| `telemetry` | none | where sequence gaps are counted |
 
 Messages follow Part 14's JSON mapping on
 `opcua/json/data/<PublisherId>/<WriterGroup>/<DataSetWriter>`;
@@ -688,6 +689,48 @@ OPC UA's RSA policies inherit the `rsa` crate's RUSTSEC-2023-0071 advisory.
 `StreamError::is_settled()` says whether retrying could ever succeed;
 `with_retry` gives up at once on a settled error.
 
+## Telemetry
+
+`streams::instrument` wraps any provider so every operation is traced, measured
+and logged through tpp-telemetry, and the managers it binds keep every capability
+the provider's have: `as_durable`, `as_positioned` and `as_batch` find them
+through the wrapper. No OpenTelemetry type appears in the API; `streams::Telemetry`
+is re-exported for callers.
+
+```rust
+// The application's signals: tpp-telemetry's Telemetry::from_tpp(&sdk, "orders")
+// with its tpp-sdk feature, or one built from its own providers.
+let provider = streams::instrument(provider, &telemetry, "nats");
+let orders = OrderStream::bind(&*provider).await?; // generated topics, all traced
+```
+
+| Span | Kind | Covers |
+| --- | --- | --- |
+| `streams.publish`, `streams.publish_batch` | producer | a publish, to the broker's acknowledgement |
+| `streams.subscribe`, `streams.consume` | client | opening a subscription or a durable consumer |
+| `streams.receive` | consumer | one message, receipt to hand-off |
+| `streams.deliver` | consumer | one delivery, receipt to ack or nak |
+| `streams.create`, `get`, `update`, `delete`, `list`, `bind` | client | the provider's lifecycle |
+
+A publish stamps the message's headers with its trace context (W3C
+`traceparent`, `tracestate`) and the send time (`sent-at`). The receiving side
+continues the trace, in this program or another, in Rust or Go, so
+`streams.deliver` is a child of `streams.publish`, and `streams.transit.duration`
+records the time between. `Message::context()` carries the receiving span to
+your code. A delivery's span stays open until it is settled, so it covers the
+handling, and an unsettled delivery that is dropped reports itself cancelled.
+
+A typed topic adds what the provider cannot see with
+`Topic::with_telemetry(&telemetry, "nats")`:
+
+```text
+streams.send          the publish call, encode included
+  streams.encode      encoding with the topic's codec
+  streams.publish     the provider's, when it is instrumented
+streams.deliver       the provider's
+  streams.decode      decoding with the codec the publisher used
+```
+
 ## Middleware and typed views
 
 ```mermaid
@@ -701,7 +744,7 @@ use streams::{chain, typed, with_logging_middleware, with_retry_middleware, with
 
 let publisher = chain(manager.clone(), [
     with_retry_middleware(3, Duration::from_millis(25)),
-    with_telemetry_middleware(meter),   // streams_published_total, streams_publish_duration_seconds
+    with_telemetry_middleware(telemetry.clone()), // streams_published_total, streams_publish_duration_seconds
     with_logging_middleware(),          // outermost: one line per logical publish
 ]);
 let orders = typed::<Order>(manager).with_publisher(publisher);

@@ -95,6 +95,7 @@ pub mod error;
 mod lifecycle;
 pub mod listen;
 mod mux;
+mod observe;
 mod placement;
 mod runtime;
 pub mod shared;
@@ -111,3 +112,6 @@ pub use agents::{
 };
 pub use error::{Error, Result};
 pub use runtime::Runtime;
+/// The signals [`Config::telemetry`] reports through, so a caller configures them
+/// without naming the telemetry crate.
+pub use telemetry::Telemetry;

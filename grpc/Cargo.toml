@@ -12,6 +12,7 @@ categories = ["network-programming", "web-programming::http-server", "asynchrono
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/grpc"
+use-for = "Serve one service over gRPC, REST, HTTP/3, MCP and A2A on one port"
 
 [lib]
 name = "grpc"
@@ -66,8 +67,7 @@ tracing = { workspace = true }
 owo-colors = { workspace = true }
 unicode-width = { workspace = true }
 async-trait = { workspace = true }
-opentelemetry = { workspace = true }
-opentelemetry-http = { workspace = true }
+telemetry = { workspace = true }
 tonic-types = { workspace = true }
 prost-protovalidate = { workspace = true }
 sha2 = { workspace = true }
@@ -81,6 +81,7 @@ tokio = { workspace = true, features = ["test-util"] }
 reqwest = { workspace = true }
 unicode-width = { workspace = true }
 opentelemetry_sdk = { version = "0.33", features = ["testing", "trace", "metrics"] }
+telemetry = { workspace = true, features = ["testing"] }
 tonic-prost = { workspace = true }
 tokio-stream = { workspace = true }
 tonic-prost-build = { workspace = true }

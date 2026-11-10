@@ -12,9 +12,9 @@
 //! touching a handler; [`Observer::traced`] is the Go shape for code that wants it. Register
 //! the observer last to measure what Go measures, which is the handler alone.
 //!
-//! Go takes the application's telemetry client. The equivalent here is the OpenTelemetry
-//! providers: [`Observer::new`] uses the global ones and [`Observer::with_providers`] takes
-//! them explicitly. Logging goes through `tracing`. No exporter is added — exporting is the
+//! Go takes the application's telemetry client. The equivalent here is a tpp-telemetry
+//! [`Telemetry`]: [`Observer::new`] snapshots the global providers and
+//! [`Observer::with_telemetry`] takes one explicitly. Logging goes through `tracing`. No exporter is added — exporting is the
 //! application's job. Rust's global providers do not delegate as Go's do, so an instrument
 //! built before the application installs its provider would stay a no-op; [`Observer::new`]
 //! therefore resolves the globals on the first call rather than when it is built.
@@ -29,11 +29,12 @@ use std::borrow::Cow;
 use std::future::Future;
 use std::sync::{Arc, OnceLock};
 
-use opentelemetry::context::{Context, FutureExt as _};
-use opentelemetry::global::{self, BoxedTracer};
-use opentelemetry::metrics::{Counter, Meter};
-use opentelemetry::trace::{Status as SpanStatus, TraceContextExt as _, Tracer as _};
-use opentelemetry::{InstrumentationScope, KeyValue};
+use telemetry::Telemetry;
+use telemetry::opentelemetry::KeyValue;
+use telemetry::opentelemetry::context::{Context, FutureExt as _};
+use telemetry::opentelemetry::global::BoxedTracer;
+use telemetry::opentelemetry::metrics::Counter;
+use telemetry::opentelemetry::trace::{Status as SpanStatus, TraceContextExt as _, Tracer as _};
 use tonic::{Code, Status};
 use tracing::Instrument as _;
 
@@ -57,13 +58,15 @@ pub fn is_server_error(error: &Status) -> bool {
 }
 
 struct Instruments {
-    tracer: BoxedTracer,
+    tracer: Arc<BoxedTracer>,
     requests: Counter<u64>,
     errors: Counter<u64>,
 }
 
 impl Instruments {
-    fn new(tracer: BoxedTracer, meter: &Meter) -> Self {
+    /// The instruments `telemetry` gives; a signal it lacks is a no-op.
+    fn new(telemetry: &Telemetry) -> Self {
+        let (tracer, meter) = crate::otel::handles(telemetry);
         Self {
             tracer,
             requests: meter.u64_counter("rpc.requests").build(),
@@ -109,26 +112,22 @@ impl Observer {
         }
     }
 
-    /// An observer emitting through the given tracer and meter, for an application that does
-    /// not install global providers.
+    /// An observer emitting through `telemetry`, for an application that does not install
+    /// global providers.
     #[must_use]
-    pub fn with_providers(tracer: BoxedTracer, meter: &Meter) -> Self {
+    pub fn with_telemetry(telemetry: &Telemetry) -> Self {
         Self {
             inner: Arc::new(Inner {
                 scope: Cow::Borrowed("explicit"),
-                instruments: OnceLock::from(Instruments::new(tracer, meter)),
+                instruments: OnceLock::from(Instruments::new(telemetry)),
             }),
         }
     }
 
     fn instruments(&self) -> &Instruments {
-        self.inner.instruments.get_or_init(|| {
-            let scope = InstrumentationScope::builder(self.inner.scope.clone()).build();
-            Instruments::new(
-                global::tracer_with_scope(scope.clone()),
-                &global::meter_with_scope(scope),
-            )
-        })
+        self.inner
+            .instruments
+            .get_or_init(|| Instruments::new(&Telemetry::global(self.inner.scope.clone())))
     }
 
     /// Runs `body` inside a span named `<service>/<method>`, records the counters, and logs
@@ -250,59 +249,27 @@ impl HybridServer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opentelemetry::metrics::MeterProvider as _;
-    use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
-    use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+    use telemetry::testing::Recorder;
 
     struct Harness {
-        spans: InMemorySpanExporter,
-        metrics: InMemoryMetricExporter,
-        tracers: SdkTracerProvider,
-        meters: SdkMeterProvider,
+        recorder: Recorder,
         observer: Observer,
     }
 
     fn harness() -> Harness {
-        let spans = InMemorySpanExporter::default();
-        let metrics = InMemoryMetricExporter::default();
-        let tracers = SdkTracerProvider::builder()
-            .with_simple_exporter(spans.clone())
-            .build();
-        let meters = SdkMeterProvider::builder()
-            .with_reader(PeriodicReader::builder(metrics.clone()).build())
-            .build();
-        let observer = Observer::with_providers(
-            BoxedTracer::new(Box::new(tracers.tracer("test"))),
-            &meters.meter("test"),
-        );
-        Harness {
-            spans,
-            metrics,
-            tracers,
-            meters,
-            observer,
-        }
+        let recorder = Recorder::new();
+        let observer = Observer::with_telemetry(&recorder.signals());
+        Harness { recorder, observer }
     }
 
     impl Harness {
         /// The sum of every data point of the counter `name`.
         fn count(&self, name: &str) -> u64 {
-            self.meters.force_flush().expect("flush");
-            let finished = self.metrics.get_finished_metrics().expect("metrics");
-            let Some(last) = finished.last() else {
-                return 0;
-            };
-            last.scope_metrics()
-                .flat_map(|scope| scope.metrics())
-                .filter(|metric| metric.name() == name)
-                .map(|metric| match metric.data() {
-                    AggregatedMetrics::U64(MetricData::Sum(sum)) => {
-                        sum.data_points().map(|point| point.value()).sum()
-                    }
-                    _ => 0,
-                })
+            self.recorder
+                .measurements()
+                .iter()
+                .filter(|m| m.name == name)
+                .map(|m| m.value as u64)
                 .sum()
         }
     }
@@ -359,12 +326,11 @@ mod tests {
             .await;
         assert_eq!(failed.expect_err("failed").code(), Code::Internal);
 
-        harness.tracers.force_flush().expect("flush");
-        let spans = harness.spans.get_finished_spans().expect("spans");
+        let spans = harness.recorder.spans();
         assert_eq!(spans.len(), 3);
         assert!(spans.iter().all(|span| span.name == "pkg.Svc/Get"));
-        assert_eq!(spans[0].status, SpanStatus::Unset);
-        assert_eq!(spans[2].status, SpanStatus::error("broke"));
+        assert!(!spans[0].failed);
+        assert!(spans[2].failed);
 
         assert_eq!(harness.count("rpc.requests"), 3);
         assert_eq!(harness.count("rpc.errors"), 1);

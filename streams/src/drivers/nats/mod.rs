@@ -79,7 +79,7 @@ mod plain;
 
 use std::{sync::Arc, time::Duration};
 
-use opentelemetry::metrics::Meter;
+use tpp_telemetry::Telemetry;
 use tracing::error;
 
 use async_nats::HeaderMap;
@@ -103,9 +103,9 @@ pub struct NatsConfig {
     /// nobody can read. JSON is always accepted.
     pub registry: Registry,
 
-    /// Where durable deliveries and settlements are counted. `None` records
-    /// nothing.
-    pub meter: Option<Meter>,
+    /// Where durable deliveries and settlements are counted. The default
+    /// records nothing.
+    pub telemetry: Telemetry,
 
     /// A NATS queue group every core subscription joins, so several
     /// subscribers share a subject instead of each receiving every message.
@@ -152,9 +152,9 @@ impl NatsConfig {
         self
     }
 
-    /// Counts durable deliveries and settlements on `meter`.
-    pub fn with_meter(mut self, meter: Meter) -> Self {
-        self.meter = Some(meter);
+    /// Counts durable deliveries and settlements through `telemetry`.
+    pub fn with_telemetry(mut self, telemetry: Telemetry) -> Self {
+        self.telemetry = telemetry;
         self
     }
 
@@ -185,10 +185,7 @@ impl NatsConfig {
 
     /// The delivery instruments this configuration asks for.
     fn metrics(&self) -> provider::Metrics {
-        self.meter
-            .as_ref()
-            .map(provider::Metrics::new)
-            .unwrap_or_default()
+        provider::Metrics::new(&self.telemetry)
     }
 }
 
@@ -415,7 +412,7 @@ mod tests {
             .with_registry(Registry::new().with("protobuf"));
         assert_eq!(config.queue_group.as_deref(), Some("workers"));
         assert!(config.registry.lookup("protobuf").is_ok());
-        assert!(config.meter.is_none());
+        assert!(!config.telemetry.is_enabled());
 
         let config = NatsConfig::default()
             .with_ack_wait(Duration::from_secs(2))

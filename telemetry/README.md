@@ -106,6 +106,39 @@ an await. An active OTel context takes priority; a tracing-opentelemetry parent
 is used when no OTel span is attached. No global subscriber is installed by the
 runtime. Custom LogSink implementations must be fast and non-panicking.
 
+## Across process boundaries
+
+`inject(&cx, &mut headers)` writes the span a context carries as W3C
+`traceparent` and `tracestate` into any header carrier, and `extract(&headers)`
+reads them back into a context whose remote span parents the receiver's own.
+The encoding is the one runtime-go's SDK propagator writes, so a trace crosses
+between Go and Rust through a stream message, an HTTP request or a gRPC call;
+no global propagator is consulted. `trace_id(&cx)` is the id to quote in an
+error message.
+
+`Observer::start_with(backend, operation, kind, Start { .. })` starts an
+operation under an explicit parent (one just extracted), at a time already
+passed (a message's receipt), with span-only attributes and links; metric
+labels stay the bounded four. `Operation::set_attribute` and `add_event` add to
+its span while it runs.
+
+`Telemetry::global(scope)` snapshots the application's global meter and tracer,
+an explicit opt-in for a component that has always reported through them, like
+the grpc server's always-on spans. Nothing else here reads a global.
+
+## Testing other crates
+
+The `testing` feature adds `telemetry::testing::Recorder`: a `Telemetry` whose
+spans, metrics and logs land in memory, read back as plain values (`spans()`,
+`span(name)`, `measurements()`, `outcomes()`). A crate's tests check what its
+instrumentation reported without an exporter, a collector, a global provider, or
+a dependency on the OpenTelemetry SDK of their own.
+
+```toml
+[dev-dependencies]
+telemetry = { workspace = true, features = ["testing"] }
+```
+
 ## Database/ingestion lifetimes
 
 Selection, database creation/deletion, record CRUD, point writes/ranges/

@@ -23,6 +23,18 @@ impl Operation {
     pub fn context(&self) -> Context {
         self.context.clone()
     }
+    /// Sets a span-only attribute; metric labels stay the bounded four.
+    pub fn set_attribute(&self, attribute: KeyValue) {
+        if self.observer.0.telemetry.tracer.is_some() {
+            self.context.span().set_attribute(attribute);
+        }
+    }
+    /// Records a moment within the operation's span.
+    pub fn add_event(&self, name: &'static str) {
+        if self.observer.0.telemetry.tracer.is_some() {
+            self.context.span().add_event(name, Vec::new());
+        }
+    }
     /// Counts successfully delivered records, including partial stream results.
     pub fn read_rows(&mut self, rows: usize) {
         self.read = self.read.saturating_add(rows as u64);

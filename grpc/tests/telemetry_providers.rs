@@ -20,6 +20,14 @@ struct Signals {
 }
 
 impl Signals {
+    /// These providers as the runtime's `Telemetry`.
+    fn telemetry(&self) -> telemetry::Telemetry {
+        use telemetry::opentelemetry::{metrics::MeterProvider as _, trace::TracerProvider as _};
+        telemetry::Telemetry::default()
+            .with_tracer(self.tracers.tracer("runtime-rs-grpc"))
+            .with_meter(self.meters.meter("runtime-rs-grpc"))
+    }
+
     fn new() -> Self {
         let spans = InMemorySpanExporter::default();
         let metrics = InMemoryMetricExporter::default();
@@ -82,14 +90,11 @@ fn options() -> Options {
 #[tokio::test]
 async fn the_embedders_global_providers_see_only_what_it_allows() {
     let global = Signals::new();
-    opentelemetry::global::set_tracer_provider(global.tracers.clone());
-    opentelemetry::global::set_meter_provider(global.meters.clone());
+    telemetry::opentelemetry::global::set_tracer_provider(global.tracers.clone());
+    telemetry::opentelemetry::global::set_meter_provider(global.meters.clone());
 
     let passed = Signals::new();
-    one_call(
-        HybridServer::new(options()).with_telemetry_providers(&passed.tracers, &passed.meters),
-    )
-    .await;
+    one_call(HybridServer::new(options()).with_telemetry(&passed.telemetry())).await;
     assert_eq!(passed.span_count(), 1, "the passed tracer got the span");
     assert!(passed.has_metric(), "the passed meter got the metric");
 

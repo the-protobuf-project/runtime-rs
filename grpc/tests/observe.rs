@@ -8,10 +8,10 @@ use std::net::TcpListener;
 
 use grpc::options::{Endpoint, Options};
 use grpc::{HybridServer, Observer};
-use opentelemetry::trace::SpanKind;
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+use telemetry::opentelemetry::trace::SpanKind;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
 
@@ -65,8 +65,8 @@ async fn calls_are_spanned_and_counted_through_the_global_providers() {
     .with_reflection(tonic_health::pb::FILE_DESCRIPTOR_SET)
     .with_observer(Observer::new("observe-test"));
 
-    opentelemetry::global::set_tracer_provider(tracers.clone());
-    opentelemetry::global::set_meter_provider(meters.clone());
+    telemetry::opentelemetry::global::set_tracer_provider(tracers.clone());
+    telemetry::opentelemetry::global::set_meter_provider(meters.clone());
     server.start().await.expect("the server starts");
 
     let channel = tonic::transport::Endpoint::from_shared(format!("http://127.0.0.1:{grpc_port}"))

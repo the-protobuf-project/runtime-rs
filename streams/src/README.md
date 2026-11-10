@@ -38,7 +38,10 @@ fn wire(manager: Arc<dyn Manager>) -> streams::Typed<String> {
 - `with_logging` and `with_subscriber_logging` emit `tracing` events and never
   log payload bytes.
 - `with_telemetry` records `streams_published_total` and
-  `streams_publish_duration_seconds` on a Meter you supply.
+  `streams_publish_duration_seconds` on the meter of the `Telemetry` you supply.
+- `instrument` (instrument.rs) wraps a whole provider: spans for every
+  operation, trace headers on publish, and the receive or deliver span on each
+  message, settled with the delivery.
 
 ## Settling deliveries
 

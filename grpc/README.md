@@ -117,7 +117,10 @@ through the in-process loopback, so nothing listens to serve them. Dialling
 gateways and A2A's gRPC transport need a socket and are refused at start. The
 `a2a` default feature can be turned off to drop the A2A SDK, reqwest and aws-lc.
 The always-on spans and metrics use the global OpenTelemetry providers unless
-`with_telemetry_providers` passes others or `without_telemetry` opts out.
+`with_telemetry(&telemetry)` passes a tpp-telemetry `Telemetry` or
+`without_telemetry` opts out; an `Observer` takes one with
+`Observer::with_telemetry`. A caller's trace is continued from its W3C
+`traceparent` header, and no API here takes an OpenTelemetry type.
 Message interceptors run only on methods with a registered descriptor set; a
 method with none might stream, so it is passed through rather than buffered.
 
