@@ -146,11 +146,11 @@ use std::{
     time::Duration,
 };
 
-use tpp_telemetry::{Telemetry, opentelemetry::metrics::Counter};
 use rumqttc::v5::{
     Event, Incoming,
     mqttbytes::v5::{Filter, PublishProperties},
 };
+use tpp_telemetry::{Telemetry, opentelemetry::metrics::Counter};
 
 pub use opcua::types::{ConfigurationVersionDataType, DataSetMetaDataType, FieldMetaData};
 

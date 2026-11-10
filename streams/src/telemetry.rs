@@ -12,11 +12,11 @@
 
 use std::{sync::Arc, time::Instant};
 
-pub use tpp_telemetry::{Outcome, Telemetry};
 use tpp_telemetry::opentelemetry::{
     KeyValue,
     metrics::{Counter, Histogram},
 };
+pub use tpp_telemetry::{Outcome, Telemetry};
 
 use crate::{Middleware, Options, Payload, Publisher, Result};
 

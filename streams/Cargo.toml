@@ -51,6 +51,7 @@ tpp_telemetry = { package = "tpp-telemetry", path = "../telemetry", version = "0
 bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
+chrono = { workspace = true }
 ulid = "1.2"
 
 prost = { workspace = true, optional = true }
@@ -69,6 +70,7 @@ async-opcua = { version = "0.19", optional = true, features = ["client", "json"]
 zeromq = { version = "0.7", optional = true, default-features = false, features = ["tokio-runtime", "all-transport"] }
 
 [dev-dependencies]
+tpp_telemetry = { package = "tpp-telemetry", path = "../telemetry", features = ["testing"] }
 # The OPC UA server, so tests/opcua.rs runs against a real server inside the test process.
 async-opcua = { version = "0.19", features = ["server", "client", "json"] }
 tokio = { workspace = true, features = ["test-util"] }

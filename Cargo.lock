@@ -6814,6 +6814,7 @@ dependencies = [
  "async-opcua",
  "async-trait",
  "bytes",
+ "chrono",
  "futures",
  "lapin",
  "nkeys",

@@ -128,7 +128,22 @@ pub struct Message {
     codec: Arc<str>,
     data: Bytes,
     headers: Headers,
+    trace: Trace,
 }
+
+/// The span an instrumented provider started on receiving a message; see
+/// [`instrument`](crate::instrument). Equal whatever it holds, so two copies
+/// of one message compare equal however they were received.
+#[derive(Clone, Default)]
+struct Trace(Option<tpp_telemetry::Context>);
+
+impl PartialEq for Trace {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Trace {}
 
 impl Message {
     /// Assembles a delivered message. Providers build one through
@@ -158,7 +173,28 @@ impl Message {
             codec,
             data: data.into(),
             headers: Headers::new(),
+            trace: Trace::default(),
         }
+    }
+
+    /// The context carrying the span an instrumented provider started on
+    /// receiving this message, a child of its publisher's through the
+    /// message's headers, so the work done with it joins the message's trace.
+    /// An empty context when the provider is not instrumented; see
+    /// [`Message::traced`].
+    pub fn context(&self) -> tpp_telemetry::Context {
+        self.trace.0.clone().unwrap_or_default()
+    }
+
+    /// Whether an instrumented provider started a span on receiving it.
+    pub fn traced(&self) -> bool {
+        self.trace.0.is_some()
+    }
+
+    /// The same message carrying the receive span in `context`.
+    pub(crate) fn with_context(mut self, context: tpp_telemetry::Context) -> Self {
+        self.trace = Trace(Some(context));
+        self
     }
 
     /// The same message carrying `headers`. Providers attach what arrived
@@ -295,6 +331,12 @@ impl Delivery {
             attempt,
             acker,
         }
+    }
+
+    /// Takes the delivery apart, for a wrapper that settles it through an acker
+    /// of its own.
+    pub(crate) fn into_parts(self) -> (Message, u32, Box<dyn Acker>) {
+        (self.message, self.attempt, self.acker)
     }
 
     /// The message itself.
