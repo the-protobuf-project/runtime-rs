@@ -1,0 +1,28 @@
+[package]
+name = "tpp-config"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Layered application configuration: embedded release defaults, a development profile, TOML/YAML/JSON files and prefixed environment variables, extracted into typed sections"
+repository = "https://github.com/the-protobuf-project/runtime-rs"
+keywords = ["config", "configuration", "toml", "yaml", "figment"]
+categories = ["config"]
+
+# Consumed by tools/docgen to build the README's "Go source" column.
+[package.metadata.docgen]
+go-source = "protoc-gen-service app/config"
+use-for = "Load configuration from embedded defaults, profiles, files and the environment"
+
+[lib]
+name = "config"
+
+[dependencies]
+figment = { version = "0.10.19", features = ["toml", "yaml", "json", "env"] }
+serde = { workspace = true }
+thiserror = { workspace = true }
+# Figment's environment provider maps names as Uncased, which it does not re-export.
+uncased = "0.9"
+
+[dev-dependencies]
+figment = { version = "0.10.19", features = ["toml", "yaml", "json", "env", "test"] }

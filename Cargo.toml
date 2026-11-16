@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["network", "cache", "agents", "grpc", "database", "telemetry", "streams"]
+members = ["network", "cache", "agents", "grpc", "database", "telemetry", "streams", "config"]
 # Developer tooling, not a published crate: kept out of the workspace so it
 # never lands in the CI crate matrix, the release build, or Cargo.lock.
 exclude = ["tools/docgen"]
@@ -138,3 +138,4 @@ streams = { path = "streams", package = "tpp-streams", version = "0.1.0" }
 agents = { path = "agents", package = "tpp-agents", version = "0.1.0", default-features = false }
 
 telemetry = { path = "telemetry", package = "tpp-telemetry", version = "0.1.0" }
+config = { path = "config", package = "tpp-config", version = "0.1.0" }
