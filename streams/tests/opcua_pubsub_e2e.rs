@@ -82,7 +82,7 @@ fn options((user, password): (&str, &str)) -> MqttOptions {
 fn prefix(user: &str) -> String {
     format!(
         "{user}/pubsub-{}/opcua",
-        ulid::Ulid::new().to_string().to_lowercase()
+        ulid::Ulid::generate().to_string().to_lowercase()
     )
 }
 

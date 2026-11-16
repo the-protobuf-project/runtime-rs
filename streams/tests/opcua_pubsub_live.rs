@@ -43,7 +43,10 @@ async fn connect() -> PubSubProvider {
     let provider = PubSubProvider::connect(
         options,
         PubSubConfig {
-            publisher_id: format!("tpp-live-{}", ulid::Ulid::new().to_string().to_lowercase()),
+            publisher_id: format!(
+                "tpp-live-{}",
+                ulid::Ulid::generate().to_string().to_lowercase()
+            ),
             ..PubSubConfig::default()
         },
     )
