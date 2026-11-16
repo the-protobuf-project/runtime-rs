@@ -157,7 +157,10 @@ fn config(prefix: &str) -> MqttConfig {
 /// A topic prefix no earlier run used, so sessions a previous run left on the
 /// broker never see this run's messages.
 fn fresh(tag: &str) -> String {
-    format!("e2e-{tag}-{}", ulid::Ulid::new().to_string().to_lowercase())
+    format!(
+        "e2e-{tag}-{}",
+        ulid::Ulid::generate().to_string().to_lowercase()
+    )
 }
 
 /// A provider on the certificate-identity listener over mutual TLS.
@@ -890,7 +893,7 @@ impl SysWatch {
     /// keeps the latest value of each in the background until dropped.
     async fn start() -> Self {
         let mut options = options(Some(tls(true, true)));
-        options.set_client_id(format!("e2e-sys-{}", ulid::Ulid::new()));
+        options.set_client_id(format!("e2e-sys-{}", ulid::Ulid::generate()));
         let (client, mut events) = AsyncClient::new(options, 16);
         client
             .subscribe(CONNECTED, rumqttc::v5::mqttbytes::QoS::AtMostOnce)

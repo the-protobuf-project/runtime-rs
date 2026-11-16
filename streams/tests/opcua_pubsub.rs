@@ -143,7 +143,7 @@ fn value(message: &Message) -> Variant {
 /// A raw MQTT client, subscribed to `filter`, for reading the wire.
 async fn raw(port: u16, filter: Option<&str>) -> (AsyncClient, EventLoop) {
     let mut options = options(port);
-    options.set_client_id(format!("raw-{}", ulid::Ulid::new()));
+    options.set_client_id(format!("raw-{}", ulid::Ulid::generate()));
     let (client, mut events) = AsyncClient::new(options, 64);
     if let Some(filter) = filter {
         client

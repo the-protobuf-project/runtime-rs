@@ -28,7 +28,7 @@ pub fn prefetch(opts: &Options) -> usize {
 /// A new message id: a 26-character ULID, so lexicographic order is creation
 /// order, the same format runtime-go mints.
 pub fn new_id() -> String {
-    ulid::Ulid::new().to_string()
+    ulid::Ulid::generate().to_string()
 }
 
 /// A new stream id: a ULID with the stream's name appended after a colon, as in
