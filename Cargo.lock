@@ -2334,10 +2334,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8cb01cd46b0cf372153850f4c6c272d9cbea2da513e07538405148f95bd789f3"
 dependencies = [
  "atomic",
+ "parking_lot 0.12.5",
  "pear",
  "serde",
  "serde_json",
  "serde_yaml",
+ "tempfile",
  "toml",
  "uncased",
  "version_check",
@@ -6771,6 +6773,16 @@ dependencies = [
  "tpp-telemetry",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "tpp-config"
+version = "0.1.0"
+dependencies = [
+ "figment",
+ "serde",
+ "thiserror 2.0.21",
+ "uncased",
 ]
 
 [[package]]
