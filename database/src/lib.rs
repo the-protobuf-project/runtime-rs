@@ -74,6 +74,7 @@ pub mod orm;
 pub mod records;
 #[cfg(feature = "redis")]
 pub mod redis;
+pub mod repository;
 pub mod store;
 #[cfg(feature = "tauri-store")]
 pub mod tauri_store;

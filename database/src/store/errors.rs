@@ -27,6 +27,10 @@ pub enum Error {
     /// An insert-only write conflicts with an existing record.
     #[error("record already exists")]
     AlreadyExists,
+    /// A write's etag precondition did not hold: the record changed since the caller read it.
+    /// runtime-go's `repox.ErrConflict`; it maps to `ABORTED`.
+    #[error("record changed since it was read (etag mismatch)")]
+    Conflict,
     /// The selected backend has no implementation of this capability.
     #[error("{backend} cannot {capability}")]
     Unimplemented {
