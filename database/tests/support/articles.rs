@@ -170,15 +170,12 @@ pub fn rules(retention: Duration) -> Rules {
         delete_time: Some("delete_time".into()),
         expire_time: Some("expire_time".into()),
         retention,
-        output_only: [
-            "views",
-            "create_time",
-            "update_time",
-            "delete_time",
-            "expire_time",
-        ]
-        .map(String::from)
-        .to_vec(),
+        output_only: "views create_time update_time delete_time expire_time"
+            .split(' ')
+            .map(String::from)
+            .collect(),
+        pattern: "articles/{article}".into(),
+        ..Rules::default()
     }
 }
 

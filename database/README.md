@@ -30,6 +30,7 @@ The first part of this guide covers records and the second covers time series.
 - [Outcomes and errors](#outcomes-and-errors)
 - [Transactions, bulk, schema and watching](#transactions-bulk-schema-and-watching)
 - [Edge cases, provider by provider](#edge-cases-provider-by-provider)
+- [Repositories](#repositories)
 - [Time series: InfluxDB and Arrow](#time-series-influxdb-and-arrow)
 - [Telemetry](#telemetry)
 - [Testing](#testing)
@@ -516,6 +517,109 @@ stream ends after its first error; resume from the last token you saw.
 - Keys are the record key alone, as in Go, so resources sharing one cache database
   must not share keys. AIP resource names never collide.
 
+## Repositories
+
+A repository is what a generated service persists one resource through: typed
+messages, resource names, etags, field masks and soft delete, on top of any records
+provider. `RecordsRepository<M>` implements the `Repository<M>` trait for any `DB`, as
+protoc-gen-store's Go `target=repository` does for GORM. Generated code supplies the
+`Resource` and the `Rules`; written by hand:
+
+```rust,ignore
+use database::repository::{Hooks, ListInput, RecordsRepository, Reference, Repository, Rules};
+
+let rules = Rules {
+    etag: Some("etag".into()),
+    delete_time: Some("delete_time".into()),        // turns on soft delete
+    expire_time: Some("expire_time".into()),
+    retention: Duration::from_secs(30 * 24 * 3600),
+    output_only: vec!["create_time".into(), "update_time".into(), "delete_time".into(),
+                      "expire_time".into(), "etag".into()],
+    pattern: "publishers/{publisher}/books/{book}".into(),
+    parent_column: Some("publisher_id".into()),     // field-less column, filled from the name
+    references: vec![Reference { field: "author".into(), pattern: "authors/{author}".into() }],
+};
+let books = RecordsRepository::<pb::Book>::new(&db, Arc::new(books_resource), rules)?
+    .with_hooks(Hooks::default().before_create(|mut b| async move { b.title = b.title.trim().into(); Ok(b) }));
+
+let book = books.create(&draft).await?;                          // etag minted, times set
+let book = books.update(&edit, &["title".into()]).await?;        // edit.etag guards it
+let page = books.list(&ListInput { parent: "publishers/p1".into(), ..Default::default() }).await?;
+books.delete(&book.name, Some(&book.etag)).await?;               // soft: delete_time set
+books.undelete(&book.name, None).await?;
+books.purge(&book.name).await?;
+```
+
+| Call | What it does |
+| --- | --- |
+| `create` | Runs `before_create`, mints the etag, writes, and returns the record read back. A root resource without a name gets `<collection>/<ULID>`; a taken name or unique value is `AlreadyExists` |
+| `get` | The record, soft-deleted or not |
+| `list`, `count` | `ListInput` as `ListOptions`; page tokens are the provider's. Soft-deleted records are left out unless `show_deleted`, and `parent` keeps one parent's records |
+| `update(m, paths)` | Merges the masked fields of `m` onto the stored record and mints an etag (below) |
+| `update_output_only(m, paths)` | The same for output-only fields, which `update` ignores; `paths` is required |
+| `delete(name, if_match)` | Soft delete, or a removal without a `delete_time` rule |
+| `undelete(name, if_match)` | Clears the soft-delete times; `AlreadyExists` on a live record |
+| `purge(name)` | Removes the record, deleted or not |
+
+**Etags** are ULIDs, monotonic within the process, minted on every write. A write
+carrying one (`m`'s etag field, or `if_match`) succeeds only while it is still the
+stored etag, else `Conflict`; an empty etag carries no precondition.
+
+**Field masks** (AIP-134):
+- an empty mask, or `*`, writes every mutable field;
+- an output-only path, the etag or an audit time is ignored (AIP-203);
+- a path naming no field is `Invalid`;
+- a path into a message field (`publish_time.seconds`) writes the whole field, and
+  one arm of a oneof the whole oneof.
+
+**Soft delete** (AIP-164), with a `delete_time` rule:
+- `delete` sets `delete_time`, moves `update_time` to the same instant, sets
+  `expire_time` to `delete_time` plus the retention (unset when zero), and mints an etag;
+- deleting a deleted record is `NotFound`;
+- `undelete` clears both times; `list` and `count` skip deleted records through a
+  `delete_time = null` clause ANDed onto the caller's filter.
+
+**Atomicity of a guarded write.** The etag check and the write run in one
+transaction where the provider has one:
+
+| Provider | How two writers holding one etag are kept apart |
+| --- | --- |
+| SQL | The read is `SELECT ... FOR UPDATE` (Postgres, MySQL): the second writer waits, then sees the new etag. SQLite locks the database |
+| MongoDB | A session transaction: the later writer's write conflict is `Conflict` |
+| Tauri store | The transaction holds the store's lock |
+| Redis | No transactions: the check and the write are two steps, so a writer landing between them is overwritten |
+
+**Names, parents and references**, as Go's adapter stores them, so Go and Rust share
+a table:
+- every name is checked against `pattern`, and a misfit is `Invalid`;
+- a root resource's field-less generated key column (`id`) is its name's last id; a
+  nested one's is a fresh ULID, since its id is unique only under its parent;
+- `parent_column` is filled from the parent's id in the name;
+- each of `references` is stored as the bare id and read back as the name;
+- an enum column with `labels` stores the label (`EBOOK`), not the number. On Postgres
+  a `sql_type` names its enum type, which `ensure_schema` creates.
+
+**Listing under a parent.** `ListInput.parent` narrows to one parent's records, as
+Go's `parentScope`:
+- with a `parent_column` and the parent's own id, by the clause `publisher_id = "p1"`;
+- with ids all `-` (AIP-159), or empty, every record;
+- otherwise (no parent column, or a `-` below a named ancestor) the repository matches
+  the records' names itself, reading every match.
+
+**Hooks** (`Hooks<M>`, Go's `<Model>Hooks`): `before_create`, `after_read`,
+`before_update` (inside the write's transaction, after the mask is applied) and
+`before_delete` (an error vetoes `delete` and `purge`).
+
+**Differences from Go.**
+- An unknown mask path is `Invalid`, where Go ignores it.
+- `*` is a full mask.
+- `create` takes the parent in the name rather than as an argument
+  (`publishers/p1/books/` mints the id).
+- Filters on a reference compare the stored bare id.
+- A parent column under a nested parent (Go looks up its surrogate) is refused.
+- Without a filter language (Redis), soft-deleted records and parents are filtered by
+  the repository, reading every record, and a caller's filter is refused as before.
+
 ## Time series: InfluxDB and Arrow
 
 The `store` contract has the same steps (`Provider`, `set_database`, a `DB`, `close`)
@@ -615,6 +719,8 @@ no-op by default. See [runtime telemetry](../telemetry/README.md).
 cargo test -p tpp-database                                    # contracts, Arrow, InfluxDB mocks
 cargo test -p tpp-database --features orm                     # SQLite, in process
 cargo test -p tpp-database --features tauri-store-test --test tauri_store   # Tauri's mock runtime
+cargo test -p tpp-database --features orm --test repository_sqlite          # repositories, in process
+cargo test -p tpp-database --features tauri-store-test --test repository_tauri
 ```
 
 The live suites need a server. Each has its own Compose file on a high port, so they
@@ -626,6 +732,7 @@ can run beside services you already have on the default ports:
 | MongoDB | `docker compose -f docker/compose.mongodb.live.yaml up -d --wait` (a single-node replica set on 27117) | `cargo test -p tpp-database --features mongodb,live-tests --test mongodb_live` |
 | Redis | `docker compose -f docker/compose.redis.live.yaml up -d --wait` (16381) | `cargo test -p tpp-database --features redis,live-tests --test redis_live` |
 | Cache | the cache's Redis, `../cache/docker/compose.live.yaml` (16379) | `cargo test -p tpp-database --features cached,live-tests --test cached_live` |
+| Repositories | the SQL, MongoDB and Redis files above | `cargo test -p tpp-database --features orm,mongodb,redis,live-tests --test repository_sql --test repository_mongodb --test repository_redis` |
 
 With `live-tests` on, an unreachable server fails the suite rather than skipping it,
 so a passing run means the provider was really exercised. CI runs every suite.

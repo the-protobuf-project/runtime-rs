@@ -14,12 +14,20 @@
 mod support {
     #[path = "articles.rs"]
     pub mod articles;
+    #[path = "library.rs"]
+    pub mod library;
     #[path = "repo_crud.rs"]
     pub mod repo_crud;
     #[path = "repo_delete.rs"]
     pub mod repo_delete;
+    #[path = "repo_guard.rs"]
+    pub mod repo_guard;
     #[path = "repo_more.rs"]
     pub mod repo_more;
+    #[path = "repo_parent.rs"]
+    pub mod repo_parent;
+    #[path = "repo_parity.rs"]
+    pub mod repo_parity;
     #[path = "repo_suite.rs"]
     pub mod repo_suite;
     #[path = "repo_update.rs"]

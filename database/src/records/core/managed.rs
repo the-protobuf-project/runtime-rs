@@ -8,6 +8,15 @@ use crate::records::{Generated, Resource, Row, Value};
 
 tokio::task_local! {
     static CLOCK: DateTime<Utc>;
+    static SUPPLIED: Row;
+}
+
+/// Runs `work` with `cols` supplied to the creates it makes: each a column no message field
+/// carries (an empty [`Column::field`](crate::records::Column::field)), given on create in
+/// place of what the driver would fill. A repository sets a root resource's key to its
+/// name's last segment, and a parent's id, this way, as Go's adapter sets them on the row.
+pub async fn supplying<F: Future>(cols: Row, work: F) -> F::Output {
+    SUPPLIED.scope(cols, work).await
 }
 
 /// Runs `work` with the audit times its writes fill pinned to `now`, rather than each
@@ -27,6 +36,14 @@ pub fn now() -> DateTime<Utc> {
 /// times, on update the update time. Go's `core.FillManaged`.
 pub fn fill_managed(res: &Resource, cols: &mut Row, on_create: bool) {
     let now = Value::Timestamp(now());
+    if on_create {
+        let _ = SUPPLIED.try_with(|given| {
+            let fieldless = |k: &String| res.lookup_column(k).is_some_and(|c| c.field.is_empty());
+            for (k, v) in given.iter().filter(|(k, _)| fieldless(k)) {
+                cols.insert(k.clone(), v.clone());
+            }
+        });
+    }
     for c in &res.columns {
         let empty = cols.get(&c.name).is_none_or(Value::is_empty);
         match c.generated {

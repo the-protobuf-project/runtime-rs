@@ -2,10 +2,10 @@
 //! value bound as the parameter type its dialect accepts. Go's `coerce` in `orm/filter.go`;
 //! Go binds `any` and lets the database driver choose, which sqlx's typed parameters do not.
 
-use sea_query::Value as Sql;
+use sea_query::{Expr, Value as Sql};
 
 use super::Dialect;
-use crate::records::{Kind, Resource, Value};
+use crate::records::{Column, Kind, Resource, Value};
 use crate::{Error, Result};
 
 pub(crate) use crate::records::core::coerce;
@@ -55,4 +55,16 @@ pub(crate) fn key(d: Dialect, res: &Resource, key: &str) -> Result<(String, Sql)
     let v = coerce(pk.kind, key)
         .map_err(|e| Error::Invalid(format!("key of resource {:?}: {e}", res.name)))?;
     Ok((pk.name.clone(), bind(d, pk.kind, &v)?))
+}
+
+/// `v`, bound for column `col`: on Postgres, an enum stored by label is cast to its enum
+/// type (the column's `sql_type`, verbatim), since a text parameter does not convert to an
+/// enum implicitly. Everywhere else, the bound value as it is.
+pub(crate) fn expr(d: Dialect, col: Option<&Column>, v: Sql) -> Expr {
+    match col {
+        Some(c) if d == Dialect::Postgres && !c.labels.is_empty() && !c.sql_type.is_empty() => {
+            Expr::cust_with_values(format!("CAST($1 AS {})", c.sql_type), [v])
+        }
+        _ => Expr::val(v),
+    }
 }

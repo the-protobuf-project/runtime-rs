@@ -1,6 +1,8 @@
 //! AIP-164 soft delete as Go's repository does it, and Go's `TestIfMatchDelete` ported case
 //! for case; then a resource without soft delete, and one without an etag.
 
+#![allow(dead_code)]
+
 use std::time::Duration;
 
 use database::Error;

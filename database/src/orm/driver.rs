@@ -60,10 +60,15 @@ impl<E: Engine> SqlDriver<E> {
         Ok(Expr::col(Alias::new(pk)).eq(v))
     }
 
-    fn values(&self, res: &Resource, cols: &Row) -> Result<Vec<(Alias, sea_query::Value)>> {
-        let col = |name: &str| res.lookup_column(name).map(|c| c.kind).unwrap_or_default();
+    /// Each column's value as an expression: bound, and cast where the column needs it.
+    fn values(&self, res: &Resource, cols: &Row) -> Result<Vec<(Alias, Expr)>> {
         cols.iter()
-            .map(|(k, v)| Ok((Alias::new(k), values::bind(E::DIALECT, col(k), v)?)))
+            .map(|(k, v)| {
+                let col = res.lookup_column(k);
+                let kind = col.map(|c| c.kind).unwrap_or_default();
+                let bound = values::bind(E::DIALECT, kind, v)?;
+                Ok((Alias::new(k), values::expr(E::DIALECT, col, bound)))
+            })
             .collect()
     }
 }
@@ -76,8 +81,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
         let (names, vals): (Vec<_>, Vec<_>) = self.values(res, &cols)?.into_iter().unzip();
         let mut q = Query::insert();
         q.into_table(self.table(res)).columns(names);
-        q.values(vals.into_iter().map(Expr::val))
-            .map_err(|e| Error::Invalid(e.to_string()))?;
+        q.values(vals).map_err(|e| Error::Invalid(e.to_string()))?;
         self.conn.execute(self.sql(&q)).await?;
         // What was stored, generated key and audit times included, not what was handed in.
         Ok(WriteResult::done(records::columns_to_message(res, &cols)?))
@@ -107,11 +111,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
         }
         let mut q = Query::update();
         q.table(self.table(res)).and_where(self.by_key(res, &key)?);
-        q.values(
-            self.values(res, &set)?
-                .into_iter()
-                .map(|(c, v)| (c, Expr::val(v))),
-        );
+        q.values(self.values(res, &set)?);
         if self.conn.execute(self.sql(&q)).await? == 0 {
             return Err(Error::NotFound);
         }

@@ -1,6 +1,8 @@
 //! Hooks around each call, writers racing on one etag (Go's `TestGormEtagGuardsLockTheRow`,
 //! run rather than read), and what `RecordsRepository::new` refuses.
 
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use database::Error;

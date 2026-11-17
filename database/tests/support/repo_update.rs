@@ -1,6 +1,8 @@
 //! AIP-134 field masks over the stored record, as Go's generated `apply<Model>Mask` merges
 //! them, and the etag guard `update` and `update_output_only` share.
 
+#![allow(dead_code)]
+
 use database::Error;
 use database::records::DB;
 use database::repository::Repository;
@@ -165,72 +167,6 @@ pub fn oneof_and_message_fields_replace_whole(db: DB) -> BoxFuture<'static, ()> 
             .await
             .unwrap();
         assert_eq!(cleared.format, None);
-    }
-    .boxed()
-}
-
-/// A stale etag is `Conflict` and changes nothing; the current one, or none, passes.
-pub fn etag_guards_update(db: DB) -> BoxFuture<'static, ()> {
-    async move {
-        let repo = soft(&db).await;
-        let first = repo.create(&article("a", "Alpha", 10)).await.unwrap();
-        let second = repo
-            .update(
-                &Article {
-                    etag: first.etag.clone(),
-                    ..article("a", "Beta", 0)
-                },
-                &paths(&["title"]),
-            )
-            .await
-            .unwrap();
-        let stale = Article {
-            etag: first.etag.clone(),
-            ..article("a", "Gamma", 0)
-        };
-        fails!(
-            repo.update(&stale, &paths(&["title"])).await,
-            Error::Conflict
-        );
-        fails!(
-            repo.update_output_only(&stale, &paths(&["views"])).await,
-            Error::Conflict
-        );
-        assert_eq!(repo.get("articles/a").await.unwrap(), second);
-        let unguarded = repo
-            .update(&article("a", "Delta", 0), &paths(&["title"]))
-            .await
-            .unwrap();
-        assert_eq!(unguarded.title, "Delta");
-    }
-    .boxed()
-}
-
-/// `update_output_only` writes the output-only fields it names, ignores the rest, needs a
-/// path, and leaves the soft-delete times to `delete`.
-pub fn update_output_only_writes_only_output_fields(db: DB) -> BoxFuture<'static, ()> {
-    async move {
-        let repo = soft(&db).await;
-        let stored = repo.create(&article("a", "Alpha", 10)).await.unwrap();
-        let input = Article {
-            views: 42,
-            delete_time: stamp(5),
-            ..article("a", "Ignored", 0)
-        };
-        fails!(
-            repo.update_output_only(&input, &[]).await,
-            Error::Invalid(_)
-        );
-        let got = repo
-            .update_output_only(&input, &paths(&["views", "title", "delete_time"]))
-            .await
-            .unwrap();
-        assert_eq!(
-            (got.views, got.title.as_str(), got.pages),
-            (42, "Alpha", 10)
-        );
-        assert!(got.delete_time.is_none());
-        assert_ne!(got.etag, stored.etag);
     }
     .boxed()
 }

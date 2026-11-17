@@ -7,6 +7,7 @@ use std::sync::Arc;
 use prost::Message;
 use prost_reflect::{DynamicMessage, ReflectMessage};
 
+use super::names::Names;
 use super::shape::Shape;
 use super::{Hooks, ListInput, Page, Repository, Rules};
 use crate::records::{DB, Resource};
@@ -24,6 +25,7 @@ pub(super) struct Inner<M> {
     pub(super) res: Arc<Resource>,
     pub(super) rules: Rules,
     pub(super) shape: Shape,
+    pub(super) names: Names,
     pub(super) hooks: Hooks<M>,
 }
 
@@ -54,12 +56,14 @@ where
             }
         }
         let shape = Shape::new(&resource, &rules)?;
+        let names = Names::new(&resource, &rules)?;
         Ok(Self {
             db: db.clone(),
             inner: Arc::new(Inner {
                 res: resource,
                 rules,
                 shape,
+                names,
                 hooks: Hooks::default(),
             }),
             _m: PhantomData,
@@ -69,12 +73,12 @@ where
     /// This repository running `hooks` around its calls, as Go's `With<Model>Hooks`.
     pub fn with_hooks(self, hooks: Hooks<M>) -> Self {
         let inner = &self.inner;
-        let shape = inner.shape.clone();
         Self {
             inner: Arc::new(Inner {
                 res: inner.res.clone(),
                 rules: inner.rules.clone(),
-                shape,
+                shape: inner.shape.clone(),
+                names: inner.names.clone(),
                 hooks,
             }),
             ..self
@@ -97,9 +101,16 @@ where
             .map_err(|e| Error::Invalid(format!("decoding a {}: {e}", self.res.name)))
     }
 
+    /// A stored record as the API reads it: references back under their collections.
+    pub(super) fn as_read(&self, msg: DynamicMessage) -> DynamicMessage {
+        let mut msg = msg;
+        self.names.as_read(&mut msg);
+        msg
+    }
+
     /// `msg` as `M`, through the `after_read` hook: what every read returns.
     pub(super) async fn read(&self, msg: &DynamicMessage) -> Result<M> {
-        let m = self.decode(msg)?;
+        let m = self.decode(&self.as_read(msg.clone()))?;
         match &self.hooks.after_read {
             Some(h) => h(m).await,
             None => Ok(m),
@@ -115,12 +126,11 @@ where
     }
 }
 
-/// Refuses an empty resource name, which addresses nothing.
-pub(super) fn named(name: &str) -> Result<&str> {
-    if name.is_empty() {
-        return Err(Error::Invalid("a resource name is required".into()));
+impl<M> Inner<M> {
+    /// Refuses an empty name, or one the pattern does not fit.
+    pub(super) fn named<'a>(&self, name: &'a str) -> Result<&'a str> {
+        self.names.split(name).map(|_| name)
     }
-    Ok(name)
 }
 
 #[async_trait::async_trait]
@@ -133,7 +143,10 @@ where
     }
 
     async fn get(&self, name: &str) -> Result<M> {
-        let msg = self.db.get(&self.inner.res, named(name)?).await?;
+        let msg = self
+            .db
+            .get(&self.inner.res, self.inner.named(name)?)
+            .await?;
         self.inner.read(&msg).await
     }
 
@@ -159,17 +172,17 @@ where
     }
 
     async fn delete(&self, name: &str, if_match: Option<&str>) -> Result<()> {
-        self.delete_record(named(name)?, if_match.unwrap_or_default())
+        self.delete_record(self.inner.named(name)?, if_match.unwrap_or_default())
             .await
     }
 
     async fn undelete(&self, name: &str, if_match: Option<&str>) -> Result<M> {
-        self.undelete_record(named(name)?, if_match.unwrap_or_default())
+        self.undelete_record(self.inner.named(name)?, if_match.unwrap_or_default())
             .await
     }
 
     async fn purge(&self, name: &str) -> Result<()> {
-        let name = named(name)?;
+        let name = self.inner.named(name)?;
         self.inner.before_delete(name).await?;
         self.db.delete(&self.inner.res, name).await
     }

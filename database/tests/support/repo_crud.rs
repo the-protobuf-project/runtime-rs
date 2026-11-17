@@ -2,6 +2,8 @@
 //! times from the provider, pages from the provider's tokens, and soft-deleted records left
 //! out of a listing by a clause ANDed onto the caller's filter.
 
+#![allow(dead_code)]
+
 use database::Error;
 use database::records::DB;
 use database::repository::{ListInput, Repository};

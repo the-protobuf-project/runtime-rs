@@ -51,7 +51,7 @@ macro_rules! cases {
         $(
             #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
             async fn $case() {
-                $run(crate::support::$module::$case).await;
+                $run($crate::support::$module::$case).await;
             }
         )*
     };
@@ -72,8 +72,8 @@ macro_rules! repository_suite {
             repo_update::output_only_paths_are_ignored,
             repo_update::unknown_paths_are_refused,
             repo_update::oneof_and_message_fields_replace_whole,
-            repo_update::etag_guards_update,
-            repo_update::update_output_only_writes_only_output_fields,
+            repo_guard::etag_guards_update,
+            repo_guard::update_output_only_writes_only_output_fields,
             repo_delete::soft_delete_marks_and_undelete_restores,
             repo_delete::if_match_guards_delete_and_undelete,
             repo_delete::zero_retention_leaves_expire_time_unset,
@@ -81,6 +81,9 @@ macro_rules! repository_suite {
             repo_delete::without_an_etag_if_match_is_ignored,
             repo_more::hooks_run_around_each_call,
             repo_more::new_refuses_what_does_not_fit,
+            repo_parent::lists_scope_to_a_parent_by_its_column,
+            repo_parent::lists_scope_to_a_parent_by_name,
+            repo_parent::a_root_has_no_parent,
         );
     };
 }
@@ -89,7 +92,10 @@ macro_rules! repository_suite {
 #[macro_export]
 macro_rules! repository_filters {
     ($run:path) => {
-        $crate::cases!($run; repo_crud::list_filter_composes_with_soft_delete);
+        $crate::cases!($run;
+            repo_crud::list_filter_composes_with_soft_delete,
+            repo_parent::parent_scope_composes_with_a_filter,
+        );
     };
 }
 
@@ -101,5 +107,32 @@ macro_rules! repository_races {
             repo_more::concurrent_updates_with_one_etag_admit_one,
             repo_more::concurrent_deletes_with_one_etag_admit_one,
         );
+    };
+}
+
+/// The Go parity cases, each run through `$run` with a raw reader of the table.
+#[macro_export]
+macro_rules! repository_parity {
+    ($run:path) => {
+        $crate::parity_cases!($run;
+            root_id_is_the_names_last_segment,
+            nested_records_get_a_surrogate_and_their_parents_id,
+            references_store_the_bare_id,
+            enums_store_their_label,
+            names_are_checked_against_the_pattern,
+        );
+    };
+}
+
+/// One test per parity case.
+#[macro_export]
+macro_rules! parity_cases {
+    ($run:path; $($case:ident),* $(,)?) => {
+        $(
+            #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+            async fn $case() {
+                $run($crate::support::repo_parity::$case).await;
+            }
+        )*
     };
 }

@@ -29,6 +29,15 @@ pub struct Column {
     pub auto_create: bool,
     /// Set to the current time on create and update.
     pub auto_update: bool,
+    /// The label each enum number is stored as, for an enum field stored by label rather than
+    /// number, as Go's gorm target stores it (protokit `naming.EnumLabel`: `FORMAT_EBOOK` of
+    /// enum `Format` is `EBOOK`). Empty stores the number. A number without a label (the
+    /// zero `UNSPECIFIED`, an unknown one) is stored as null, or left out of an insert when
+    /// the column is `not_null` so the column's default applies, as Go omits it; a stored
+    /// label without a number reads as 0. Give such a column [`Kind::String`]. On Postgres a
+    /// non-empty `sql_type` names the enum type: values are cast to it, and `ensure_schema`
+    /// creates it from these labels when it is missing.
+    pub labels: Vec<(i32, String)>,
 }
 
 impl Column {
@@ -66,6 +75,22 @@ impl Column {
     pub fn sql_type(mut self, sql_type: impl Into<String>) -> Self {
         self.sql_type = sql_type.into();
         self
+    }
+
+    /// The label enum number `n` is stored as; see [`labels`](Self::labels).
+    pub fn label_of(&self, n: i32) -> Option<&str> {
+        self.labels
+            .iter()
+            .find(|(k, _)| *k == n)
+            .map(|(_, l)| l.as_str())
+    }
+
+    /// The enum number stored label `label` stands for.
+    pub fn number_of(&self, label: &str) -> Option<i32> {
+        self.labels
+            .iter()
+            .find(|(_, l)| l == label)
+            .map(|(k, _)| *k)
     }
 
     /// Whether a driver, not the message, supplies this column's value: a generated key or an

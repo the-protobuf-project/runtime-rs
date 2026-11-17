@@ -11,7 +11,10 @@
 //!
 //! What the trait promises, as Go's repository does:
 //!
-//! - **Names.** A record is addressed by its resource name, its primary key.
+//! - **Names.** A record is addressed by its resource name, its primary key, checked
+//!   against [`Rules::pattern`]. A root record's key column is its name's last id, a
+//!   nested one's parent column its parent's id, and a reference to a top-level resource is
+//!   stored as its bare id, as Go's adapter writes them, so Go and Rust share a table.
 //! - **Etags.** Every write mints a new etag. A write carrying the record's etag (`m`'s
 //!   etag field, or `if_match` on delete and undelete) succeeds only if it still matches,
 //!   checked in the write itself, else [`Error::Conflict`](crate::Error::Conflict); an
@@ -21,18 +24,22 @@
 //! - **Soft delete (AIP-164).** For a resource with a `delete_time` rule, `delete` marks
 //!   the record deleted (and sets `expire_time` to `delete_time` plus the retention),
 //!   `undelete` clears both, `purge` removes the record, and `list` skips deleted records
-//!   unless [`ListInput::show_deleted`]. Without the rule, `delete` removes the record and
-//!   `undelete` is refused.
+//!   unless [`ListInput::show_deleted`]. Deleting a deleted record is `NotFound`, as Go's
+//!   guarded `UPDATE` matches nothing. Without the rule, `delete` removes the record and
+//!   `undelete` is refused with [`Error::Unimplemented`](crate::Error::Unimplemented).
 //! - **Outcomes.** [`Error::NotFound`](crate::Error::NotFound),
 //!   [`Error::AlreadyExists`](crate::Error::AlreadyExists) (a taken name or unique value,
 //!   or an undelete of a live record), [`Error::Conflict`](crate::Error::Conflict), and
-//!   [`Error::Invalid`](crate::Error::Invalid) for a refused filter, mask or token.
+//!   [`Error::Invalid`](crate::Error::Invalid) for a refused name, parent, filter or mask
+//!   (an unknown path; an empty one on `update_output_only`).
 
 mod atomic;
 mod hooks;
 mod mask;
+mod names;
 mod read;
 mod records_repository;
+mod scope;
 mod shape;
 mod soft;
 mod write;
@@ -58,6 +65,11 @@ pub struct ListInput {
     pub filter: String,
     /// Includes soft-deleted records (AIP-164); no effect without soft delete.
     pub show_deleted: bool,
+    /// Lists only the records under this parent (`publishers/p1`); empty lists every
+    /// parent's. An id of `-` matches any (AIP-159): all `-` is every parent. Narrowed as
+    /// Go's `parentScope` does: by [`Rules::parent_column`] when the parent's own id is given,
+    /// else by the records' names. A parent that does not fit [`Rules::pattern`] is `Invalid`.
+    pub parent: String,
 }
 
 /// One page of a listing.
@@ -85,6 +97,32 @@ pub struct Rules {
     pub retention: Duration,
     /// The `OUTPUT_ONLY` fields, which `update` ignores and `update_output_only` writes.
     pub output_only: Vec<String>,
+    /// The resource-name pattern, `google.api.resource` `pattern`, e.g.
+    /// `publishers/{publisher}/books/{book}`. When set, every name is checked against it
+    /// (`Invalid` otherwise, Go's `repox.SplitName`); a root resource created without a name
+    /// gets `<collection>/<ULID>`, and a nested one named `<parent>/<collection>/` gets a
+    /// ULID id; and a root resource's field-less generated key column (`id`) is set to its
+    /// name's last id, as Go's `Create` sets the row's id. Empty checks and derives nothing.
+    pub pattern: String,
+    /// The field-less column holding the parent's id, filled on create from the name's
+    /// second-to-last id (`publisher_id` = `p` of `publishers/p/books/b`), as Go sets
+    /// `<Parent>ID`. Only under a two-collection pattern: a parent that is itself nested is
+    /// keyed by a surrogate Go looks up, which the repository does not.
+    pub parent_column: Option<String>,
+    /// The reference fields stored as the referenced resource's bare id, as Go's adapter
+    /// stores a reference to a top-level resource: written as the name's last segment and
+    /// read back under the referenced collection. A reference to a nested resource is stored
+    /// whole, as Go stores it, and needs no entry.
+    pub references: Vec<Reference>,
+}
+
+/// A field naming a top-level resource, stored as its bare id. See [`Rules::references`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Reference {
+    /// The string field holding the reference, e.g. `author`.
+    pub field: String,
+    /// The referenced resource's pattern, one collection, e.g. `authors/{author}`.
+    pub pattern: String,
 }
 
 /// The repository a generated service persists one resource through. runtime-go's
