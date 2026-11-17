@@ -6,7 +6,11 @@
 from Cargo metadata, fans out per-crate build/test, verifies the combined
 workspace, checks formatting/clippy (including excluded docgen), builds docs
 with warnings denied, checks the generated README, builds at MSRV, and audits
-dependencies. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. The `live` job starts each Compose service under `cache/docker`
+and `database/docker` (Redis, Dragonfly, Memcached; Redis records) and runs the
+matching `live-tests` target against it; the lint and docs jobs also check the
+database's opt-in `redis` backend. The final `ci-gate` requires every listed
+prerequisite to pass.
 
 Use the corresponding local commands during development:
 

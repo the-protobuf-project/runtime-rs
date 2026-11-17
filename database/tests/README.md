@@ -31,6 +31,15 @@ cargo test -p tpp-database --test live_lifecycle -- --ignored --nocapture
 cargo test --release -p tpp-database --test live_rate -- --ignored --nocapture
 ```
 
+`redis_live` (Redis record store, every case of Go's `redis_test.go`) is selected by
+the `live-tests` feature and fails, rather than skips, without a server. Start
+it with the [Redis compose file](../docker/README.md), on `127.0.0.1:16381`, or
+set `RUNTIME_DATABASE_REDIS_ADDRESS`:
+
+```bash
+cargo test -p tpp-database --features live-tests --test redis_live
+```
+
 `arrow_throughput` is a separate ignored release-mode performance measurement:
 
 ```bash

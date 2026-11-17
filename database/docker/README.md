@@ -42,3 +42,17 @@ docker compose -f database/docker/compose.yaml --profile telemetry down
 The collector is a development inspection sink. Ordinary `down` preserves the
 InfluxDB named volume; do not remove volumes when you intend to retain data.
 Application shutdown drains workers before flushing SDK exporters.
+
+## Redis records (live test)
+
+`compose.redis.live.yaml` runs a throwaway, non-persistent Redis 7 on
+`127.0.0.1:16381` for the `redis_live` target, beside the cache's live Redis
+(16379) and Dragonfly (16380). Point the test elsewhere with
+`RUNTIME_DATABASE_REDIS_ADDRESS`; each test writes under its own prefix and
+drops it, and nothing flushes the server.
+
+```bash
+docker compose -p tpp-database-redis-live -f database/docker/compose.redis.live.yaml up -d --wait redis
+cargo test -p tpp-database --features live-tests --test redis_live
+docker compose -p tpp-database-redis-live -f database/docker/compose.redis.live.yaml down
+```

@@ -22,6 +22,11 @@ telemetry-sdk = ["telemetry/tpp-sdk"]
 # The InfluxDB 3 backend. A feature because influxdb3-client 0.3, its latest release, requires
 # Arrow 59: turning this off is what leaves a capture-only build on one Arrow major, 60.
 influxdb = ["dep:influxdb3-client", "dep:reqwest", "dep:rustls", "dep:webpki-roots"]
+# The Redis record backend, `database::redis`: runtime-go's `database/redis`.
+redis = ["dep:redis"]
+# Selects the targets that need a live server: today the Redis one. Off by default, so a plain
+# `cargo test` needs no service; on, an unreachable server is a failure, never a skip.
+live-tests = ["redis"]
 
 [dependencies]
 telemetry.workspace = true
@@ -49,6 +54,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 rustls = { workspace = true, optional = true, features = ["tls12"] }
 # The roots influxdb3-client trusts, so its admin calls and its queries agree on who to trust.
 webpki-roots = { version = "1", optional = true }
+# The Redis backend's client: the workspace's, so the cache's connection manager is accepted.
+redis = { workspace = true, optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
@@ -63,6 +70,11 @@ name = "influxdb"
 path = "examples/influxdb/main.rs"
 required-features = ["influxdb"]
 
+[[test]]
+name = "redis_live"
+path = "tests/redis_live/main.rs"
+required-features = ["live-tests"]
+
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }
@@ -72,4 +84,6 @@ tonic.workspace = true
 tokio-stream.workspace = true
 # The records tests build their Book descriptor without protoc.
 prost-types = "0.14"
+# The Redis live tests share one connection between the cache and the record store.
+cache.workspace = true
 

@@ -46,7 +46,10 @@ operations and bulk reads; enumeration/index sets, scans, leases, and fencing
 are unsupported. `memcached_compatibility.rs` guards dependency API assumptions.
 
 All clients remain caller-owned. Close each selected DB, then close the root
-client. Timeout intent and error translation belong here; application retry
+client. `RedisClient::connection_manager` (and Dragonfly's) lends the
+multiplexed connection to another layer, such as `database::redis`, so cache and
+record store share one connection as Go's layers share one client; the lent
+handle outlives `close`, which only stops the client admitting commands. Timeout intent and error translation belong here; application retry
 policy belongs outside the driver. See the crate guide's capability comparison.
 
 ```bash

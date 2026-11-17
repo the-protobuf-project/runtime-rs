@@ -35,7 +35,8 @@ append duplicate rows to the Arrow copy while InfluxDB merges point identities.
 [InfluxDB](influxdb/README.md) maps requests to SDK writes/Flight SQL;
 [Arrow](arrow/README.md) captures local columnar segments;
 [ingest](ingest/README.md) manages bounded background work;
-[observe](observe/README.md) wraps every capability with shared signals.
+[observe](observe/README.md) wraps every capability with shared signals;
+`redis/` (feature `redis`) is the Redis backend of the `records` contract.
 Missing backend capabilities refuse by name rather than disappearing.
 
 ```bash

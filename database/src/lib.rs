@@ -49,6 +49,8 @@ pub mod ingest;
 mod mirror;
 mod observe;
 pub mod records;
+#[cfg(feature = "redis")]
+pub mod redis;
 pub mod store;
 mod typed_ingest;
 
