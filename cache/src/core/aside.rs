@@ -14,7 +14,10 @@ use super::Options;
 /// it. That property is necessary for single-flight loading and background
 /// refresh: one caller abandoning its request must not invalidate work shared
 /// by other callers. Returning [`crate::CacheError::NotFound`] reports a genuine
-/// absence, which an Aside implementation may remember briefly.
+/// absence, which an Aside implementation may remember briefly. Any other
+/// error reaches every caller of that load unchanged and is not cached; a
+/// loader whose errors are not `CacheError`s wraps them in
+/// [`crate::CacheError::Loader`] to have them back typed.
 ///
 /// `Arc` makes one loader safely shareable by foreground and background tasks.
 /// `BoxFuture` keeps the public contract independent of the concrete future

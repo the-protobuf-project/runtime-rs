@@ -6,6 +6,15 @@
 //! schema, batches, time series, streams — each always present and refusing
 //! by name where a backend lacks it. Backends are [`influxdb`] and [`arrow`].
 //!
+//! [`records`] is the same shape for proto messages rather than flat points:
+//! a CRUD driver over `DynamicMessage`s, with transactions and schema. Its
+//! SQL backend, `orm` (feature `orm`, or one dialect with `orm-postgres`,
+//! `orm-mysql` or `orm-sqlite`), runs every resource on PostgreSQL, MySQL or
+//! SQLite through sqlx and sea-query.
+//!
+//! [`records`] is the proto-message record contract, runtime-go's `database/store`;
+//! the `mongodb` feature adds `database::mongodb`, which implements it over MongoDB.
+//!
 //! # Generated models
 //!
 //! Generated code implements [`Model`](store::Model) for each message and
@@ -40,14 +49,31 @@
 
 #![warn(missing_docs)]
 
+// Lets the mongodb unit tests include the integration fixtures, which name the crate.
+#[cfg(all(test, feature = "mongodb"))]
+extern crate self as database;
+
 pub mod arrow;
 mod buffered;
+#[cfg(feature = "cached")]
+pub mod cached;
 mod collection;
 #[cfg(feature = "influxdb")]
 pub mod influxdb;
 pub mod ingest;
 mod mirror;
+#[cfg(feature = "mongodb")]
+pub mod mongodb;
 mod observe;
+#[cfg(any(
+    feature = "orm-postgres",
+    feature = "orm-mysql",
+    feature = "orm-sqlite"
+))]
+pub mod orm;
+pub mod records;
+#[cfg(feature = "redis")]
+pub mod redis;
 pub mod store;
 mod typed_ingest;
 

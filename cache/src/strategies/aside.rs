@@ -1016,6 +1016,38 @@ mod tests {
         ));
     }
 
+    /// A foreign loader error comes back out of `get_or_load` as the same value, so its
+    /// owner can downcast it, and is not cached.
+    #[tokio::test]
+    async fn test_aside_get_or_load_returns_a_loader_error_unchanged() {
+        #[derive(Debug)]
+        struct SourceDown;
+        impl std::fmt::Display for SourceDown {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("source down")
+            }
+        }
+        impl std::error::Error for SourceDown {}
+
+        let driver = Arc::new(MemoryDriver::new());
+        let loader: Loader =
+            Arc::new(|_| async { Err(CacheError::Loader(Arc::new(SourceDown))) }.boxed());
+        let aside = test_aside_with_loader(driver, loader, Duration::from_secs(30));
+
+        let result = aside
+            .get_or_load("item", &mut Vec::new(), &Options::default())
+            .await;
+
+        match result {
+            Err(CacheError::Loader(source)) => assert!(source.is::<SourceDown>()),
+            other => panic!("want the loader's own error, got {other:?}"),
+        }
+        assert!(matches!(
+            aside.read("item").await,
+            Err(CacheError::NotFound)
+        ));
+    }
+
     #[tokio::test]
     async fn test_aside_load_and_store_invalid_loader_json_is_not_cached() {
         let driver = Arc::new(MemoryDriver::new());

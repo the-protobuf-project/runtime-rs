@@ -83,6 +83,9 @@ http-body = "1"
 async-trait = "0.1"
 uuid = { version = "1.29", features = ["v4"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# One redis-rs for the cache and the database, so a connection manager built for one is the
+# type the other accepts: Go hands one client to the cache, database and streams layers.
+redis = { version = "1.8", features = ["tokio-comp", "connection-manager"] }
 
 # gRPC and the transports the hybrid server speaks. tonic is the repo the gRPC
 # organisation points at for Rust: github.com/grpc/grpc-rust redirects here.

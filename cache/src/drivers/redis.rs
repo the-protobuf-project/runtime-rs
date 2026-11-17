@@ -136,6 +136,12 @@ pub(crate) trait CommandExecutor: Send + Sync {
     /// In-flight command snapshots may still complete. Closing is local and
     /// idempotent; it does not send a Redis command.
     async fn close(&self);
+
+    /// A handle on the underlying connection manager, or `None` once closed or
+    /// when the executor has no real transport (test doubles).
+    async fn manager(&self) -> Option<ConnectionManager> {
+        None
+    }
 }
 
 /// Lifecycle wrapper around redis-rs's reconnecting connection manager.
@@ -197,6 +203,11 @@ impl CommandExecutor for ManagedExecutor {
         // `take` makes repeated close calls harmless and rejects later execute
         // calls without affecting snapshots already running.
         self.manager.write().await.take();
+    }
+
+    /// Clones the open manager; the clone shares the multiplexed connection.
+    async fn manager(&self) -> Option<ConnectionManager> {
+        self.manager.read().await.clone()
     }
 }
 
@@ -294,6 +305,25 @@ impl RedisClient {
     /// the root client has been closed or stopped.
     pub async fn close(&self) {
         self.executor.close().await;
+    }
+
+    /// The connection manager this client multiplexes over, for another layer
+    /// to share: hand it to `database::redis::RedisProvider` and the cache and
+    /// the record store run on one connection, as runtime-go's `Client.Unwrap`
+    /// lets its cache, database and streams layers share one client.
+    ///
+    /// **Cost**: Local clone; no Redis round trip. **Ownership**: The handle
+    /// shares this client's connection but not its lifecycle: it keeps working
+    /// after [`RedisClient::close`], which only stops this client admitting
+    /// commands. Fails once the client is closed.
+    pub async fn connection_manager(&self) -> Result<ConnectionManager> {
+        self.executor.manager().await.ok_or_else(|| {
+            internal(
+                self.profile.backend,
+                "connection manager",
+                "RESP client is closed",
+            )
+        })
     }
 
     /// Verifies that the selected Redis database is currently reachable.
@@ -1311,6 +1341,15 @@ mod tests {
         client.close().await;
 
         assert!(executor.closed.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn test_redis_client_without_a_manager_lends_none_with_context() {
+        let (client, _) = client(0, []);
+
+        let error = client.connection_manager().await.err().unwrap();
+
+        assert!(error.to_string().contains("redis: connection manager"));
     }
 
     #[tokio::test]

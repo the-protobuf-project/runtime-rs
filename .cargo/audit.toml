@@ -9,4 +9,12 @@ ignore = [
     # Remove this once async-opcua moves to rsa 0.10. Until then OPC UA's
     # RSA security policies carry the exposure, as streams/README.md says.
     "RUSTSEC-2023-0071",
+    # libsqlite3-sys 0.37 bundles SQLite 3.53, which can hand back uninitialized page-cache
+    # memory when a process opens a database file with a crafted `-wal` file of another page
+    # size (CVE-2026-119375): a local attack that needs files a less trusted party wrote. It is
+    # reached only through tpp-database's opt-in `orm-sqlite` feature, via sqlx-sqlite 0.9.0,
+    # the latest sqlx, which caps libsqlite3-sys below 0.38; the fix is 0.39 (SQLite 3.54).
+    # Remove this once sqlx allows libsqlite3-sys 0.39. Until then database/README.md says to
+    # open only database files the service itself wrote.
+    "RUSTSEC-2026-0459",
 ]

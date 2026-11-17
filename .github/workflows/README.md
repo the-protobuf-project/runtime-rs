@@ -4,9 +4,23 @@
 
 `ci.yaml` runs on main-branch pushes and pull requests. It detects crates/MSRV
 from Cargo metadata, fans out per-crate build/test, verifies the combined
-workspace, checks formatting/clippy (including excluded docgen), builds docs
+workspace, tests tpp-database's feature-gated SQL backend (SQLite in-process,
+then Postgres and MySQL as service containers), checks formatting/clippy (including excluded docgen), builds docs
 with warnings denied, checks the generated README, builds at MSRV, and audits
-dependencies. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. `database-cached` lints, documents and tests tpp-database's
+off-by-default `cached` feature, its live suite against a Redis service on
+`127.0.0.1:16379`. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. Lint and docs also cover `tpp-database` with all features, whose
+optional `mongodb` backend the workspace run never compiles. The `live` job
+starts `database/docker/compose.mongodb.live.yaml` (a single-node MongoDB
+replica set) and runs `cargo test -p tpp-database --all-features`, so the
+`mongodb_live` target exercises a real server and fails rather than skips
+without one. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. The `live` job starts each Compose service under `cache/docker`
+and `database/docker` (Redis, Dragonfly, Memcached; Redis records) and runs the
+matching `live-tests` target against it; the lint and docs jobs also check the
+database's opt-in `redis` backend. The final `ci-gate` requires every listed
+prerequisite to pass.
 
 Use the corresponding local commands during development:
 
@@ -16,6 +30,13 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 just docs-check
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml up -d --wait redis
+cargo test -p tpp-database --features cached,live-tests --test cached --test cached_capabilities --test cached_live
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
+# The live job, with its server:
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml up -d --wait mongodb
+cargo test -p tpp-database --all-features
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml down
 ```
 
 `release.yaml` responds to workspace `vX.Y.Z` or crate-scoped `crate/vX.Y.Z`

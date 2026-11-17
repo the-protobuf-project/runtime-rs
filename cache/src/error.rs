@@ -42,6 +42,13 @@ pub enum CacheError {
     /// A backend, codec, lifecycle, or invariant failure with safe context.
     #[error("cache: {0}")]
     Internal(String),
+
+    /// A [`Loader`](crate::core::Loader)'s own failure, other than `NotFound`, carried out
+    /// of [`Aside`](crate::core::Aside) unchanged so the caller can downcast it back to its
+    /// own error type. Shared because one load's result reaches every caller it collapsed.
+    /// Go's Aside returns a loader error as it is; a closed enum needs this to do the same.
+    #[error("cache: loader: {0}")]
+    Loader(#[source] std::sync::Arc<dyn std::error::Error + Send + Sync>),
 }
 
 /// Cache result using the crate's stable [`CacheError`] contract.

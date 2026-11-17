@@ -1,0 +1,34 @@
+# Isolated MongoDB for tpp-database's explicitly enabled `mongodb_live` test.
+#
+# A single-node replica set rather than a standalone server, as runtime-go's compose file runs
+# it: transactions and change streams are both replica-set features. mongod listens on 27117
+# inside the container too, so the member address the replica set advertises is the one the
+# host reaches, and a client following it never lands on another server's default port.
+#
+# Start:
+#   docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml up -d --wait mongodb
+# Stop:
+#   docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml down
+
+services:
+  mongodb:
+    image: mongo:7
+    command: ["--replSet", "rs0", "--bind_ip_all", "--port", "27117"]
+    ports:
+      - "127.0.0.1:27117:27117"
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --port
+        - "27117"
+        - --quiet
+        - --eval
+        - >-
+          try { rs.status().ok }
+          catch (e) { rs.initiate({_id: 'rs0', members: [{_id: 0, host: 'localhost:27117'}]}).ok }
+      interval: 2s
+      timeout: 10s
+      retries: 30
+      start_period: 5s
+    restart: "no"

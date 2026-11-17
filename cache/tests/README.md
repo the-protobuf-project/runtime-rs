@@ -28,3 +28,12 @@ Use the Dragonfly/Memcached Compose setups for `--test dragonfly_live` and
 [examples](../examples/README.md) and the respective test setup functions.
 Live tests create their own namespaces and exercise cleanup; use disposable
 services. A default-suite pass alone does not prove a real backend is reachable.
+
+`benches/redis_paths.rs` times the Redis paths a change to the RESP driver or
+the bulk helpers affects (a 10k-document `list`, permanent `touch`, an Aside
+miss) against the same live service, reporting the median of
+`RUNTIME_CACHE_BENCH_RUNS` samples (default 7):
+
+```bash
+cargo bench -p tpp-cache --features live-tests --bench redis_paths
+```
