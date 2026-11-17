@@ -375,7 +375,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
 
       - name: Clippy (tauri-store)
-        run: cargo clippy -p tpp-database --all-targets --features tauri-store -- -D warnings
+        run: cargo clippy -p tpp-database --all-targets --features tauri-store-test -- -D warnings
 
       - name: Docs (tauri-store)
         env:
@@ -383,7 +383,7 @@ jobs:
         run: cargo doc -p tpp-database --no-deps --features tauri-store
 
       - name: Test (mock runtime)
-        run: cargo test -p tpp-database --features tauri-store --test tauri_store --lib
+        run: cargo test -p tpp-database --features tauri-store-test --test tauri_store --lib
 
   # ------------------------------------------------------------------
   # Single status gate that PRs can require before merge. Reading the

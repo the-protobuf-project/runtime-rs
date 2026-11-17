@@ -41,6 +41,9 @@ redis = ["dep:redis"]
 # The Tauri store backend, `database::tauri_store`: records in a tauri-plugin-store file in
 # the app's data directory, for desktop and mobile apps. Rust-only: Go has no Tauri.
 tauri-store = ["dep:tauri", "dep:tauri-plugin-store"]
+# Test-only: the tauri-store tests on Tauri's mock runtime. A feature, not a dev-dependency,
+# because dev-dependencies always build, and Tauri links GTK on Linux whatever its features.
+tauri-store-test = ["tauri-store", "tauri/test"]
 live-tests = []
 
 [dependencies]
@@ -157,7 +160,7 @@ required-features = ["redis", "live-tests"]
 [[test]]
 name = "tauri_store"
 path = "tests/tauri_store/main.rs"
-required-features = ["tauri-store"]
+required-features = ["tauri-store-test"]
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
@@ -168,8 +171,6 @@ tonic.workspace = true
 tokio-stream.workspace = true
 # The records tests build their Book descriptor without protoc.
 prost-types = "0.14"
-# The tauri-store tests run on Tauri's mock runtime.
-tauri = { version = "2", default-features = false, features = ["test"] }
 # Counts the statements sqlx logs, as Go's orm tests wrap GORM's logger.
 tracing.workspace = true
 # The mongodb_live test reads stored documents raw.

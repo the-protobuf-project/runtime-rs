@@ -355,7 +355,7 @@ tauri::Builder::default()
 reaches the file only when it commits; `TauriStoreProvider::new` takes a store
 you built. On Linux Tauri links GTK whatever its features, so building
 `tauri-store` needs `libgtk-3-dev`. The tests run on Tauri's mock runtime:
-`cargo test -p tpp-database --features tauri-store --test tauri_store`.
+`cargo test -p tpp-database --features tauri-store-test --test tauri_store`.
 
 ## Examples and telemetry
 
