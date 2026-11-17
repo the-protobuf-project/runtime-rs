@@ -49,7 +49,7 @@
 //!
 //! As Go's list cache: a page is cached under its parent's version, and a write under a
 //! parent replaces that version, so pages are never invalidated one by one. A list reads its
-//! [`ListInput::parent`]'s version, or the version every write moves on for a parent with a
+//! [`ListInput::parent`](crate::repository::ListInput::parent)'s version, or the version every write moves on for a parent with a
 //! `-` (AIP-159) or, on a nested resource, an empty one (every parent). The page key is Go's
 //! digest of the request, the parent beside `repox.ListInput` as Go's `List(parent, in)`
 //! puts it, so pages are shared with Go.

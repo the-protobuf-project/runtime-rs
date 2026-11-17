@@ -14,7 +14,7 @@ pub enum Part {
 }
 
 /// Where one resource's record entries live. Generated per cached resource, and named by
-/// other resources' [`Edge`]s.
+/// other resources' [`Edge`](super::Edge)s.
 #[derive(Debug)]
 pub struct Keyspace {
     /// The proto message, for diagnostics.
