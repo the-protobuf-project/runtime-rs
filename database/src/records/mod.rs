@@ -18,6 +18,10 @@
 //! generated descriptors serve many tenants. Backends are not equally capable: a capability
 //! a backend lacks is a refusal naming it ([`crate::Error::Unimplemented`]), never missing.
 //!
+//! The SQL backend is `database::orm` (features `orm`, `orm-postgres`, `orm-mysql`,
+//! `orm-sqlite`): Postgres, MySQL and SQLite through one dynamic driver, as Go's
+//! `database/orm`.
+//!
 //! This sits beside [`crate::store`], the time-series contract the InfluxDB and Arrow
 //! backends implement over flat scalar records.
 

@@ -4,12 +4,14 @@ Descriptor-driven storage shaped after
 [runtime-go/database](https://github.com/the-protobuf-project/runtime-go/tree/main/database),
 so one store generator emits Go and Rust clients from the same template.
 Backends: InfluxDB 3 (`influxdb3-client` 0.3.0, live-tested against Core
-3.12.2) and Arrow IPC captures. Every Rust file stays under 200 lines; a test
-enforces it.
+3.12.2) and Arrow IPC captures for time series, and PostgreSQL, MySQL and SQLite
+for proto records. Every Rust file stays under 200 lines; a test enforces it.
 
 The `influxdb` feature, on by default, is the InfluxDB 3 backend. `influxdb3-client`
 0.3 requires Arrow 59 while the capture backend uses 60, so a capture-only build
 sets `default-features = false` to link one Arrow major and no HTTP client.
+The SQL backend is off by default: `orm-postgres`, `orm-mysql` and `orm-sqlite`
+each link one sqlx driver, and `orm` turns on all three.
 
 ## Runnable create/read/close example
 
@@ -132,6 +134,64 @@ written and given a `.bounds` sidecar on close so range reads skip it. A crash
 loses at most the batch being written; `load` returns the rest. Pages use
 offset tokens with totals. Open the files with pyarrow, polars or DuckDB.
 
+## Records over SQL (`database::records`, `database::orm`)
+
+`records` is runtime-go's `database/store` for proto messages: a `Resource`
+descriptor (columns, SQL types, key, unique, managed key and audit times), a
+`Driver` over `DynamicMessage`, and `Transactional`/`Migrator`/`Batcher`/`Watcher`
+capabilities that refuse by name where a backend lacks them. `orm` is its SQL
+backend, the port of runtime-go's `database/orm`: one dynamic driver for every
+resource, built on sqlx pools and sea-query statements rather than an ORM.
+
+```rust
+use database::orm::{OrmProvider, sqlx::PgPool};
+use database::records::{DB, Provider, Resource, TxWork};
+use futures::{FutureExt, future::BoxFuture};
+use prost_reflect::DynamicMessage;
+
+// Names the closure's lifetime as `TxWork` wants it.
+fn work<F>(f: F) -> TxWork
+where F: for<'a> FnOnce(&'a DB) -> BoxFuture<'a, database::Result<()>> + Send + 'static {
+    Box::new(f)
+}
+
+async fn store(pool: PgPool, books: Resource, book: DynamicMessage) -> database::Result<()> {
+    let tenant = OrmProvider::new(pool).set_database("tenant_a").await?;
+    tenant.schema.ensure_schema(&books).await?; // CREATE TABLE IF NOT EXISTS
+    tenant.tx.run(work(move |tx| async move {
+        tx.create(&books, &book).await?;
+        Ok(())
+    }.boxed())).await
+}
+```
+
+| runtime-go `orm` | Rust `orm` |
+| --- | --- |
+| `NewProvider(gormDB)`, `SetDatabase`, `Backend()` = `gorm` | `OrmProvider::new(pool)`, `set_database`, `backend()` = `orm` |
+| `New(gormDB)` | `orm::driver(pool)`: no selection, no ping |
+| `Driver.Run` (GORM savepoints when nested) | `db.tx.run`: savepoints when nested |
+| `EnsureSchema/DropSchema/HasSchema` | `db.schema.*`, same DDL |
+
+- The pool is yours (`database::orm::sqlx` is the version to open it with);
+  `close` is a no-op. The selected name is checked by `check_database_name`,
+  pinged, and overrides `Resource::schema`: a Postgres schema, a MySQL database,
+  an attached SQLite database. It must exist; `ensure_schema` creates tables only.
+- Identifiers are quoted per dialect (backticks on MySQL). Columns without an
+  `sql_type` get the dialect's type for their kind (e.g. `BYTEA`/`LONGBLOB`/`BLOB`).
+- Unique and primary-key violations are `Error::AlreadyExists`, on create and
+  on update; a missing row on get, update or delete is `Error::NotFound`.
+- Filters are `records::core::parse_filter`'s subset, each column checked
+  against the descriptor and its value typed by kind. `order_by` takes AIP-132
+  `field [desc], …`; an unknown field orders by the key, as Go does, and the
+  key always ends the order so offset pages are stable. `omit_total` skips the
+  count and reads one row past the page.
+- Typed parameters (sqlx's, unlike Go's) mean a record key is typed by the key
+  column's kind, and an unsigned value past 2^63 is refused outside MySQL.
+- On SQLite an in-memory database is per connection: use a one-connection pool.
+
+`docker/compose.orm.live.yaml` runs Postgres (`127.0.0.1:15432`) and MySQL
+(`127.0.0.1:13306`) for the `orm_live` test; SQLite tests run in-process.
+
 ## Examples and telemetry
 
 - [examples/influxdb](examples/influxdb/README.md): the full InfluxDB workflow
@@ -155,5 +215,6 @@ and [tests](tests/README.md).
 
 ```bash
 cargo test -p tpp-database
-cargo doc -p tpp-database --no-deps
+cargo test -p tpp-database --features orm   # SQLite in-process
+cargo doc -p tpp-database --no-deps --all-features
 ```

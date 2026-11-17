@@ -42,3 +42,16 @@ docker compose -f database/docker/compose.yaml --profile telemetry down
 The collector is a development inspection sink. Ordinary `down` preserves the
 InfluxDB named volume; do not remove volumes when you intend to retain data.
 Application shutdown drains workers before flushing SDK exporters.
+
+## SQL engines for the `orm` backend
+
+`compose.orm.live.yaml` runs PostgreSQL 17 on `127.0.0.1:15432` and MySQL 8.4
+on `127.0.0.1:13306` (database `runtime`; users `postgres`/`postgres` and
+`root`/`mysql`), on high ports so engines already on 5432/3306 are untouched.
+No volumes: the data is disposable. Keep `-p` and `-f` the same on shutdown.
+
+```bash
+docker compose -p runtime-database-orm-live -f database/docker/compose.orm.live.yaml up -d --wait
+cargo test -p tpp-database --features orm,live-tests --test orm_live
+docker compose -p runtime-database-orm-live -f database/docker/compose.orm.live.yaml down
+```

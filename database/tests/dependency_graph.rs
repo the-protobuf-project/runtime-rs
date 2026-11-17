@@ -50,3 +50,28 @@ fn a_capture_only_build_has_one_arrow_and_no_http_client() {
         assert!(!tree.contains(absent), "{absent} is in the graph:\n{tree}");
     }
 }
+
+#[test]
+fn the_sql_backend_speaks_rustls_on_ring_and_links_no_native_tls() {
+    let tree = packages(&["--features", "orm"]);
+    assert!(
+        tree.contains("sqlx-postgres v"),
+        "the tree was read: {tree}"
+    );
+    assert!(tree.contains("ring v"), "ring is the provider: {tree}");
+    for absent in ["aws-lc", "native-tls", "openssl"] {
+        assert!(!tree.contains(absent), "{absent} is in the graph:\n{tree}");
+    }
+}
+
+#[test]
+fn one_dialect_links_one_sql_client() {
+    let tree = packages(&["--no-default-features", "--features", "orm-postgres"]);
+    assert!(
+        tree.contains("sqlx-postgres v"),
+        "the tree was read: {tree}"
+    );
+    for absent in ["sqlx-mysql", "sqlx-sqlite", "libsqlite3-sys"] {
+        assert!(!tree.contains(absent), "{absent} is in the graph:\n{tree}");
+    }
+}

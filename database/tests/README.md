@@ -19,6 +19,8 @@ cargo test -p tpp-database
 | `dependency_graph` | No aws-lc, parquet or zstd is linked, and a capture-only build has one Arrow major |
 | `observations` | Every capability, complete stream lifetime, cancellation, safe exported signals |
 | `file_size` | Rust sources/tests stay below 200 lines |
+| `records` | The record contract: filter subset, page tokens, managed columns, message/column bridge |
+| `orm_driver`, `orm_provider`, `orm_sqlite`, `orm_statements`, `orm_dialect` (feature `orm-sqlite`) | runtime-go's `orm` tests on in-process SQLite: CRUD, error mapping, managed columns, paging, schema, tenants, transactions, statement counts, quoting and default types |
 
 The ignored `live`, `live_lifecycle`, and `live_rate` targets require explicit
 real-server settings. They write data; lifecycle/rate tests create and delete
@@ -30,6 +32,19 @@ cargo test -p tpp-database --test live -- --ignored --nocapture
 cargo test -p tpp-database --test live_lifecycle -- --ignored --nocapture
 cargo test --release -p tpp-database --test live_rate -- --ignored --nocapture
 ```
+
+`orm_live` runs the same SQL scenarios against Postgres and MySQL. It is
+selected with `live-tests` (not ignored), and an engine that is not up fails it:
+
+```bash
+docker compose -p runtime-database-orm-live -f database/docker/compose.orm.live.yaml up -d --wait
+cargo test -p tpp-database --features orm,live-tests --test orm_live
+docker compose -p runtime-database-orm-live -f database/docker/compose.orm.live.yaml down
+```
+
+`RUNTIME_DATABASE_POSTGRES_ADDRESS` (default `127.0.0.1:15432`) and
+`RUNTIME_DATABASE_MYSQL_ADDRESS` (default `127.0.0.1:13306`) point it elsewhere.
+`--all-features` includes `live-tests`, so it needs the engines too.
 
 `arrow_throughput` is a separate ignored release-mode performance measurement:
 

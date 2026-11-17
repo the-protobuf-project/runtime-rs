@@ -4,7 +4,8 @@
 
 `ci.yaml` runs on main-branch pushes and pull requests. It detects crates/MSRV
 from Cargo metadata, fans out per-crate build/test, verifies the combined
-workspace, checks formatting/clippy (including excluded docgen), builds docs
+workspace, tests tpp-database's feature-gated SQL backend (SQLite in-process,
+then Postgres and MySQL as service containers), checks formatting/clippy (including excluded docgen), builds docs
 with warnings denied, checks the generated README, builds at MSRV, and audits
 dependencies. The final `ci-gate` requires every listed prerequisite to pass.
 

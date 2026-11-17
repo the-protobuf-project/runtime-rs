@@ -6,6 +6,12 @@
 //! schema, batches, time series, streams — each always present and refusing
 //! by name where a backend lacks it. Backends are [`influxdb`] and [`arrow`].
 //!
+//! [`records`] is the same shape for proto messages rather than flat points:
+//! a CRUD driver over `DynamicMessage`s, with transactions and schema. Its
+//! SQL backend, `orm` (feature `orm`, or one dialect with `orm-postgres`,
+//! `orm-mysql` or `orm-sqlite`), runs every resource on PostgreSQL, MySQL or
+//! SQLite through sqlx and sea-query.
+//!
 //! # Generated models
 //!
 //! Generated code implements [`Model`](store::Model) for each message and
@@ -48,6 +54,12 @@ pub mod influxdb;
 pub mod ingest;
 mod mirror;
 mod observe;
+#[cfg(any(
+    feature = "orm-postgres",
+    feature = "orm-mysql",
+    feature = "orm-sqlite"
+))]
+pub mod orm;
 pub mod records;
 pub mod store;
 mod typed_ingest;

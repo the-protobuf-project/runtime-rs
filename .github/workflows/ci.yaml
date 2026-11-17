@@ -98,6 +98,53 @@ jobs:
         run: cargo test --workspace
 
   # ------------------------------------------------------------------
+  # The database crate's SQL backend sits behind the `orm` features, so
+  # the per-crate and workspace jobs (default features) never build it.
+  # Here: SQLite in-process with the ordinary suite, then the live
+  # Postgres and MySQL tests against service containers on the same
+  # high ports database/docker/compose.orm.live.yaml uses locally.
+  # ------------------------------------------------------------------
+  database-sql:
+    name: Test (tpp-database, SQL)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: runtime
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d runtime"
+          --health-interval 2s --health-timeout 3s --health-retries 30
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: mysql
+          MYSQL_DATABASE: runtime
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -uroot -pmysql --silent"
+          --health-interval 2s --health-timeout 3s --health-retries 60
+    env:
+      RUNTIME_DATABASE_POSTGRES_ADDRESS: 127.0.0.1:15432
+      RUNTIME_DATABASE_MYSQL_ADDRESS: 127.0.0.1:13306
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test (SQLite in-process, with the ordinary suite)
+        run: cargo test -p tpp-database --features orm
+
+      - name: Test (live Postgres and MySQL)
+        run: cargo test -p tpp-database --features orm,live-tests --test orm_live
+
+  # ------------------------------------------------------------------
   # Lint — formatting and clippy, warnings denied. Kept as one
   # workspace-wide job rather than fanned out per crate: clippy shares a
   # single dependency build across the workspace, so splitting it would
@@ -120,6 +167,10 @@ jobs:
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Feature-gated code the workspace run does not compile (the SQL backend).
+      - name: Clippy (tpp-database, all features)
+        run: cargo clippy -p tpp-database --all-targets --all-features -- -D warnings
 
       # tools/docgen is excluded from the workspace, so --workspace above
       # does not reach it. Held to the same bar rather than left to rot.
@@ -152,6 +203,11 @@ jobs:
         env:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --workspace --no-deps
+
+      - name: Build docs (tpp-database, all features)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc -p tpp-database --no-deps --all-features
 
       - uses: extractions/setup-just@v4
 
@@ -205,7 +261,7 @@ jobs:
   ci-gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [detect-crates, test, workspace, lint, docs, msrv, audit]
+    needs: [detect-crates, test, workspace, database-sql, lint, docs, msrv, audit]
     if: always()
     steps:
       - name: Check all jobs passed

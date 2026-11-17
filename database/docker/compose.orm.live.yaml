@@ -1,0 +1,39 @@
+# Isolated SQL engines for tpp-database's explicitly enabled `orm_live` test: the dialects
+# the `orm` backend claims besides SQLite, which runs in-process and needs no container.
+# High loopback ports, so a Postgres or MySQL already on 5432/3306 is left alone.
+#
+# Start:
+#   docker compose -p runtime-database-orm-live -f database/docker/compose.orm.live.yaml up -d --wait
+# Stop:
+#   docker compose -p runtime-database-orm-live -f database/docker/compose.orm.live.yaml down
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: runtime
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d runtime"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    restart: "no"
+
+  mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: mysql
+      MYSQL_DATABASE: runtime
+    ports:
+      - "127.0.0.1:13306:3306"
+    healthcheck:
+      # The entrypoint's temporary server answers pings on the socket only; probing over TCP
+      # waits for the real one.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -pmysql --silent"]
+      interval: 2s
+      timeout: 3s
+      retries: 60
+    restart: "no"
