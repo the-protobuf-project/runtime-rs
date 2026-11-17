@@ -2,7 +2,7 @@
 //! are resolved through the descriptor and quoted by sea-query, and values are bound, never
 //! interpolated. Go's `buildWhere`, `sqlOperator` and `orderClause` in `orm/filter.go`.
 
-use sea_query::{Alias, BinOper, Condition, Expr as Sql, ExprTrait, Order};
+use sea_query::{Alias, BinOper, Condition, Expr as Sql, ExprTrait, Func, LikeExpr, Order};
 
 use super::Dialect;
 use super::values::bind;
@@ -10,11 +10,14 @@ use crate::Result;
 use crate::records::core::filter::{self, Expr, Op};
 use crate::records::{Resource, core};
 
-/// An AIP-160 expression as a bound predicate: [`filter::parse`]'s tree, columns resolved
-/// through `res` (an undeclared one is refused by name rather than ignored, which would
-/// return every row), values bound as their column's kind. `AND`, `OR` and `NOT` are
-/// sea-query's `all`, `any` and `not`; SQL's own three-valued logic is the null rule every
-/// other provider follows.
+/// An AIP-160 expression as a bound predicate, as Go's gorm engine writes it: columns
+/// resolved through `res` by [`filter::parse`] (an undeclared one is refused by name rather
+/// than ignored, which would return every row), values bound as their column's kind.
+///
+/// - `AND` and `OR` are sea-query's `all` and `any`.
+/// - `NOT x` is `NOT COALESCE(x, FALSE)`, so it holds where `x` compares a null column.
+/// - Contains is `LOWER(column) LIKE '%value%' ESCAPE '!'`, the value lowercased and its
+///   `%`, `_` and `!` escaped: Go's `ILIKE`, on every dialect.
 pub(crate) fn filter(d: Dialect, res: &Resource, expr: &str) -> Result<Condition> {
     match filter::parse(res, expr)? {
         None => Ok(Condition::all()),
@@ -29,16 +32,35 @@ fn condition(d: Dialect, e: &Expr) -> Result<Condition> {
         }
         Ok(cond)
     };
+    let one = |e: Sql| Condition::all().add(e);
     Ok(match e {
         Expr::And(all) => fold(Condition::all(), all)?,
         Expr::Or(any) => fold(Condition::any(), any)?,
-        Expr::Not(inner) => condition(d, inner)?.not(),
-        Expr::Compare(c) => Condition::all().add(
-            Sql::col(Alias::new(&c.column)).binary(operator(c.op), bind(d, c.kind, &c.value)?),
-        ),
-        Expr::Has(c) => Condition::all().add(Sql::col(Alias::new(c)).is_not_null()),
-        Expr::Null(c) => Condition::all().add(Sql::col(Alias::new(c)).is_null()),
+        Expr::Not(inner) => {
+            let held = Sql::from(condition(d, inner)?);
+            one(Func::coalesce([held, Sql::val(false)]).not())
+        }
+        Expr::Compare(c) => {
+            one(Sql::col(Alias::new(&c.column)).binary(operator(c.op), bind(d, c.kind, &c.value)?))
+        }
+        Expr::Contains(c) => {
+            let pattern = format!("%{}%", escape(&c.value.to_lowercase()));
+            let lower = Sql::from(Func::lower(Sql::col(Alias::new(&c.column))));
+            one(lower.like(LikeExpr::new(pattern).escape('!')))
+        }
     })
+}
+
+/// `v` with LIKE's wildcards and the escape character escaped, so they match literally.
+fn escape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        if matches!(c, '!' | '%' | '_') {
+            out.push('!');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// A comparison as SQL; `!=` renders as `<>`. Go's `sqlOperator`.

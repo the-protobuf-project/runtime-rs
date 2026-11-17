@@ -1,6 +1,6 @@
-//! AIP-160 filters parsed into `records::core::filter::Expr`: precedence, parentheses,
-//! quoting, typing by column kind, and the conformance table run over the in-memory
-//! reference every provider agrees with. Refusals are in `filter_errors`.
+//! AIP-160 filters parsed into `records::core::filter::Expr` as Go's `filterx` reads them:
+//! precedence, keyword casing, negation, quoting, free text, typing by column kind, and the
+//! conformance table over the in-memory reference. Refusals are in `filter_errors`.
 
 #[path = "support/filter_conformance.rs"]
 mod conformance;
@@ -8,7 +8,7 @@ mod conformance;
 mod support;
 
 use chrono::{TimeZone, Utc};
-use database::records::core::filter::{self, Comparison, Expr, Op};
+use database::records::core::filter::{self, Comparison, Contains, Expr, Op};
 use database::records::{Kind, Value, core, message_to_columns};
 
 fn parse(text: &str) -> Expr {
@@ -35,44 +35,69 @@ fn not(e: Expr) -> Expr {
     Expr::Not(Box::new(e))
 }
 
+fn has(column: &str, value: &str) -> Expr {
+    let (column, value) = (column.into(), value.into());
+    Expr::Contains(Contains { column, value })
+}
+
 #[test]
 fn not_binds_tightest_and_or_binds_tighter_than_and() {
     let (p1, p2, p3) = (pages(Op::Eq, 1), pages(Op::Eq, 2), pages(Op::Eq, 3));
     let or23 = Expr::Or(vec![p2.clone(), p3.clone()]);
+    let and = |v: Vec<Expr>| Expr::And(v);
     assert_eq!(
         parse("pages = 1 AND pages = 2 OR pages = 3"),
-        Expr::And(vec![p1.clone(), or23.clone()])
+        and(vec![p1.clone(), or23.clone()])
     );
     assert_eq!(
         parse("pages = 1 pages = 2 OR pages = 3"),
-        Expr::And(vec![p1.clone(), or23])
+        and(vec![p1.clone(), or23])
     );
     assert_eq!(
         parse("(pages = 1 AND pages = 2) OR pages = 3"),
-        Expr::Or(vec![Expr::And(vec![p1.clone(), p2.clone()]), p3.clone()])
+        Expr::Or(vec![and(vec![p1.clone(), p2.clone()]), p3.clone()])
     );
     assert_eq!(
         parse("NOT pages = 1 OR pages = 2"),
         Expr::Or(vec![not(p1.clone()), p2.clone()])
     );
     assert_eq!(
-        parse("-pages = 1 AND pages = 2"),
-        Expr::And(vec![not(p1.clone()), p2.clone()])
+        parse("-pages = 1 and pages = 2"),
+        and(vec![not(p1.clone()), p2.clone()])
     );
     assert_eq!(
-        parse("NOT (pages = 1 OR pages = 2)"),
-        not(Expr::Or(vec![p1.clone(), p2]))
+        parse("-(pages = 1 OR pages = 2)"),
+        not(Expr::Or(vec![p1.clone(), p2.clone()]))
     );
-    assert_eq!(parse("((pages = 1))"), p1);
+    assert_eq!(parse("--pages = 1"), not(not(p1.clone())));
+    // A parenthesized group joins the conjunction around it; stray ANDs are skipped.
     assert_eq!(
-        parse("pages = 1 and pages = 3 or pages = 1"),
-        parse("pages = 1 AND (pages = 3 OR pages = 1)")
+        parse("AND pages = 1 AND (pages = 2 pages = 3) AND"),
+        and(vec![p1.clone(), p2, p3])
     );
+    assert_eq!(parse("((pages = 1))"), p1.clone());
+    assert_eq!(filter::parse(&support::books(), " AND and ").unwrap(), None);
+}
+
+#[test]
+fn or_and_not_are_keywords_only_in_capitals() {
+    let words = |w: &[&str]| -> Vec<Expr> {
+        let any = |t: &str| Expr::Or(vec![has("subtitle", t), has("title", t)]);
+        w.iter().map(|t| any(t)).collect()
+    };
+    assert_eq!(
+        parse("dune or emma"),
+        Expr::And(words(&["dune", "or", "emma"]))
+    );
+    assert_eq!(parse("not dune"), Expr::And(words(&["not", "dune"])));
+    assert_eq!(parse(r#""NOT" dune"#), Expr::And(words(&["NOT", "dune"])));
+    assert_eq!(parse("SUMMER25"), words(&["SUMMER25"]).remove(0));
 }
 
 #[test]
 fn values_are_typed_by_their_column() {
     let at = Utc.with_ymd_and_hms(2025, 12, 31, 22, 0, 0).unwrap();
+    let midnight = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
     for (text, want) in [
         ("pages>=-5", pages(Op::Ge, -5)),
         ("isbn != 7", cmp("isbn", Kind::Uint, Op::Ne, Value::Uint(7))),
@@ -85,8 +110,16 @@ fn values_are_typed_by_their_column() {
             cmp("in_print", Kind::Bool, Op::Eq, Value::Bool(true)),
         ),
         (
-            "status <= 2",
-            cmp("status", Kind::Enum, Op::Le, Value::Int(2)),
+            "status = 2",
+            cmp("status", Kind::Enum, Op::Eq, Value::Int(2)),
+        ),
+        (
+            "status != draft",
+            cmp("status", Kind::Enum, Op::Ne, Value::Int(1)),
+        ),
+        (
+            "status = STATUS_PUBLISHED",
+            cmp("status", Kind::Enum, Op::Eq, Value::Int(2)),
         ),
         (
             r#"cover = "png""#,
@@ -97,14 +130,18 @@ fn values_are_typed_by_their_column() {
             cmp("create_time", Kind::Timestamp, Op::Gt, Value::Timestamp(at)),
         ),
         (
-            "create_time > 2026-01-01T00:00:00+02:00",
-            cmp("create_time", Kind::Timestamp, Op::Gt, Value::Timestamp(at)),
+            "create_time <= 2026-01-01",
+            cmp(
+                "create_time",
+                Kind::Timestamp,
+                Op::Le,
+                Value::Timestamp(midnight),
+            ),
         ),
-        ("subtitle:*", Expr::Has("subtitle".into())),
-        ("subtitle != null", Expr::Has("subtitle".into())),
-        ("subtitle = null", Expr::Null("subtitle".into())),
+        ("title:Dune", has("title", "Dune")),
+        (r#"subtitle : "a b""#, has("subtitle", "a b")),
         (
-            r#"subtitle = "null""#,
+            "subtitle = null",
             cmp(
                 "subtitle",
                 Kind::String,
@@ -118,35 +155,20 @@ fn values_are_typed_by_their_column() {
 }
 
 #[test]
-fn strings_quote_and_escape() {
+fn strings_are_double_quoted_without_escapes() {
     let title = |s: &str| cmp("title", Kind::String, Op::Eq, Value::String(s.into()));
     for (text, want) in [
         (r#"title = "x AND y""#, "x AND y"),
-        (r#"title = 'a != (b)'"#, "a != (b)"),
-        (r#"title = "say \"hi\"""#, r#"say "hi""#),
-        (r#"title = 'it\'s'"#, "it's"),
-        (r#"title = "a\\b\tc\n""#, "a\\b\tc\n"),
-        (r#"title = "5\* stars""#, "5* stars"),
+        (r#"title = "a != (b)""#, "a != (b)"),
+        (r#"title = "a\b""#, r"a\b"),
         (r#"title = """#, ""),
-        ("title = Dune", "Dune"),
+        ("title = 'Dune'", "'Dune'"),
+        ("title = Dune*", "Dune*"),
         ("title = 2026-01-01", "2026-01-01"),
+        ("title = AND", "AND"),
+        (r#""title" = Dune"#, "Dune"),
     ] {
         assert_eq!(parse(text), title(want), "{text}");
-    }
-}
-
-#[test]
-fn negation_reaches_the_leaves() {
-    let e = parse(r#"NOT (pages < 3 AND (subtitle:* OR NOT title = "x"))"#);
-    let title = cmp("title", Kind::String, Op::Eq, Value::String("x".into()));
-    let want = Expr::Or(vec![
-        pages(Op::Ge, 3),
-        Expr::And(vec![Expr::Null("subtitle".into()), title.clone()]),
-    ]);
-    assert_eq!(e.without_not(), want);
-    assert_eq!(e.negated().negated(), want);
-    for (op, flipped) in [(Op::Eq, Op::Ne), (Op::Lt, Op::Ge), (Op::Le, Op::Gt)] {
-        assert_eq!((op.negated(), flipped.negated()), (flipped, op));
     }
 }
 

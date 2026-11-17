@@ -84,29 +84,30 @@ fn filters_become_typed_queries() {
         doc! { "$and": [ { "in_print": { "$eq": true } }, { "price": { "$lt": 2.5 } } ] }
     );
     assert_eq!(
-        q("status != 1"),
-        doc! { "status": { "$nin": [Bson::Int32(1), Bson::Null] } }
+        q("status != PUBLISHED"),
+        doc! { "status": { "$nin": [Bson::Int32(2), Bson::Null] } }
+    );
+    // NOT is `$nor`, which, as Go's NOT coalesce, holds where the field is null.
+    assert_eq!(
+        q("NOT pages < 9"),
+        doc! { "$nor": [ { "pages": { "$lt": 9_i64 } } ] }
+    );
+    // Contains and free text are case-insensitive regexes of the escaped value.
+    assert_eq!(
+        q("title:a.b"),
+        doc! { "title": { "$regex": "a\\.b", "$options": "i" } }
     );
     assert_eq!(
-        q("pages > 1 OR subtitle:*"),
+        q("dune"),
         doc! { "$or": [
-            { "pages": { "$gt": 1_i64 } },
-            { "subtitle": { "$exists": true, "$ne": Bson::Null } },
+            { "subtitle": { "$regex": "dune", "$options": "i" } },
+            { "title": { "$regex": "dune", "$options": "i" } },
         ] }
     );
-    // NOT is pushed down, never `$nor`, which would match a null subtitle.
-    assert_eq!(
-        q("NOT (subtitle = \"x\" AND pages < 9)"),
-        doc! { "$or": [
-            { "subtitle": { "$nin": ["x", Bson::Null] } },
-            { "pages": { "$gte": 9_i64 } },
-        ] }
-    );
-    assert_eq!(q("subtitle = null"), doc! { "subtitle": Bson::Null });
     // Bytes compare as the binary they are stored as.
     let cover = q("cover = \"png\"").get_document("cover").unwrap().clone();
     assert!(matches!(cover.get("$eq"), Some(Bson::Binary(_))), "{cover}");
-    for bad in ["nosuch = 1", "pages = x", "pages LIKE 1", "title = \"a*\""] {
+    for bad in ["nosuch = 1", "pages = x", "title < a", "pages : 1"] {
         assert!(
             matches!(parse_filter(&res, bad), Err(Error::Invalid(_))),
             "{bad}"

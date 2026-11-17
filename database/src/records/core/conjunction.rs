@@ -10,15 +10,15 @@ use crate::{Error, Result};
 pub struct Clause {
     /// The column, as written.
     pub column: String,
-    /// One of `=`, `!=`, `>`, `>=`, `<`, `<=`.
+    /// One of `=`, `!=`, `>`, `>=`, `<`, `<=`, or `:`.
     pub op: String,
-    /// The value, unquoted and unescaped.
+    /// The value, unquoted.
     pub value: String,
 }
 
-/// Parses a conjunction of `column op value` clauses joined by `AND`, untyped and unresolved.
-/// A filter that needs more (`OR`, `NOT`, has) is refused, naming
-/// [`super::filter::parse`], which takes the whole of AIP-160. Go's `core.ParseFilter`.
+/// Parses a conjunction of `column op value` clauses joined by `AND` or whitespace,
+/// untyped and unresolved. A filter that needs more (`OR`, `NOT`, a free-text term) is
+/// refused, naming [`super::filter::parse`], which reads all of it. Go's `core.ParseFilter`.
 pub fn parse_filter(expr: &str) -> Result<Vec<Clause>> {
     let mut out = Vec::new();
     if let Some(node) = syntax::parse(expr)? {
@@ -32,15 +32,18 @@ fn flatten(expr: &str, node: Node, out: &mut Vec<Clause>) -> Result<()> {
         Node::And(all) => {
             return all.into_iter().try_for_each(|n| flatten(expr, n, out));
         }
-        Node::Restriction(r) if r.op != ":" => {
+        Node::Restriction {
+            field, op, value, ..
+        } => {
+            let op = op.to_owned();
             out.push(Clause {
-                column: r.field,
-                op: r.op.to_owned(),
-                value: r.arg.text,
+                column: field,
+                op,
+                value,
             });
             return Ok(());
         }
-        Node::Restriction(_) => "the has operator `:`",
+        Node::Search { .. } => "a free-text term",
         Node::Or(_) => "OR",
         Node::Not(_) => "NOT",
     };

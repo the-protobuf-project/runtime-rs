@@ -34,10 +34,10 @@
 //! # Filtering
 //!
 //! [`ListOptions::filter`](crate::records::ListOptions::filter) takes AIP-160 as
-//! [`records::core::filter`](crate::records::core::filter) parses it: `AND`, `OR`, `NOT`,
-//! comparisons and has, values typed by the column's kind. `NOT` is pushed down to the
-//! comparisons rather than sent as `$nor`, and `!=` is `$nin: [value, null]`, so a null
-//! field matches no comparison, as on SQL. What the parser refuses is refused by name.
+//! [`records::core::filter`](crate::records::core::filter) parses it, as Go's `filterx` does.
+//! `AND`, `OR` and `NOT` are `$and`, `$or` and `$nor`. `!=` is `$nin: [value, null]`, so a
+//! null field fails it as in SQL. Contains and free text are case-insensitive `$regex`es of
+//! the escaped value. What the parser refuses is refused by name.
 
 mod bulk;
 mod client;

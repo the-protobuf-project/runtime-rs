@@ -108,8 +108,8 @@ pub async fn edges(db: &DB) {
     for (bad, names) in [
         ("shelf = 3", "shelf"),
         ("published_year >= soon", "published_year"),
-        ("title = A*", "wildcard"),
-        ("title LIKE A", "bare value"),
+        ("title < A", "unsupported operator"),
+        ("title LIKE A", "free-text search is not supported"),
     ] {
         let err = db
             .list(&res, &ListOptions::default().filter(bad))

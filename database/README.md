@@ -335,56 +335,65 @@ Inputs are checked before anything reaches the server, and every refusal is
 
 ## Filters, ordering and paging
 
-**Filters** are [AIP-160](https://google.aip.dev/160). Every provider but Redis parses
-them into one tree, `records::core::filter::Expr`, and runs the same conformance table,
-so a filter matches the same records on SQL, MongoDB and the Tauri store.
+**Filters** are [AIP-160](https://google.aip.dev/160) as protoc-gen-store's generated Go
+`filterx` reads it, so a Rust service accepts the filters a Go one does and matches the
+same records. Every provider but Redis parses them into one tree,
+`records::core::filter::Expr`, and runs the same conformance table.
 
 ```text
 pages >= 300
 title = "Dune" AND pages < 500
-status = 2 OR (in_print = true AND NOT subtitle:*)
--title = "Dune" pages > 100          # juxtaposition is AND, `-` is NOT
-create_time >= "2026-01-01T00:00:00Z"
-subtitle = null
+status = PUBLISHED OR (in_print = true AND NOT subtitle : novel)
+-title = Dune pages > 100            # whitespace is AND, `-` is NOT
+create_time >= 2026-01-01
+dune                                 # free text over the search columns
 ```
 
-- **Logic:** `AND`, `OR`, `NOT` and `-`, with parentheses. `NOT` binds tightest, then
-  `OR`, then `AND`, as AIP-160 specifies, so `a AND b OR c` is `a AND (b OR c)`.
-  Keywords are case-insensitive. Writing terms side by side means `AND`.
-- **Comparators:** `=`, `!=`, `<`, `<=`, `>` and `>=`. The has operator takes `*`:
-  `subtitle:*` matches records where the column holds a value.
-- **Values** are typed by the column's kind. Integers are base 10, and booleans read the
-  way Go reads them (`1`, `t`, `true`, `TRUE`, `0`, `f`, `false` and so on). Timestamps
-  are RFC 3339, quoted or not. `null` without quotes is the null literal, and only `=`
-  and `!=` take it.
-- **Strings** take `"` or `'` quotes, with the escapes `\"`, `\'`, `\\`, `\n`, `\r`, `\t` and
-  `\*`. Inside quotes, operators and keywords are just text. `name = ""` compares
-  with the empty string.
-- **Nulls follow SQL:** a comparison with a null column matches nothing, including `!=`
-  and `NOT`. With no subtitle, a book matches neither `subtitle = "x"`,
-  `subtitle != "x"` nor `NOT subtitle = "x"`. Use `subtitle:*`, `subtitle = null` or
-  `NOT subtitle:*` to test whether a column holds a value.
-- **Refused by name** as `Error::Invalid`, with the position of the problem:
-  - wildcards (`title = "Dune*"`; write a literal star as `\*`);
-  - function calls (`size(title) > 2`);
-  - traversal into messages (`author.name = "x"`);
-  - bare values, which AIP-160 treats as a global search (`Dune`);
-  - the has operator with anything but `*`;
-  - `<`, `<=`, `>` and `>=` on bytes;
-  - durations (`1.5s`), since no column kind stores a Duration;
-  - columns the resource does not declare.
+- **Logic:** `AND` or whitespace, `OR`, `NOT` and `-`, with parentheses. `AND` is a
+  keyword in any case, but `OR` and `NOT` only in capitals; lowercase `or` and `not` are
+  ordinary words. `NOT` binds tightest, then `OR`, then `AND`, so `a AND b OR c` is
+  `a AND (b OR c)`. Stray `AND`s are skipped. Parentheses and negations nest at most 32
+  deep.
+- **Values** are barewords (`SUMMER25`, `2026-01-01`) or double-quoted strings. A string
+  has no escapes and ends at the next `"`. A single quote is an ordinary character, so
+  `title = 'Dune'` compares with `'Dune'`, quotes included. Only spaces and tabs separate
+  terms. `*`, `%` and `_` are literal: there are no wildcards.
+- **Operators by column kind,** as Go's gorm engine applies them. Any other operator is
+  refused as `unsupported operator`.
+
+  | Kind | Operators | Value |
+  | --- | --- | --- |
+  | String | `=`, `!=`, and `:` for a case-insensitive contains | as written |
+  | Integer, float | `=`, `!=`, `<`, `<=`, `>`, `>=` | base 10, or a number |
+  | Timestamp | `=`, `<`, `<=`, `>`, `>=` | RFC 3339, quoted because of its colons, or a bare `YYYY-MM-DD` as midnight UTC |
+  | Boolean | `=`, `!=` | as Go reads it: `1`, `t`, `true`, `TRUE`, `0`, `f`, `false` and so on |
+  | Enum | `=`, `!=` | the number, or the value name in any case with or without its prefix (`PUBLISHED`, `status_published`) |
+  | Bytes | `=`, `!=` | as written |
+
+- **Free text:** a value with no operator after it, such as `dune` or `"a novel"`, matches
+  a record when any of the resource's search columns contains it, ignoring case.
+  `Resource::search` lists those columns. A resource without any refuses free text
+  (`free-text search is not supported here`).
+- **Nulls:** a comparison or contains on a null column is false, including `!=`. `NOT` is
+  true wherever its operand is false, so a book without a subtitle matches
+  `NOT subtitle = "x"` but not `subtitle != "x"`. This is Go's `NOT coalesce(..., false)`.
+  There is no presence test in filter text: `field:*` contains a literal `*`.
+- **Refused** as `Error::Invalid` in Go's words, with the filter and the position. That
+  covers unknown fields, unsupported operators, malformed values, unbalanced or empty
+  parentheses, an unterminated string, a lone `!` or `-`, a missing operand or value, and
+  nesting past 32. A dotted field (`author.name`) is an unknown field.
 - **Redis refuses any filter,** since it has no query language. List by key and
   narrow in your code.
 
 | Provider | How a filter runs |
 | --- | --- |
-| SQL | A sea-query `Condition`: `all`, `any` and `not` over bound comparisons, `IS [NOT] NULL` for has and null |
-| MongoDB | A query: `$and` and `$or`, with `NOT` pushed down to the comparisons (`$nor` would match nulls), `$nin: [v, null]` for `!=`, and `$exists: true, $ne: null` for has |
+| SQL | A sea-query `Condition`: `all` and `any`, `NOT COALESCE(x, FALSE)` for NOT, and `LOWER(col) LIKE '%v%' ESCAPE '!'` for contains and free text |
+| MongoDB | A query: `$and`, `$or` and `$nor`, `$nin: [v, null]` for `!=`, and a case-insensitive `$regex` of the escaped value for contains and free text |
 | Tauri store | Evaluated in memory by `Expr::matches` |
 | Redis | Refused |
 
 `records::core::parse_filter` still returns runtime-go's flat list of `Clause`s for a
-filter that is only `AND`s, and refuses anything more.
+filter that is only `AND`s, and refuses `OR`, `NOT` and free text.
 
 **Ordering** takes AIP-132 `field [desc], other`. The key always ends the order, so
 records with equal values keep a stable order from page to page.
@@ -487,7 +496,7 @@ stream ends after its first error; resume from the last token you saw.
   Go kept only the last.
 - A filter on a `uint64` past `i64::MAX` compares against the Decimal128 the value is
   stored as. Bytes compare as the binary they are stored as. An empty bytes value is
-  stored as null, so `cover:*` is false for it, unlike on SQL.
+  stored as null, so it fails `cover != "x"`, where SQL's empty bytes pass.
 
 **Redis**
 - Records are proto wire bytes, so bytes and integers past 2^53 survive exactly.

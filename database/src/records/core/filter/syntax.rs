@@ -1,160 +1,167 @@
-//! AIP-160's grammar over [`lex`]'s tokens, before any column is resolved:
+//! The grammar of protoc-gen-store's Go `filterx.Parse`, ported term for term so a Rust
+//! service reads a filter as a Go one does:
 //!
 //! ```text
-//! expression  = sequence { AND sequence }
-//! sequence    = factor { factor }              (juxtaposition is AND)
-//! factor      = term { OR term }               (OR binds tighter than AND)
-//! term        = [ NOT | - ] simple
-//! simple      = "(" expression ")" | restriction
-//! restriction = field comparator value
+//! expression = { AND } factor { { AND } factor }   (whitespace is AND; stray ANDs skip)
+//! factor     = term { OR term }                    (OR binds tighter than AND)
+//! term       = ( NOT | "-" ) term | simple
+//! simple     = "(" expression ")" | value op value | value
 //! ```
+//!
+//! `AND` is a keyword in any case, `OR` and `NOT` only in capitals, and none of them when
+//! quoted. A value with no operator after it is a free-text search term. Parentheses and
+//! negations nest at most [`MAX_DEPTH`] deep.
 
 use super::lex::{Tok, Token, lex};
 use super::refuse;
 use crate::Result;
 
-/// A filter as written: the tree of AND, OR and NOT over restrictions.
+/// How deep parentheses and negations nest. Go's `maxFilterDepth`.
+pub const MAX_DEPTH: usize = 32;
+
+/// A filter as written.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum Node {
     And(Vec<Node>),
     Or(Vec<Node>),
     Not(Box<Node>),
-    Restriction(Restriction),
+    /// `field op value`, untyped.
+    Restriction {
+        field: String,
+        at: usize,
+        op: &'static str,
+        value: String,
+        value_at: usize,
+    },
+    /// A value with no operator: a free-text search term.
+    Search {
+        text: String,
+        at: usize,
+    },
 }
 
-/// `field op value`, untyped.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Restriction {
-    pub field: String,
-    pub at: usize,
-    pub op: &'static str,
-    pub arg: Arg,
-}
-
-/// A restriction's value as written.
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) struct Arg {
-    pub text: String,
-    pub quoted: bool,
-    /// Holds an unescaped `*`, which AIP-160 reads as a wildcard.
-    pub wild: bool,
-    pub at: usize,
-}
-
-/// The tree `src` spells, or `None` for an empty filter.
+/// The tree `src` spells, or `None` when it holds no term. Go's `Parse`.
 pub(crate) fn parse(src: &str) -> Result<Option<Node>> {
     let toks = lex(src)?;
-    if toks.is_empty() {
-        return Ok(None);
+    let mut p = Parser { src, toks, i: 0 };
+    let mut all = p.expression(0)?;
+    if let Some(t) = p.toks.get(p.i) {
+        return Err(refuse(
+            src,
+            t.at,
+            format!("unbalanced {:?} in filter", t.text()),
+        ));
     }
-    let mut p = Parser { src, toks, pos: 0 };
-    let node = p.expression()?;
-    match p.peek() {
-        None => Ok(Some(node)),
-        Some(t) => Err(p.unexpected(t.clone())),
-    }
+    Ok(match all.len() {
+        0 => None,
+        1 => all.pop(),
+        _ => Some(Node::And(all)),
+    })
 }
 
 pub(super) struct Parser<'a> {
     pub(super) src: &'a str,
-    toks: Vec<Token>,
-    pub(super) pos: usize,
+    pub(super) toks: Vec<Token>,
+    pub(super) i: usize,
 }
 
 impl Parser<'_> {
-    pub(super) fn peek(&self) -> Option<&Token> {
-        self.toks.get(self.pos)
-    }
-
-    pub(super) fn next(&mut self) -> Option<Token> {
-        let t = self.toks.get(self.pos).cloned();
-        self.pos += 1;
-        t
-    }
-
-    fn eat(&mut self, tok: &Tok) -> bool {
-        let hit = self.peek().is_some_and(|t| t.tok == *tok);
-        self.pos += usize::from(hit);
-        hit
-    }
-
-    /// Where the input ends, for errors about what is missing there.
-    fn end(&self) -> usize {
-        self.src.chars().count() + 1
-    }
-
-    pub(super) fn unexpected(&self, t: Token) -> crate::Error {
-        let what = match t.tok {
-            Tok::RParen => "`)` closes nothing".to_owned(),
-            Tok::Comma => "`,` separates function arguments, which filters here do not take".into(),
-            Tok::And | Tok::Or => "AND and OR need an expression on both sides".into(),
-            Tok::Cmp(op) => format!("`{op}` needs a field before it"),
-            _ => "this does not continue the filter".into(),
+    /// Whether an unquoted `kw` comes next: `AND` in any case, `OR` and `NOT` in capitals.
+    pub(super) fn at(&self, kw: &str) -> bool {
+        let Some(Tok::Value {
+            text,
+            quoted: false,
+            ..
+        }) = self.toks.get(self.i).map(|t| &t.tok)
+        else {
+            return false;
         };
-        refuse(self.src, t.at, what)
+        text == kw || (kw == "AND" && text.eq_ignore_ascii_case(kw))
     }
 
-    fn expression(&mut self) -> Result<Node> {
-        let mut all = vec![self.sequence()?];
-        while self.eat(&Tok::And) {
-            all.push(self.sequence()?);
-        }
-        Ok(join(all, Node::And))
+    pub(super) fn at_paren(&self, c: char) -> bool {
+        matches!(self.toks.get(self.i), Some(Token { tok: Tok::Paren(p), .. }) if *p == c)
     }
 
-    fn sequence(&mut self) -> Result<Node> {
-        let mut all = vec![self.factor()?];
-        while self.peek().is_some_and(|t| starts_term(&t.tok)) {
-            all.push(self.factor()?);
-        }
-        Ok(join(all, Node::And))
+    /// Whether the input ends, or a `)`, `AND` or `OR` comes, where an operand should.
+    fn no_operand(&self) -> bool {
+        self.i >= self.toks.len() || self.at_paren(')') || self.at("AND") || self.at("OR")
     }
 
-    fn factor(&mut self) -> Result<Node> {
-        let mut any = vec![self.term()?];
-        while self.eat(&Tok::Or) {
-            any.push(self.term()?);
-        }
-        Ok(join(any, Node::Or))
+    /// Where the next token starts, or the end of the input.
+    fn here(&self) -> usize {
+        self.toks
+            .get(self.i)
+            .map_or(self.src.chars().count() + 1, |t| t.at)
     }
 
-    fn term(&mut self) -> Result<Node> {
-        if self.eat(&Tok::Not) || self.eat(&Tok::Minus) {
-            return Ok(Node::Not(Box::new(self.term()?)));
-        }
-        match self.next() {
-            Some(Token {
-                tok: Tok::LParen,
-                at,
-                ..
-            }) => {
-                let inner = self.expression()?;
-                if !self.eat(&Tok::RParen) {
-                    return Err(refuse(self.src, at, "this `(` is never closed"));
-                }
-                Ok(inner)
+    pub(super) fn expression(&mut self, depth: usize) -> Result<Vec<Node>> {
+        let mut all = Vec::new();
+        loop {
+            while self.at("AND") {
+                self.i += 1;
             }
-            Some(t) => self.restriction(t),
-            None => Err(refuse(
-                self.src,
-                self.end(),
-                "the filter ends where an expression should start",
-            )),
+            if self.i >= self.toks.len() || self.at_paren(')') {
+                return Ok(all);
+            }
+            match self.factor(depth)? {
+                Node::And(group) => all.extend(group),
+                node => all.push(node),
+            }
         }
     }
-}
 
-fn starts_term(tok: &Tok) -> bool {
-    matches!(
-        tok,
-        Tok::Text(_) | Tok::Str { .. } | Tok::LParen | Tok::Not | Tok::Minus
-    )
-}
+    fn factor(&mut self, depth: usize) -> Result<Node> {
+        let mut any = vec![self.term(depth)?];
+        while self.at("OR") {
+            self.i += 1;
+            if self.no_operand() {
+                let what = "OR is missing its right operand";
+                return Err(refuse(self.src, self.here(), what));
+            }
+            any.push(self.term(depth)?);
+        }
+        Ok(if any.len() == 1 {
+            any.remove(0)
+        } else {
+            Node::Or(any)
+        })
+    }
 
-fn join(mut nodes: Vec<Node>, make: fn(Vec<Node>) -> Node) -> Node {
-    if nodes.len() == 1 {
-        nodes.remove(0)
-    } else {
-        make(nodes)
+    fn term(&mut self, depth: usize) -> Result<Node> {
+        let at = self.here();
+        let negate = if self.at("NOT") {
+            self.i += 1;
+            true
+        } else if let Tok::Value {
+            text,
+            quoted: false,
+            negates,
+        } = &mut self.toks[self.i].tok
+            && text.starts_with('-')
+        {
+            if text != "-" {
+                text.remove(0); // -a
+                self.toks[self.i].at += 1;
+            } else if *negates {
+                self.i += 1; // -"a b", -(a b)
+            } else {
+                return Err(refuse(self.src, at, "\"-\" must prefix a term"));
+            }
+            true
+        } else {
+            false
+        };
+        if !negate {
+            return self.simple(depth);
+        }
+        if depth >= MAX_DEPTH {
+            let what = format!("filter nests deeper than {MAX_DEPTH}");
+            return Err(refuse(self.src, at, what));
+        }
+        if self.no_operand() {
+            return Err(refuse(self.src, self.here(), "NOT is missing its operand"));
+        }
+        Ok(Node::Not(Box::new(self.term(depth + 1)?)))
     }
 }

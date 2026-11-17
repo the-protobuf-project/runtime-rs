@@ -58,7 +58,7 @@ async fn list_pages_and_filters() {
 
         for bad in [
             "nosuch = 1",
-            "pages LIKE 3",
+            "pages < three",
             "pages = many",
             "a = 1 OR b = 2",
         ] {
@@ -124,7 +124,7 @@ async fn filters_are_typed_by_column_kind() {
         for (filter, want) in [
             ("name = \"books/03\"", 1),
             ("name != books/03", 9),
-            ("title = 'Title 07'", 1),
+            ("title = \"Title 07\"", 1),
             ("pages < 3", 3),
             ("price > 4.5", 5),
             ("in_print = true", 5),
@@ -133,8 +133,8 @@ async fn filters_are_typed_by_column_kind() {
             ("isbn >= 1008", 2),
             ("pages >= 2 AND pages < 5", 3),
             ("pages > 1 AND in_print = true AND status != 0", 3),
-            ("create_time > 2000-01-01T00:00:00Z", 10),
-            ("create_time < 2000-01-01T00:00:00Z", 0),
+            ("create_time > \"2000-01-01T00:00:00Z\"", 10),
+            ("create_time < 2000-01-01", 0),
         ] {
             let opts = ListOptions::default().filter(filter);
             assert_eq!(f.db.count(&f.res, &opts).await.unwrap(), want, "{filter}");

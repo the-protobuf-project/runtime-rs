@@ -1,21 +1,21 @@
-//! AIP-160 filters (<https://google.aip.dev/160>) parsed into an [`Expr`] whose columns are
-//! resolved and whose values are typed against a [`Resource`], so every provider translates
-//! one tree, and agrees on what it matches.
+//! AIP-160 filters (<https://google.aip.dev/160>) as protoc-gen-store's generated Go
+//! `filterx` reads them, parsed into an [`Expr`] whose columns are resolved and whose values
+//! are typed against a [`Resource`], so a Rust service accepts the filters a Go one does
+//! and every provider here matches the same records.
 //!
-//! Supported: `AND`, `OR`, `NOT` and `-`, parentheses, juxtaposition as `AND`, the
-//! comparators `= != < <= > >=`, the has operator as presence (`field:*`), quoted strings with
-//! escapes, numbers, booleans, `null` (`field = null`, `field != null`), and timestamps as
-//! quoted RFC 3339 text. `OR` binds tighter than `AND`, as AIP-160 specifies:
-//! `a AND b OR c` is `a AND (b OR c)`. Keywords are case-insensitive.
-//!
-//! Refused by name: wildcards (`title = "Dune*"`; escape a literal star as `\*`), function
-//! calls, traversal into messages (`author.name`), bare values (global search), the has
-//! operator with anything but `*`, ordering comparisons on bytes, and durations, which no
-//! column kind stores.
-//!
-//! Nulls follow SQL: a comparison with a null column matches nothing, `!=` and `NOT`
-//! included. [`Expr::negated`] pushes a `NOT` down to the comparisons, which is how providers
-//! without three-valued logic keep that rule.
+//! - **Logic:** `AND` (any case) or whitespace, `OR` and `NOT` (capitals only), `-` before a
+//!   term, and parentheses, nested at most [`MAX_DEPTH`] deep. `OR` binds tighter than
+//!   `AND`: `a AND b OR c` is `a AND (b OR c)`.
+//! - **Values:** a bareword (`SUMMER25`) or a double-quoted string without escapes.
+//! - **By column kind,** as Go's gorm engine: a string takes `=`, `!=` and `:`
+//!   (case-insensitive contains); a number every comparator but `:`; a timestamp `=`,
+//!   `<`, `<=`, `>` and `>=`, as RFC 3339 or a bare date; a boolean, an enum (by number or
+//!   value name, prefix optional) and bytes `=` and `!=`. Anything else is refused.
+//! - **Free text:** a value with no operator is a case-insensitive contains over
+//!   [`Resource::search`], any column matching; a resource without search columns refuses it.
+//! - **Nulls:** a comparison or contains on a null column is false, `!=` included. `NOT`
+//!   is true wherever its operand is not, so `NOT a = 1` matches a null `a`, as Go's
+//!   `NOT coalesce(..., false)` does.
 //!
 //! ```
 //! use database::records::core::filter::{self, Expr, Op};
@@ -23,18 +23,19 @@
 //! #     .get_message_by_name("google.protobuf.Timestamp").unwrap();
 //! # use database::records::{Column, Kind, Resource, Value};
 //! let res = Resource::new(md, "t", "seconds", vec![Column::new("seconds", Kind::Int)]);
-//! let expr = filter::parse(&res, "NOT seconds > 5").unwrap().unwrap();
-//! let Expr::Compare(c) = expr.without_not() else { unreachable!() };
-//! assert_eq!((c.op, c.value), (Op::Le, Value::Int(5)));
+//! let Some(Expr::Not(inner)) = filter::parse(&res, "-seconds > 5").unwrap() else { panic!() };
+//! let Expr::Compare(c) = *inner else { panic!() };
+//! assert_eq!((c.op, c.value), (Op::Gt, Value::Int(5)));
 //! ```
 
 mod eval;
 mod lex;
 mod resolve;
-mod restriction;
+mod simple;
 pub(crate) mod syntax;
 
 pub use eval::compare;
+pub use syntax::MAX_DEPTH;
 
 use crate::records::{Kind, Resource, Value};
 use crate::{Error, Result};
@@ -47,14 +48,13 @@ pub enum Expr {
     And(Vec<Expr>),
     /// Any one holds.
     Or(Vec<Expr>),
-    /// The inner expression does not hold; see [`Expr::negated`] for how nulls fare.
+    /// The inner expression does not hold, including where it compares a null column.
     Not(Box<Expr>),
-    /// `column op value`. Never true when the column is null.
+    /// `column op value`. False on a null column.
     Compare(Comparison),
-    /// `column:*` or `column != null`: the column holds a value.
-    Has(String),
-    /// `column = null`: the column holds no value.
-    Null(String),
+    /// The string column holds `value`, ignoring case: `column : value`, or one column of a
+    /// free-text term. False on a null column. `%`, `_` and `*` are literal.
+    Contains(Contains),
 }
 
 /// One `column op value` comparison.
@@ -68,6 +68,15 @@ pub struct Comparison {
     pub op: Op,
     /// The value, typed by `kind`; never [`Value::Null`].
     pub value: Value,
+}
+
+/// A case-insensitive substring test on a string column.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Contains {
+    /// The column's backend name.
+    pub column: String,
+    /// The text to find, as written.
+    pub value: String,
 }
 
 /// A comparator.
@@ -88,18 +97,6 @@ pub enum Op {
 }
 
 impl Op {
-    /// The comparator that holds exactly when this one does not, for a non-null column.
-    pub fn negated(self) -> Op {
-        match self {
-            Op::Eq => Op::Ne,
-            Op::Ne => Op::Eq,
-            Op::Lt => Op::Ge,
-            Op::Le => Op::Gt,
-            Op::Gt => Op::Le,
-            Op::Ge => Op::Lt,
-        }
-    }
-
     /// Whether `have op want` holds, given how `have` orders against `want`.
     pub fn holds(self, o: std::cmp::Ordering) -> bool {
         use std::cmp::Ordering::{Equal, Greater, Less};
@@ -126,39 +123,9 @@ impl Op {
     }
 }
 
-impl Expr {
-    /// `NOT self` with the negation pushed down to the leaves, so the result holds no
-    /// [`Expr::Not`]: De Morgan through `AND` and `OR`, a comparison's comparator flipped,
-    /// [`Expr::Has`] and [`Expr::Null`] swapped. A flipped comparison still fails on a null
-    /// column, so `NOT a = 1` matches what SQL's `NOT (a = 1)` does, nulls excluded, on a
-    /// provider whose own negation would let nulls through (MongoDB's `$nor`, a `!` in Rust).
-    pub fn negated(&self) -> Expr {
-        match self {
-            Expr::And(all) => Expr::Or(all.iter().map(Expr::negated).collect()),
-            Expr::Or(any) => Expr::And(any.iter().map(Expr::negated).collect()),
-            Expr::Not(inner) => inner.without_not(),
-            Expr::Compare(c) => Expr::Compare(Comparison {
-                op: c.op.negated(),
-                ..c.clone()
-            }),
-            Expr::Has(c) => Expr::Null(c.clone()),
-            Expr::Null(c) => Expr::Has(c.clone()),
-        }
-    }
-
-    /// The same filter with every [`Expr::Not`] pushed down by [`Expr::negated`].
-    pub fn without_not(&self) -> Expr {
-        match self {
-            Expr::And(all) => Expr::And(all.iter().map(Expr::without_not).collect()),
-            Expr::Or(any) => Expr::Or(any.iter().map(Expr::without_not).collect()),
-            Expr::Not(inner) => inner.negated(),
-            leaf => leaf.clone(),
-        }
-    }
-}
-
-/// The filter `text` as an [`Expr`] over `res`, or `None` when it is empty. Every refusal is
-/// [`Error::Invalid`], naming the filter and the 1-based position of what it refuses.
+/// The filter `text` as an [`Expr`] over `res`, or `None` when it holds no term (an empty
+/// filter, or only `AND`s). Every refusal is [`Error::Invalid`], naming the filter and the
+/// 1-based position of what it refuses, in Go's words.
 pub fn parse(res: &Resource, text: &str) -> Result<Option<Expr>> {
     syntax::parse(text)?
         .map(|node| resolve::resolve(res, text, node))

@@ -7,25 +7,23 @@ use super::Expr;
 use crate::records::{Row, Value};
 
 impl Expr {
-    /// Whether `row` matches. A comparison with a null or absent column is false, and a
-    /// [`Expr::Not`] is evaluated as [`Expr::negated`], so nulls fare as in SQL.
+    /// Whether `row` matches. A comparison or contains on a null or absent column is false,
+    /// and [`Expr::Not`] is true wherever its operand is false.
     pub fn matches(&self, row: &Row) -> bool {
         match self {
             Expr::And(all) => all.iter().all(|e| e.matches(row)),
             Expr::Or(any) => any.iter().any(|e| e.matches(row)),
-            Expr::Not(inner) => inner.negated().matches(row),
+            Expr::Not(inner) => !inner.matches(row),
             Expr::Compare(c) => row
                 .get(&c.column)
                 .and_then(|have| compare(have, &c.value))
                 .is_some_and(|o| c.op.holds(o)),
-            Expr::Has(c) => present(row.get(c)),
-            Expr::Null(c) => !present(row.get(c)),
+            Expr::Contains(c) => match row.get(&c.column) {
+                Some(Value::String(s)) => s.to_lowercase().contains(&c.value.to_lowercase()),
+                _ => false,
+            },
         }
     }
-}
-
-fn present(v: Option<&Value>) -> bool {
-    v.is_some_and(|v| !matches!(v, Value::Null))
 }
 
 /// How two values of one column order; `None` when either is null or they are of different

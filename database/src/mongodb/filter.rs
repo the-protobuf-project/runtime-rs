@@ -13,19 +13,17 @@ use crate::records::{Resource, Value};
 /// (`_id` for the key) and each value encoded as the column stores it, so a number compares
 /// as a number. An unknown column is refused by name. Go's `parseFilter`.
 ///
-/// `AND` and `OR` are `$and` and `$or`. A `NOT` is pushed down to the comparisons by
-/// [`Expr::negated`] rather than sent as `$nor` or `$not`, which match a document whose
-/// field is null or missing: SQL's `NOT (a = 1)` does not, and every provider agrees with
-/// SQL. For the same reason `!=` is `$nin: [value, null]`, not `$ne`. Has is
-/// `$exists: true, $ne: null`, so a stored null is absent, as SQL's `IS NOT NULL` reads it.
+/// `AND`, `OR` and `NOT` are `$and`, `$or` and `$nor`, which, like Go's
+/// `NOT coalesce(x, false)`, holds where `x` meets a null or missing field. `!=` is
+/// `$nin: [value, null]`, not `$ne`, so a null field fails it as in SQL. Contains is a
+/// case-insensitive `$regex` of the escaped value.
 pub(super) fn parse_filter(res: &Resource, expr: &str) -> Result<Document> {
     match filter::parse(res, expr).map_err(|e| invalid(e.to_string()))? {
         None => Ok(Document::new()),
-        Some(e) => query(res, &e.without_not()),
+        Some(e) => query(res, &e),
     }
 }
 
-/// `e`, which holds no [`Expr::Not`], as a query document.
 fn query(res: &Resource, e: &Expr) -> Result<Document> {
     let field = |c: &str| {
         if *c == res.pk_column {
@@ -42,11 +40,24 @@ fn query(res: &Resource, e: &Expr) -> Result<Document> {
     Ok(match e {
         Expr::And(es) => doc! { "$and": all(es)? },
         Expr::Or(es) => doc! { "$or": all(es)? },
-        Expr::Not(inner) => query(res, &inner.negated())?,
+        Expr::Not(inner) => doc! { "$nor": [query(res, inner)?] },
         Expr::Compare(c) => doc! { field(&c.column): comparison(c)? },
-        Expr::Has(c) => doc! { field(c): { "$exists": true, "$ne": Bson::Null } },
-        Expr::Null(c) => doc! { field(c): Bson::Null },
+        Expr::Contains(c) => {
+            doc! { field(&c.column): { "$regex": regex_escape(&c.value), "$options": "i" } }
+        }
     })
+}
+
+/// `v` with every regular-expression metacharacter escaped, so it matches literally.
+fn regex_escape(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        if "\\.^$|?*+()[]{}-/".contains(c) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 fn comparison(c: &Comparison) -> Result<Document> {

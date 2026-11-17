@@ -109,6 +109,12 @@ pub struct Resource {
     pub columns: Vec<Column>,
     /// The foreign keys.
     pub fks: Vec<ForeignKey>,
+    /// The columns a free-text filter term searches, by backend name: a bareword such as
+    /// `dune` in a filter matches a record when any of these string columns contains it,
+    /// ignoring case. Empty refuses free-text terms. Go's `filterx.Spec.Search`, which
+    /// protoc-gen-store fills, sorted, with the string fields marked
+    /// `(store.v1.query) = {search: true}`.
+    pub search: Vec<String>,
 }
 
 impl Resource {
@@ -129,6 +135,7 @@ impl Resource {
             schema_version: String::new(),
             columns,
             fks: Vec::new(),
+            search: Vec::new(),
         }
     }
 
