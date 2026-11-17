@@ -13,6 +13,9 @@ and cancellation behavior must be controllable.
 | `observed_backend.rs` | Complete capability bundle used to prove instrumentation preserves every operation |
 | `observability.rs` | In-memory SDK providers and exported-signal inspection |
 | `observation_ingest.rs` | Producer/batch span links and queue-depth release assertions |
+| `records.rs` | The `Book` descriptor and resource the record-store tests share |
+| `memory_records.rs` | In-memory records driver counting and holding `get`s, with bulk writes and a direct transaction |
+| `memory_cache.rs` | tpp-cache's Aside over its in-memory driver, and a cache refusing every load |
 
 ```bash
 cargo test -p tpp-database --test arrow_segments --test ingest --test observations

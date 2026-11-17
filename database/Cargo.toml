@@ -22,6 +22,10 @@ telemetry-sdk = ["telemetry/tpp-sdk"]
 # The InfluxDB 3 backend. A feature because influxdb3-client 0.3, its latest release, requires
 # Arrow 59: turning this off is what leaves a capture-only build on one Arrow major, 60.
 influxdb = ["dep:influxdb3-client", "dep:reqwest", "dep:rustls", "dep:webpki-roots"]
+# `database::cached`: a read-through cache in front of any records driver, over tpp-cache.
+cached = ["dep:cache"]
+# Selects the targets that need a live service, which then fail rather than skip without one.
+live-tests = []
 
 [dependencies]
 telemetry.workspace = true
@@ -52,6 +56,7 @@ webpki-roots = { version = "1", optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
+cache = { workspace = true, optional = true }
 
 [[example]]
 name = "capture"
@@ -62,6 +67,21 @@ required-features = ["influxdb"]
 name = "influxdb"
 path = "examples/influxdb/main.rs"
 required-features = ["influxdb"]
+
+[[test]]
+name = "cached"
+path = "tests/cached.rs"
+required-features = ["cached"]
+
+[[test]]
+name = "cached_capabilities"
+path = "tests/cached_capabilities.rs"
+required-features = ["cached"]
+
+[[test]]
+name = "cached_live"
+path = "tests/cached_live.rs"
+required-features = ["cached", "live-tests"]
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }

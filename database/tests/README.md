@@ -18,6 +18,7 @@ cargo test -p tpp-database
 | `arrow`, `arrow_query`, `arrow_paging`, `arrow_aggregate`, `arrow_segments` | Capture recovery, pagination, keyset order against a reference sort, reductions, rotation and bounds pruning |
 | `dependency_graph` | No aws-lc, parquet or zstd is linked, and a capture-only build has one Arrow major |
 | `observations` | Every capability, complete stream lifetime, cancellation, safe exported signals |
+| `cached`, `cached_capabilities` | `database::cached` over an in-memory store and tpp-cache's in-memory Aside (feature `cached`) |
 | `file_size` | Rust sources/tests stay below 200 lines |
 
 The ignored `live`, `live_lifecycle`, and `live_rate` targets require explicit
@@ -29,6 +30,16 @@ before opting in:
 cargo test -p tpp-database --test live -- --ignored --nocapture
 cargo test -p tpp-database --test live_lifecycle -- --ignored --nocapture
 cargo test --release -p tpp-database --test live_rate -- --ignored --nocapture
+```
+
+`cached_live` runs the cached decorator over a live Redis. Like tpp-cache's
+live tests it is selected by the `live-tests` feature and fails without a
+server; `RUNTIME_CACHE_REDIS_ADDRESS` defaults to `127.0.0.1:16379`:
+
+```bash
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml up -d --wait redis
+cargo test -p tpp-database --features cached,live-tests --test cached_live
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
 ```
 
 `arrow_throughput` is a separate ignored release-mode performance measurement:

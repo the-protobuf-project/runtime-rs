@@ -132,6 +132,46 @@ written and given a `.bounds` sidecar on close so range reads skip it. A crash
 loses at most the batch being written; `load` returns the rest. Pages use
 offset tokens with totals. Open the files with pyarrow, polars or DuckDB.
 
+## A read-through cache (`database::cached`, feature `cached`)
+
+The port of runtime-go's `database/cached`: a decorator, not a backend.
+`cached::wrap(&db, cache)` returns a records `DB` whose `get` is served
+cache-aside through [tpp-cache](../cache/README.md)'s Aside strategy, and
+whose writes go to the store first and invalidate after.
+
+```rust
+use std::{sync::Arc, time::Duration};
+use cache::{Config, Provider, core::Options, drivers::redis::RedisProvider};
+use database::{cached, records::DB};
+
+async fn cache_reads(db: &DB, redis: RedisProvider) -> database::Result<DB> {
+    let cdb = redis.set_database("records").await.expect("cache database");
+    let ttl = Options::default().with_ttl(Duration::from_secs(60));
+    Ok(cached::wrap(db, cached::from_aside(Arc::new(cdb), ttl)))
+}
+```
+
+| Operation | Through the cache |
+| --- | --- |
+| `get` | cached per record, keyed by its primary key; concurrent misses collapse into one load; `NotFound` is remembered (the cache's 30 s negative lease) |
+| `create`, `update`, `delete` | written through, then the key is invalidated, which also clears a remembered absence; an invalidation failure fails nothing |
+| `list`, `count`, `exists` | passed through, never cached: they depend on the whole set, or are cheaper than a cached record |
+| `tx.run` | reads inside go to the store; written keys are invalidated after a commit, left alone on a rollback |
+| `schema`, `watch` | carried across unchanged |
+| `batch` | kept where the backend has it: `create_many` invalidates like `create`, `get_many` passes through. Go's `Wrap` hides `Batcher`/`Watcher` instead |
+
+Records travel as proto wire bytes in a base64 JSON string, Go's encoding of a
+`[]byte`, decoded against the resource's descriptor. Keys are the record key
+alone, as in Go, so resources sharing one cache database must not share keys
+(AIP names never do). A cache refusing new loads (`cached::Overloaded`) is
+read through to the store rather than failed; any other store error comes back
+as itself. Always set a TTL: it bounds what invalidation misses, such as a
+failed invalidation or a writer that bypasses the decorator.
+
+`cached::Cache` is the narrow contract; `from_aside` adapts tpp-cache to it, and
+any cache that collapses loads and remembers absences can stand in. The live
+suite needs Redis; see [tests](tests/README.md).
+
 ## Examples and telemetry
 
 - [examples/influxdb](examples/influxdb/README.md): the full InfluxDB workflow
