@@ -2,39 +2,13 @@
 //! value bound as the parameter type its dialect accepts. Go's `coerce` in `orm/filter.go`;
 //! Go binds `any` and lets the database driver choose, which sqlx's typed parameters do not.
 
-use chrono::{DateTime, Utc};
 use sea_query::Value as Sql;
 
 use super::Dialect;
 use crate::records::{Kind, Resource, Value};
 use crate::{Error, Result};
 
-/// A filter's textual value as the type its column stores, so a comparison against a number
-/// is a number rather than text the engine casts on every row. Go's `coerce`: integers in
-/// base 10, booleans as Go's `strconv.ParseBool` reads them, times in RFC 3339.
-pub(crate) fn coerce(kind: Kind, raw: &str) -> std::result::Result<Value, String> {
-    let bad = |what: &str| format!("{raw:?} is not {what}");
-    Ok(match kind {
-        Kind::Int | Kind::Enum => Value::Int(raw.parse().map_err(|_| bad("an integer"))?),
-        Kind::Uint => match raw.strip_prefix('+') {
-            Some(_) => return Err(bad("an unsigned integer")),
-            None => Value::Uint(raw.parse().map_err(|_| bad("an unsigned integer"))?),
-        },
-        Kind::Float => Value::Float(raw.parse().map_err(|_| bad("a number"))?),
-        Kind::Bool => Value::Bool(match raw {
-            "1" | "t" | "T" | "true" | "TRUE" | "True" => true,
-            "0" | "f" | "F" | "false" | "FALSE" | "False" => false,
-            _ => return Err(bad("a boolean")),
-        }),
-        Kind::Timestamp => Value::Timestamp(
-            DateTime::parse_from_rfc3339(raw)
-                .map_err(|_| bad("an RFC 3339 timestamp"))?
-                .with_timezone(&Utc),
-        ),
-        Kind::Bytes => Value::Bytes(raw.as_bytes().to_vec()),
-        Kind::String | Kind::Unknown => Value::String(raw.to_owned()),
-    })
-}
+pub(crate) use crate::records::core::coerce;
 
 /// `v` as a parameter of column kind `kind`. A null is typed by the kind, since Postgres
 /// refuses a text-typed `NULL` for an integer column. An unsigned value is native only on

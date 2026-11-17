@@ -38,6 +38,12 @@ mongodb = ["dep:mongodb", "dep:bson"]
 redis = ["dep:redis"]
 # Makes the `*_live` test targets build. Once on, they fail rather than skip without a server:
 # start the one they name from database/docker first.
+# The Tauri store backend, `database::tauri_store`: records in a tauri-plugin-store file in
+# the app's data directory, for desktop and mobile apps. Rust-only: Go has no Tauri.
+tauri-store = ["dep:tauri", "dep:tauri-plugin-store"]
+# Test-only: the tauri-store tests on Tauri's mock runtime. A feature, not a dev-dependency,
+# because dev-dependencies always build, and Tauri links GTK on Linux whatever its features.
+tauri-store-test = ["tauri-store", "tauri/test"]
 live-tests = []
 
 [dependencies]
@@ -71,6 +77,10 @@ redis = { workspace = true, optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
+# The Tauri store backend (feature `tauri-store`). No default features: the backend needs the
+# runtime and the store, not a webview.
+tauri = { version = "2", optional = true, default-features = false }
+tauri-plugin-store = { version = "2", optional = true }
 # The SQL backend (feature `orm-*`). No default features: no macros, no `any` driver, no
 # migrations; TLS is rustls on ring, as everywhere else in this workspace (never native-tls).
 sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "chrono"] }
@@ -146,6 +156,11 @@ required-features = ["mongodb", "live-tests"]
 name = "redis_live"
 path = "tests/redis_live/main.rs"
 required-features = ["redis", "live-tests"]
+
+[[test]]
+name = "tauri_store"
+path = "tests/tauri_store/main.rs"
+required-features = ["tauri-store-test"]
 
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
