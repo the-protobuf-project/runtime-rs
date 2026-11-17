@@ -33,6 +33,12 @@ tokio = { workspace = true, features = ["fs"] }
 chrono.workspace = true
 influxdb3-client = { version = "0.3", optional = true }
 futures.workspace = true
+# The record contract (records): messages read and written through their descriptors, and
+# the keys a driver generates.
+prost.workspace = true
+prost-reflect.workspace = true
+uuid.workspace = true
+ulid = "3"
 base64 = "0.23"
 sha2 = "0.11"
 # Not the workspace's reqwest. Its `rustls` feature turns on aws-lc through rustls-webpki, and
@@ -64,4 +70,6 @@ wiremock.workspace = true
 arrow-flight = "60"
 tonic.workspace = true
 tokio-stream.workspace = true
+# The records tests build their Book descriptor without protoc.
+prost-types = "0.14"
 

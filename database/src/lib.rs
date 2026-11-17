@@ -48,6 +48,7 @@ pub mod influxdb;
 pub mod ingest;
 mod mirror;
 mod observe;
+pub mod records;
 pub mod store;
 mod typed_ingest;
 
