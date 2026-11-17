@@ -216,18 +216,39 @@ jobs:
         run: just docs-check
 
   # ------------------------------------------------------------------
-  # Live backends — the `live-tests` targets against real servers, each
-  # started from the crate's own Compose file exactly as a developer
-  # starts it locally. With the feature on, an unreachable server fails
-  # the target rather than skipping it, so a green run means the backend
-  # was really exercised. MongoDB runs as a single-node replica set:
-  # transactions and change streams need one.
+  # Live — the targets that need a real server, each against the same
+  # isolated Compose service a developer starts locally. They are
+  # selected by a `live-tests` feature rather than ignored, so an
+  # unreachable service fails the job instead of passing it empty.
   # ------------------------------------------------------------------
   live:
-    name: Live (tpp-database, MongoDB)
+    name: Live (${{ matrix.suite.name }})
     runs-on: ubuntu-latest
-    env:
-      COMPOSE: docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - name: cache redis
+            project: runtime-cache-live
+            compose: cache/docker/compose.live.yaml
+            test: cargo test -p tpp-cache --features live-tests --test redis_live
+          - name: cache dragonfly
+            project: runtime-cache-dragonfly-live
+            compose: cache/docker/compose.dragonfly.live.yaml
+            test: cargo test -p tpp-cache --features live-tests --test dragonfly_live
+          - name: cache memcached
+            project: runtime-cache-memcached-live
+            compose: cache/docker/compose.memcached.live.yaml
+            test: cargo test -p tpp-cache --features live-tests --test memcached_live
+          - name: database redis
+            project: tpp-database-redis-live
+            compose: database/docker/compose.redis.live.yaml
+            test: cargo test -p tpp-database --features redis,live-tests --test redis_live
+          # A single-node replica set: transactions and change streams need one.
+          - name: database mongodb
+            project: runtime-database-mongodb-live
+            compose: database/docker/compose.mongodb.live.yaml
+            test: cargo test -p tpp-database --features mongodb,live-tests --test mongodb_live
     steps:
       - uses: actions/checkout@v7
 
@@ -235,19 +256,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Start MongoDB
-        run: $COMPOSE up -d --wait mongodb
+      - name: Start service
+        run: docker compose -p ${{ matrix.suite.project }} -f ${{ matrix.suite.compose }} up -d --wait
 
-      - name: Test (all features, live MongoDB)
-        run: cargo test -p tpp-database --all-features
+      - name: Test
+        run: ${{ matrix.suite.test }}
 
-      - name: Server logs on failure
+      - name: Service logs on failure
         if: failure()
-        run: $COMPOSE logs mongodb
+        run: docker compose -p ${{ matrix.suite.project }} -f ${{ matrix.suite.compose }} logs
 
-      - name: Stop MongoDB
+      - name: Stop service
         if: always()
-        run: $COMPOSE down
+        run: docker compose -p ${{ matrix.suite.project }} -f ${{ matrix.suite.compose }} down
 
   # ------------------------------------------------------------------
   # MSRV — the workspace must build on the minimum Rust version it

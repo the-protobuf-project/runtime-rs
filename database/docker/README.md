@@ -72,3 +72,16 @@ docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongo
 
 The healthcheck initiates the replica set on first run. Point the tests at
 another replica set with `RUNTIME_DATABASE_MONGODB_ADDRESS`.
+## Redis records (live test)
+
+`compose.redis.live.yaml` runs a throwaway, non-persistent Redis 7 on
+`127.0.0.1:16381` for the `redis_live` target, beside the cache's live Redis
+(16379) and Dragonfly (16380). Point the test elsewhere with
+`RUNTIME_DATABASE_REDIS_ADDRESS`; each test writes under its own prefix and
+drops it, and nothing flushes the server.
+
+```bash
+docker compose -p tpp-database-redis-live -f database/docker/compose.redis.live.yaml up -d --wait redis
+cargo test -p tpp-database --features live-tests --test redis_live
+docker compose -p tpp-database-redis-live -f database/docker/compose.redis.live.yaml down
+```

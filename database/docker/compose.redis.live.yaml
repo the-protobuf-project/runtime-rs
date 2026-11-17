@@ -1,0 +1,25 @@
+# Isolated Redis for tpp-database's explicitly enabled Redis record-store test.
+#
+# Port 16381 sits beside the cache's live services (Redis 16379, Dragonfly 16380), so both
+# suites can be up at once.
+#
+# Start:
+#   docker compose -p tpp-database-redis-live -f database/docker/compose.redis.live.yaml up -d --wait redis
+# Run:
+#   cargo test -p tpp-database --features live-tests --test redis_live
+# Stop:
+#   docker compose -p tpp-database-redis-live -f database/docker/compose.redis.live.yaml down
+
+services:
+  redis:
+    image: redis:7-alpine
+    # Nothing persists: the data exists for one test run.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "127.0.0.1:16381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 20
+    restart: "no"

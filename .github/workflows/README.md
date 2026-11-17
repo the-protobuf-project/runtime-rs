@@ -16,6 +16,11 @@ starts `database/docker/compose.mongodb.live.yaml` (a single-node MongoDB
 replica set) and runs `cargo test -p tpp-database --all-features`, so the
 `mongodb_live` target exercises a real server and fails rather than skips
 without one. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. The `live` job starts each Compose service under `cache/docker`
+and `database/docker` (Redis, Dragonfly, Memcached; Redis records) and runs the
+matching `live-tests` target against it; the lint and docs jobs also check the
+database's opt-in `redis` backend. The final `ci-gate` requires every listed
+prerequisite to pass.
 
 Use the corresponding local commands during development:
 

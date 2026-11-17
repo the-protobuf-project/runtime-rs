@@ -32,7 +32,7 @@ bytes = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 uuid = { workspace = true }
-redis = { version = "1.8", features = ["tokio-comp", "connection-manager"] }
+redis.workspace = true
 memcache = { version = "0.21", default-features = false, features = ["tokio"] }
 crc32fast = "1.5"
 
@@ -53,4 +53,10 @@ required-features = ["live-tests"]
 [[test]]
 name = "dragonfly_live"
 path = "tests/dragonfly_live.rs"
+required-features = ["live-tests"]
+
+[[bench]]
+name = "redis_paths"
+path = "benches/redis_paths.rs"
+harness = false
 required-features = ["live-tests"]

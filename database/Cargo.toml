@@ -34,6 +34,8 @@ cached = ["dep:cache"]
 # The MongoDB record backend (`database::mongodb`): the official driver over rustls and ring,
 # with bson 3. Off by default, so a build that does not store documents links no driver.
 mongodb = ["dep:mongodb", "dep:bson"]
+# The Redis record backend, `database::redis`: runtime-go's `database/redis`.
+redis = ["dep:redis"]
 # Makes the `*_live` test targets build. Once on, they fail rather than skip without a server:
 # start the one they name from database/docker first.
 live-tests = []
@@ -64,6 +66,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "que
 rustls = { workspace = true, optional = true, features = ["tls12"] }
 # The roots influxdb3-client trusts, so its admin calls and its queries agree on who to trust.
 webpki-roots = { version = "1", optional = true }
+# The Redis backend's client: the workspace's, so the cache's connection manager is accepted.
+redis = { workspace = true, optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
@@ -138,6 +142,11 @@ name = "mongodb_live"
 path = "tests/mongodb_live/main.rs"
 required-features = ["mongodb", "live-tests"]
 
+[[test]]
+name = "redis_live"
+path = "tests/redis_live/main.rs"
+required-features = ["redis", "live-tests"]
+
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }
@@ -151,4 +160,6 @@ prost-types = "0.14"
 tracing.workspace = true
 # The mongodb_live test reads stored documents raw.
 bson = "3.1"
+# The Redis live tests share one connection between the cache and the record store.
+cache.workspace = true
 

@@ -132,6 +132,13 @@ impl DragonflyClient {
         self.inner.close().await;
     }
 
+    /// The connection manager this client multiplexes over, for another layer
+    /// to share, such as `database::redis::RedisProvider`. See
+    /// [`RedisClient::connection_manager`]; fails once the client is closed.
+    pub async fn connection_manager(&self) -> Result<redis::aio::ConnectionManager> {
+        self.inner.connection_manager().await
+    }
+
     /// Clones the shared profiled client for Provider construction.
     fn inner(&self) -> Arc<RedisClient> {
         self.inner.clone()

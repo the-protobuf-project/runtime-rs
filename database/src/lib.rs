@@ -72,6 +72,8 @@ mod observe;
 ))]
 pub mod orm;
 pub mod records;
+#[cfg(feature = "redis")]
+pub mod redis;
 pub mod store;
 mod typed_ingest;
 

@@ -41,6 +41,7 @@ every capability: one collection per resource, the key as `_id`.
 [observe](observe/README.md) wraps every capability with shared signals;
 `cached/` (feature `cached`) puts a tpp-cache read-through cache in front of a
 records DB, invalidating on every write and after every committed transaction.
+`redis/` (feature `redis`) is the Redis backend of the `records` contract.
 Missing backend capabilities refuse by name rather than disappearing.
 
 ```bash
