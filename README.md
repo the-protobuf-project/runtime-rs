@@ -115,7 +115,7 @@ cargo doc --workspace --no-deps
 ```
 
 [Developer tooling](tools/README.md) maintains this generated index.
-[Repository automation](.github/README.md) explains CI, release, and publish flows.
+[Repository automation](.github/AUTOMATION.md) explains CI, release, and publish flows.
 
 ## License
 

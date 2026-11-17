@@ -455,7 +455,7 @@ fn render(ws: &Workspace) -> String {
     b.push_str("```bash\ncargo test --workspace\ncargo test --workspace --doc\ncargo doc --workspace --no-deps\n```\n\n");
     b.push_str("[Developer tooling](tools/README.md) maintains this generated index.\n");
     b.push_str(
-        "[Repository automation](.github/README.md) explains CI, release, and publish flows.\n",
+        "[Repository automation](.github/AUTOMATION.md) explains CI, release, and publish flows.\n",
     );
 
     if let Some(license) = &ws.license {
