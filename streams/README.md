@@ -11,7 +11,9 @@ NATS beside RabbitMQ, by changing which provider it builds and nothing else.
 ## Contents
 
 - [Install](#install)
-- [Quick start](#quick-start)
+- [Choosing a provider](#choosing-a-provider)
+- [The shape every provider shares](#the-shape-every-provider-shares)
+- [Getting a provider from each transport](#getting-a-provider-from-each-transport)
 - [Architecture](#architecture)
 - [From one provider to every transport](#from-one-provider-to-every-transport)
 - [The contract](#the-contract)
@@ -20,7 +22,8 @@ NATS beside RabbitMQ, by changing which provider it builds and nothing else.
 - [Headers](#headers)
 - [Options](#options)
 - [Delivery guarantees](#delivery-guarantees)
-- [Configuration](#configuration)
+- [Validation](#validation)
+- [Edge cases, provider by provider](#edge-cases-provider-by-provider)
 - [Security](#security)
 - [Errors](#errors)
 - [Telemetry](#telemetry)
@@ -50,11 +53,143 @@ application builds only the clients it talks to.
 | `protobuf` | the `Protobuf` codec | `prost` |
 | `tls` | TLS for Redis and Kafka (the others carry rustls already) | `redis` rustls, vendored OpenSSL for librdkafka |
 
-## Quick start
+## Choosing a provider
 
-Start Redis with `docker compose -f streams/docker/compose.redis.yaml up -d --wait`.
+| Transport | Feature | Pick it when |
+| --- | --- | --- |
+| Kafka | `kafka` | You need a replayable, partitioned log at high throughput, with consumer groups |
+| NATS core | `nats` | You want the lowest-latency fan-out and can lose messages nobody is listening for |
+| NATS JetStream | `nats` | You want NATS with durable consumers, replay, expiry and delayed redelivery |
+| RabbitMQ | `rabbitmq` | You want work queues with per-message acknowledgement and publisher confirms |
+| Redis pub/sub | `redis` | You already run Redis and need simple fan-out |
+| Redis scheduled | `redis` | You need delivery delayed by a time (`Options::with_ttl`) |
+| Redis Streams | `redis` | You already run Redis and need durable consumers and replay |
+| MQTT 5 | `mqtt` | You talk to devices: persistent sessions, retained last values, shared subscriptions |
+| ZeroMQ | `zeromq` | You want brokerless PUB/SUB inside a trusted network: it has no TLS |
+| OPC UA client/server | `opcua` | You read and write nodes on industrial equipment |
+| OPC UA PubSub over MQTT | `opcua` | You exchange OPC UA data sets through an MQTT broker (Part 14 JSON) |
+
+What each can do beyond publish and subscribe is in
+[the capability table](#from-one-provider-to-every-transport). A capability a
+transport lacks returns `StreamError::Unsupported`, naming what to reach for instead.
+
+## The shape every provider shares
+
+Every transport works in the same five steps:
+
+1. **Own a client** and build a provider from it. For Kafka and MQTT, you supply
+   the client options instead. The provider never closes what you gave it.
+2. **Create a stream** with the subjects it accepts. Publishing or subscribing to
+   any other subject fails with `UnknownSubject`, so a typo fails loudly.
+3. **Bind** the stream to get a `Manager`, which publishes and subscribes.
+4. **Reach for a capability** (`as_durable`, `as_positioned`, `as_batch`) where you
+   need more than at-most-once delivery.
+5. **Close** the provider. It releases only what the provider opened.
+
+Everything after building the provider is the same code for every transport:
 
 ```rust
+use futures::StreamExt;
+use streams::{Options, Stream, Streams, as_durable, typed};
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+struct Order { user: String, total: u32 }
+
+async fn use_any_provider(provider: &dyn Streams) -> streams::Result<()> {
+    let stream = provider.create(Stream::named("orders").subjects(["order.placed"])).await?;
+    let manager = provider.bind(&stream.id).await?;
+
+    // At most once: delivered to whoever is subscribed when it is published.
+    let orders = typed::<Order>(manager.clone());
+    let mut placed = orders.subscribe("order.placed", &Options::default()).await?;
+    orders.publish("order.placed", &Order { user: "ada".into(), total: 42 }, &Options::default()).await?;
+    let _first: Option<Order> = placed.next().await;
+
+    // At least once, where the broker keeps messages: a named consumer survives restarts.
+    match as_durable(&*manager) {
+        Ok(durable) => {
+            let mut deliveries = durable.consume("order.placed", "billing", &Options::default()).await?;
+            if let Some(delivery) = deliveries.next().await {
+                delivery.ack().await?; // or nak() / nak_after(delay) to have it redelivered
+            }
+        }
+        Err(unsupported) => eprintln!("{unsupported}"), // core NATS, ZeroMQ and others
+    }
+    provider.close().await
+}
+```
+
+## Getting a provider from each transport
+
+Each block builds a provider; from there, the code above applies. Every provider
+takes the client you built (for Kafka and MQTT, the options it builds each
+connection from), plus a configuration struct whose `Default` is the recommended
+setting. Each table lists that struct's fields.
+
+### Kafka: `KafkaProvider::connect(ClientConfig, KafkaConfig)`
+
+```rust,ignore
+use streams::drivers::kafka::{KafkaConfig, KafkaProvider, rdkafka::ClientConfig};
+let mut client = ClientConfig::new();
+client.set("bootstrap.servers", "localhost:9092");
+let provider = KafkaProvider::connect(client, KafkaConfig::default()).await?;
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `prefix` | empty | namespaces every topic, so independent sets share a cluster |
+| `partitions` | 1 | partitions per subject topic: the unit of parallelism and ordering |
+| `replication_factor` | 1 | brokers holding each topic; raise it on a real cluster |
+| `producers` | 8 | producers publishes are spread over; a keyed message always uses the same one |
+| `registry` | JSON | codec names this program decodes |
+| `metrics` | none | delivery instruments for durable consumers |
+
+The producer copy gets `acks=all`, `enable.idempotence=true` and batching
+defaults unless your `ClientConfig` sets them.
+
+### NATS: `NatsProvider::new(Client, NatsConfig)` and `JetStreamProvider::new(Client, NatsConfig)`
+
+```rust,ignore
+use streams::drivers::nats::{JetStreamProvider, NatsConfig, NatsProvider};
+let client = async_nats::connect("localhost:4222").await?;
+let core = NatsProvider::new(client.clone(), NatsConfig::default());          // at most once
+let jetstream = JetStreamProvider::new(client, NatsConfig::default()).await?; // durable, replay
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `queue_group` | none | a queue group every core subscription joins |
+| `ack_wait` | server default (30 s) | how long a durable delivery may stay unsettled |
+| `max_deliver` | server default (unlimited) | deliveries of one message before JetStream gives up |
+| `inactive_threshold` | client default (30 s) | how long an idle subscription's consumer lives on the server |
+| `registry` | JSON | codec names this program decodes |
+| `telemetry` | none | where durable deliveries are counted |
+
+### RabbitMQ: `RabbitProvider::new(Arc<Connection>, RabbitConfig)`
+
+```rust,ignore
+use streams::drivers::rabbitmq::{RabbitConfig, RabbitProvider};
+let conn = Arc::new(lapin::Connection::connect("amqp://localhost:5672", Default::default()).await?);
+let provider = RabbitProvider::new(conn, RabbitConfig::default()).await?;
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `prefix` | empty | namespaces every exchange and queue |
+| `prefetch` | 32 | unacknowledged messages one consumer may hold (`basic.qos`) |
+| `publish_channels` | 4 | confirm-mode channels single publishes are spread over |
+| `registry` | JSON | codec names this program decodes |
+| `metrics` | none | delivery instruments for durable consumers |
+
+### Redis: `RedisProvider::new` (pub/sub), `::scheduled` (delayed delivery), `::durable` (Streams)
+
+The three Redis providers share one client type. This is the crate's quick start, on Redis Streams;
+start Redis first with `docker compose -f streams/docker/compose.redis.yaml up -d --wait`.
+
+```rust,ignore
 use futures::StreamExt;
 use streams::{Options, Stream, Streams, typed,
     drivers::redis::{RedisConfig, RedisProvider, redis}};
@@ -86,6 +221,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+
+Each takes `(redis::Client, RedisConfig)`.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `prefix` | empty | namespaces every key |
+| `database` | the client's | the database whose expiry events the scheduled provider watches |
+| `max_len` | unbounded | approximate cap on messages a durable subject keeps |
+| `reclaim_after` | 30 s | how long a message may sit unacknowledged before another consumer takes it; also the longest delayed nak |
+| `confirm_acks` | true | whether `ack()` waits for Redis to answer the XACK |
+| `connections` | 1 | how many shared connections commands are spread over; raise it (16 to 64) for a TLS Redis with `appendfsync always`, which syncs about once per command per TLS connection |
+| `registry` | JSON | codec names this program decodes |
+| `metrics` | none | delivery instruments for durable consumers |
+
+### MQTT: `MqttProvider::connect(MqttOptions, MqttConfig)`
+
+```rust,ignore
+use streams::drivers::mqtt::{MqttConfig, MqttOptions, MqttProvider};
+let provider = MqttProvider::connect(MqttOptions::new("app", "localhost", 1883), MqttConfig::default()).await?;
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `prefix` | empty | namespaces every topic |
+| `qos` | at least once | QoS of every publish and subscription |
+| `session_expiry` | 24 h | how long the broker keeps a departed durable consumer's session |
+| `client_id` | generated | client id of the publishing connection |
+| `publish_timeout` | 10 s | how long a publish waits for its PUBACK |
+| `publish_connections` | 1 | connections publishes are spread over, by topic, so each topic keeps its order |
+| `registry` | JSON | codec names this program decodes |
+| `metrics` | none | delivery instruments for durable consumers |
+
+`MqttProvider::clear_retained(stream, subject)` removes a retained value.
+
+### ZeroMQ: `ZmqProvider::publisher(ZmqConfig)` and `ZmqProvider::subscriber(ZmqConfig)`
+
+```rust,ignore
+use streams::drivers::zeromq::{ZmqConfig, ZmqProvider};
+let publisher = ZmqProvider::publisher(ZmqConfig::new("tcp://0.0.0.0:5556")).await?;  // binds
+let subscriber = ZmqProvider::subscriber(ZmqConfig::new("tcp://localhost:5556"))?;   // connects
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `endpoint` | required | `tcp://host:port` or `ipc:///path`; a publisher may bind port 0 |
+| `settle` | 250 ms | how long `subscribe` waits for the subscription to reach the publisher |
+| `registry` | JSON | codec names this program decodes |
+
+### OPC UA client/server: `OpcUaProvider::new(Arc<Session>, OpcUaConfig)`
+
+```rust,ignore
+use streams::drivers::opcua::{OpcUaConfig, OpcUaProvider};
+let provider = OpcUaProvider::new(session, OpcUaConfig::default()); // an async-opcua Session you connected
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `publishing_interval` | 100 ms | how often the server sends queued notifications |
+| `sampling_interval` | 0 (fastest) | how often the server samples a monitored node |
+| `queue_size` | 64 | a monitored item's server-side queue when no prefetch is given |
+| `buffer` | 4,096 | notifications a stream holds ahead of its reader |
+| `keep_alive_count` | 10 | publishing intervals before a keep-alive |
+| `lifetime_count` | 60 | publishing intervals without a request before the server drops the subscription |
+| `initial_value` | false | whether a new stream first delivers the node's current value |
+| `max_notifications_per_publish` | 1,000 | notifications per Publish response |
+
+A stream's subjects are node ids (`ns=3;s=Temperature`, or the stable
+`nsu=<uri>;s=Temperature`, rebound after a reconnect). `publish` writes the
+node's Value and returns after the server's Write response; `subscribe` is a
+data-change monitored item.
+
+### OPC UA PubSub over MQTT: `PubSubProvider::connect(MqttOptions, PubSubConfig)`
+
+```rust,ignore
+use streams::drivers::opcua::pubsub::{MqttOptions, PubSubConfig, PubSubProvider};
+let provider = PubSubProvider::connect(MqttOptions::new("plant", "localhost", 1883), PubSubConfig::default()).await?;
+```
+
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `publisher_id` | `runtime-rs-<ULID>` | the PublisherId every message is sent under; set a stable one |
+| `prefix` | `opcua` | the first topic level |
+| `qos` | at least once | QoS of every publish and subscription |
+| `client_id` | generated | client id of the first publishing connection |
+| `publish_timeout` | 10 s | how long a publish waits for its PUBACK |
+| `publish_connections` | 4 | connections, chosen by topic, so each writer keeps its sequence |
+| `max_dataset_messages` | 100 | DataSetMessages per NetworkMessage in a batch |
+| `metadata_timeout` | 5 s | how long `metadata()` waits for the retained metadata |
+| `telemetry` | none | where sequence gaps are counted |
+
+Messages follow Part 14's JSON mapping on
+`opcua/json/data/<PublisherId>/<WriterGroup>/<DataSetWriter>`;
+`publish_metadata` sends retained `ua-metadata`, and `sequence_gaps()` counts
+missed SequenceNumbers.
 
 ## Architecture
 
@@ -462,7 +696,7 @@ flowchart LR
     V --> X["refused<br/>OPC UA client/server"]
 ```
 
-```rust
+```rust,ignore
 // Defaults for every message published through the stream.
 let stream = provider.create(
     Stream::named("telemetry")
@@ -538,121 +772,64 @@ JetStream PubAck, a RabbitMQ publisher confirm, an MQTT PUBACK at QoS 1, an
 answered Redis command. Core NATS and ZeroMQ have no acknowledgement; a
 publish there returns once the message is on its way.
 
-## Configuration
+## Validation
 
-Every provider takes the client you built (for Kafka and MQTT, the client
-options it builds each connection from) and a configuration struct whose
-`Default` is the recommended setting.
+Everything below is checked before anything reaches the broker, and fails at the
+call that set it:
 
-### Kafka: `KafkaProvider::connect(ClientConfig, KafkaConfig)`
-
-| Field | Default | Meaning |
+| What | Rule | Error |
 | --- | --- | --- |
-| `prefix` | empty | namespaces every topic, so independent sets share a cluster |
-| `partitions` | 1 | partitions per subject topic: the unit of parallelism and ordering |
-| `replication_factor` | 1 | brokers holding each topic; raise it on a real cluster |
-| `producers` | 8 | producers publishes are spread over; a keyed message always uses the same one |
-| `registry` | JSON | codec names this program decodes |
-| `metrics` | none | delivery instruments for durable consumers |
+| Subject | Must be declared on the stream at `create` (or `update`) | `UnknownSubject` |
+| Stream id | `get`, `bind`, `update` and `delete` of an unknown id | `NotFound` |
+| Headers | Key: non-empty, visible ASCII, no `:`, at most 256 bytes. Value: one line, no control characters, at most 4,096 bytes. All headers together: at most 16 KiB. Broker-reserved keys are refused (`Nats-*` on NATS; `x-*`, `CC`, `BCC` on RabbitMQ) | `InvalidHeader` |
+| Options that change meaning | `ttl`, `group`, `expires`, `retain`, and `id` on a batch, where the transport cannot honour them | `Unsupported` |
+| Options that only tune | `prefetch`, `partition_key`: ignored where the transport has no such setting | none |
+| Codec | A received frame naming a codec outside the receiver's `Registry`, or decoding with a codec the publisher did not use | `Codec`, `Unsupported` |
+| Frames | A payload that is not a frame this contract wrote | `Frame` |
 
-The producer copy gets `acks=all`, `enable.idempotence=true` and batching
-defaults unless your `ClientConfig` sets them.
+## Edge cases, provider by provider
 
-### NATS: `NatsProvider::new(Client, NatsConfig)` and `JetStreamProvider::new(Client, NatsConfig)`
+**Kafka**
+- `publish` returns after `acks=all` with idempotence.
+- Ordering holds per partition: give related messages the same `partition_key`.
+- librdkafka is compiled from C (with OpenSSL under `tls`), so the `kafka` feature
+  needs a C toolchain.
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `queue_group` | none | a queue group every core subscription joins |
-| `ack_wait` | server default (30 s) | how long a durable delivery may stay unsettled |
-| `max_deliver` | server default (unlimited) | deliveries of one message before JetStream gives up |
-| `inactive_threshold` | client default (30 s) | how long an idle subscription's consumer lives on the server |
-| `registry` | JSON | codec names this program decodes |
-| `telemetry` | none | where durable deliveries are counted |
+**NATS**
+- Core NATS has no acknowledgement: `publish` returns once the message is sent,
+  and a message published while no one listens is gone. Use JetStream for
+  durability.
+- JetStream expiry is in whole seconds.
 
-### RabbitMQ: `RabbitProvider::new(Arc<Connection>, RabbitConfig)`
+**RabbitMQ**
+- Expiry is checked at the head of the queue, so an expired message behind a live
+  one is dropped only when it reaches the head.
+- Single publishes are spread over `publish_channels` confirm-mode channels.
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `prefix` | empty | namespaces every exchange and queue |
-| `prefetch` | 32 | unacknowledged messages one consumer may hold (`basic.qos`) |
-| `publish_channels` | 4 | confirm-mode channels single publishes are spread over |
-| `registry` | JSON | codec names this program decodes |
-| `metrics` | none | delivery instruments for durable consumers |
+**Redis**
+- Pub/sub and the scheduled provider carry headers in frame version 2; Streams
+  carries them as entry fields.
+- A delayed `nak_after` on Streams is capped by `reclaim_after`.
+- The scheduled provider relies on keyspace expiry events from the database it
+  watches.
 
-### Redis: `RedisProvider::new` (pub/sub), `::scheduled` (delayed delivery), `::durable` (Streams)
+**MQTT**
+- Expiry is in whole seconds.
+- A retained value stays on its subject until `MqttProvider::clear_retained`
+  removes it.
+- Each topic keeps its order because publishes are spread over connections by
+  topic.
 
-Each takes `(redis::Client, RedisConfig)`.
+**ZeroMQ**
+- There is no acknowledgement and no TLS, so use it only inside a trusted network.
+- `subscribe` waits `settle` (250 ms) for the subscription to reach the publisher:
+  ZeroMQ drops messages sent before a subscriber has joined.
 
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `prefix` | empty | namespaces every key |
-| `database` | the client's | the database whose expiry events the scheduled provider watches |
-| `max_len` | unbounded | approximate cap on messages a durable subject keeps |
-| `reclaim_after` | 30 s | how long a message may sit unacknowledged before another consumer takes it; also the longest delayed nak |
-| `confirm_acks` | true | whether `ack()` waits for Redis to answer the XACK |
-| `connections` | 1 | how many shared connections commands are spread over; raise it (16 to 64) for a TLS Redis with `appendfsync always`, which syncs about once per command per TLS connection |
-| `registry` | JSON | codec names this program decodes |
-| `metrics` | none | delivery instruments for durable consumers |
-
-### MQTT: `MqttProvider::connect(MqttOptions, MqttConfig)`
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `prefix` | empty | namespaces every topic |
-| `qos` | at least once | QoS of every publish and subscription |
-| `session_expiry` | 24 h | how long the broker keeps a departed durable consumer's session |
-| `client_id` | generated | client id of the publishing connection |
-| `publish_timeout` | 10 s | how long a publish waits for its PUBACK |
-| `publish_connections` | 1 | connections publishes are spread over, by topic, so each topic keeps its order |
-| `registry` | JSON | codec names this program decodes |
-| `metrics` | none | delivery instruments for durable consumers |
-
-`MqttProvider::clear_retained(stream, subject)` removes a retained value.
-
-### ZeroMQ: `ZmqProvider::publisher(ZmqConfig)` and `ZmqProvider::subscriber(ZmqConfig)`
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `endpoint` | required | `tcp://host:port` or `ipc:///path`; a publisher may bind port 0 |
-| `settle` | 250 ms | how long `subscribe` waits for the subscription to reach the publisher |
-| `registry` | JSON | codec names this program decodes |
-
-### OPC UA client/server: `OpcUaProvider::new(Arc<Session>, OpcUaConfig)`
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `publishing_interval` | 100 ms | how often the server sends queued notifications |
-| `sampling_interval` | 0 (fastest) | how often the server samples a monitored node |
-| `queue_size` | 64 | a monitored item's server-side queue when no prefetch is given |
-| `buffer` | 4,096 | notifications a stream holds ahead of its reader |
-| `keep_alive_count` | 10 | publishing intervals before a keep-alive |
-| `lifetime_count` | 60 | publishing intervals without a request before the server drops the subscription |
-| `initial_value` | false | whether a new stream first delivers the node's current value |
-| `max_notifications_per_publish` | 1,000 | notifications per Publish response |
-
-A stream's subjects are node ids (`ns=3;s=Temperature`, or the stable
-`nsu=<uri>;s=Temperature`, rebound after a reconnect). `publish` writes the
-node's Value and returns after the server's Write response; `subscribe` is a
-data-change monitored item.
-
-### OPC UA PubSub over MQTT: `PubSubProvider::connect(MqttOptions, PubSubConfig)`
-
-| Field | Default | Meaning |
-| --- | --- | --- |
-| `publisher_id` | `runtime-rs-<ULID>` | the PublisherId every message is sent under; set a stable one |
-| `prefix` | `opcua` | the first topic level |
-| `qos` | at least once | QoS of every publish and subscription |
-| `client_id` | generated | client id of the first publishing connection |
-| `publish_timeout` | 10 s | how long a publish waits for its PUBACK |
-| `publish_connections` | 4 | connections, chosen by topic, so each writer keeps its sequence |
-| `max_dataset_messages` | 100 | DataSetMessages per NetworkMessage in a batch |
-| `metadata_timeout` | 5 s | how long `metadata()` waits for the retained metadata |
-| `telemetry` | none | where sequence gaps are counted |
-
-Messages follow Part 14's JSON mapping on
-`opcua/json/data/<PublisherId>/<WriterGroup>/<DataSetWriter>`;
-`publish_metadata` sends retained `ua-metadata`, and `sequence_gaps()` counts
-missed SequenceNumbers.
+**OPC UA**
+- Client/server refuses headers: the protocol has no place for them.
+- Subjects are node ids. The stable `nsu=<uri>;s=…` form is rebound after a
+  reconnect.
+- The RSA security policies inherit the `rsa` crate's RUSTSEC-2023-0071 advisory.
 
 ## Security
 
@@ -697,7 +874,7 @@ the provider's have: `as_durable`, `as_positioned` and `as_batch` find them
 through the wrapper. No OpenTelemetry type appears in the API; `streams::Telemetry`
 is re-exported for callers.
 
-```rust
+```rust,ignore
 // The application's signals: tpp-telemetry's Telemetry::from_tpp(&sdk, "orders")
 // with its tpp-sdk feature, or one built from its own providers.
 let provider = streams::instrument(provider, &telemetry, "nats");
@@ -738,7 +915,7 @@ flowchart LR
     App["typed view"] --> L["logging<br/>outermost"] --> T["telemetry"] --> R["retry<br/>same id each attempt"] --> P["provider's Publisher"] --> B(("broker"))
 ```
 
-```rust
+```rust,ignore
 use std::time::Duration;
 use streams::{chain, typed, with_logging_middleware, with_retry_middleware, with_telemetry_middleware};
 
@@ -782,7 +959,7 @@ flowchart LR
 | `Consumer` | at least once; a delivery that does not decode is acknowledged with a warning, since redelivering it would loop forever |
 | `BatchSink` | flushes at `max_size` values or when the oldest has waited `max_delay`; `send_all` flushes on time while its source is idle |
 
-```rust
+```rust,ignore
 use std::time::Duration;
 use streams::{Capability, Topic, topic::{self, BatchPolicy, TopicSpec}};
 

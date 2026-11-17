@@ -4,14 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "runtime-go-shaped database contracts: proto records in Postgres, MySQL, SQLite or MongoDB, time series in InfluxDB 3 and Arrow captures"
+description = "One database contract over many providers: proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri store, time series in InfluxDB 3 or Arrow"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
-keywords = ["database", "sql", "mongodb", "influxdb", "async"]
+keywords = ["database", "sql", "mongodb", "redis", "influxdb"]
 categories = ["database", "asynchronous"]
 
 [package.metadata.docgen]
 go-source = "runtime-go/database"
-use-for = "Store proto records in Postgres, MySQL, SQLite or MongoDB, and time series in InfluxDB 3 or Arrow captures"
+use-for = "Store proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri app, and time series in InfluxDB 3 or Arrow"
 
 [lib]
 name = "database"

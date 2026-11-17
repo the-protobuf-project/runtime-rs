@@ -1,6 +1,6 @@
 # CI, releases, and package publication
 
-[Automation overview](../README.md)
+[Automation overview](../AUTOMATION.md)
 
 `ci.yaml` runs on main-branch pushes and pull requests. It detects crates/MSRV
 from Cargo metadata, fans out per-crate build/test, verifies the combined

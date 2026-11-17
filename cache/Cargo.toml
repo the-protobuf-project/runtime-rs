@@ -4,7 +4,7 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Cache drivers and read-through/write-through strategies over pluggable backends"
+description = "One cache contract over Redis, Dragonfly and memcached: document, volatile, indexed and read-through strategies"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
 keywords = ["cache", "redis", "memcached", "async", "read-through"]
 categories = ["caching", "asynchronous"]
@@ -12,7 +12,7 @@ categories = ["caching", "asynchronous"]
 # Consumed by tools/docgen to build the README's "Go source" column.
 [package.metadata.docgen]
 go-source = "runtime-go/cache"
-use-for = "Cache records in Redis, Dragonfly or memcached"
+use-for = "Cache values in Redis, Dragonfly or memcached, and read through to a slower source"
 
 [lib]
 name = "cache"

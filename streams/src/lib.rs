@@ -115,3 +115,8 @@ pub use telemetry::{Telemetry, with_telemetry, with_telemetry_middleware};
 // the first two would shadow the contract's traits of the same name.
 pub use topic::{BatchPolicy, BatchSink, FieldFn, Topic, TopicSpec};
 pub use typed::{Typed, typed, typed_with};
+
+/// The README's Rust snippets, compiled as doctests so the guide cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
