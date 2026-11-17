@@ -34,6 +34,8 @@
 //!   (an unknown path; an empty one on `update_output_only`).
 
 mod atomic;
+#[cfg(feature = "cached")]
+pub mod cached;
 mod hooks;
 mod mask;
 mod names;

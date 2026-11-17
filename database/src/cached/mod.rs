@@ -48,7 +48,7 @@
 //! underneath, another process writing to the same database without this decorator in front
 //! of it. Without one, a wrong entry stays wrong until something overwrites it.
 
-mod aside;
+pub(crate) mod aside;
 mod bulk;
 mod driver;
 mod tx;
