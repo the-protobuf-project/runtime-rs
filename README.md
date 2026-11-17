@@ -24,7 +24,7 @@ flowchart LR
 | I want to | Crate | Go twin |
 | --- | --- | --- |
 | Let AI agents call a service over MCP or A2A | [`agents`](agents) | `runtime-go/agents` |
-| Cache records in Redis, Dragonfly or memcached | [`cache`](cache) | `runtime-go/cache` |
+| Cache values in Redis, Dragonfly or memcached, and read through to a slower source | [`cache`](cache) | `runtime-go/cache` |
 | Load configuration from embedded defaults, profiles, files and the environment | [`config`](config) | `protoc-gen-service app/config` |
 | Store proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri app, and time series in InfluxDB 3 or Arrow | [`database`](database) | `runtime-go/database` |
 | Serve one service over gRPC, REST, HTTP/3, MCP and A2A on one port | [`grpc`](grpc) | `runtime-go/grpc` |
@@ -69,7 +69,7 @@ Every crate declares a `description` in its `Cargo.toml` and carries crate-level
 | Crate | What it is for | Docs |
 | --- | --- | --- |
 | [`agents`](agents) <br/>`tpp-agents` | One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain | [Guide](agents/README.md) · [Source](agents/src/README.md) · [Tests](agents/tests/README.md) · [API](https://docs.rs/tpp-agents) |
-| [`cache`](cache) <br/>`tpp-cache` | Cache drivers and read-through/write-through strategies over pluggable backends | [Guide](cache/README.md) · [Source](cache/src/README.md) · [Tests](cache/tests/README.md) · [API](https://docs.rs/tpp-cache) |
+| [`cache`](cache) <br/>`tpp-cache` | One cache contract over Redis, Dragonfly and memcached: document, volatile, indexed and read-through strategies | [Guide](cache/README.md) · [Source](cache/src/README.md) · [Tests](cache/tests/README.md) · [API](https://docs.rs/tpp-cache) |
 | [`config`](config) <br/>`tpp-config` | Layered application configuration: embedded release defaults, a development profile, TOML/YAML/JSON files and prefixed environment variables, extracted into typed sections | [Guide](config/README.md) · [Source](config/src/README.md) · [Tests](config/tests/README.md) · [API](https://docs.rs/tpp-config) |
 | [`database`](database) <br/>`tpp-database` | One database contract over many providers: proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri store, time series in InfluxDB 3 or Arrow | [Guide](database/README.md) · [Source](database/src/README.md) · [Tests](database/tests/README.md) · [API](https://docs.rs/tpp-database) |
 | [`grpc`](grpc) <br/>`tpp-grpc` | One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS | [Guide](grpc/README.md) · [Source](grpc/src/README.md) · [Tests](grpc/tests/README.md) · [API](https://docs.rs/tpp-grpc) |

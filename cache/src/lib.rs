@@ -225,3 +225,8 @@ impl Default for Config {
         }
     }
 }
+
+/// The README's Rust snippets, compiled as doctests so the guide cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
