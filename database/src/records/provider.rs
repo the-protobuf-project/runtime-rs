@@ -12,7 +12,7 @@ use crate::{Error, Result};
 /// Chooses a database from a client the caller owns. Go's `store.Provider`.
 #[async_trait::async_trait]
 pub trait Provider: Send + Sync {
-    /// The driver over database `name`, which overrides [`Resource::schema`] for every
+    /// The driver over database `name`, which overrides [`Resource::schema`](super::Resource::schema) for every
     /// resource driven through it; empty selects the client's default.
     async fn set_database(&self, name: &str) -> Result<DB>;
     /// The backend's name, e.g. `orm`.
