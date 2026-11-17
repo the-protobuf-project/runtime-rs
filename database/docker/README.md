@@ -42,3 +42,21 @@ docker compose -f database/docker/compose.yaml --profile telemetry down
 The collector is a development inspection sink. Ordinary `down` preserves the
 InfluxDB named volume; do not remove volumes when you intend to retain data.
 Application shutdown drains workers before flushing SDK exporters.
+
+## MongoDB for the live record tests
+
+`compose.mongodb.live.yaml` runs MongoDB 7 as a single-node replica set on
+`127.0.0.1:27117` (Compose project `runtime-database-mongodb-live`), for the
+`mongodb_live` test target. A replica set rather than a standalone server,
+because transactions and change streams need one; mongod listens on 27117
+inside the container too, so the member address the set advertises is the one
+the host reaches. No volume is declared: it is disposable test storage.
+
+```bash
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml up -d --wait mongodb
+cargo test -p tpp-database --features mongodb,live-tests --test mongodb_live
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml down
+```
+
+The healthcheck initiates the replica set on first run. Point the tests at
+another replica set with `RUNTIME_DATABASE_MONGODB_ADDRESS`.

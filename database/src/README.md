@@ -32,6 +32,9 @@ both to succeed; reads, streams, time windows, and transactions use the primary.
 There is no distributed rollback. Retrying a partially successful mirror can
 append duplicate rows to the Arrow copy while InfluxDB merges point identities.
 
+[`records`](records/mod.rs) is the proto-message record contract, and
+[`mongodb`](mongodb/mod.rs) (feature `mongodb`) implements it over MongoDB with
+every capability: one collection per resource, the key as `_id`.
 [InfluxDB](influxdb/README.md) maps requests to SDK writes/Flight SQL;
 [Arrow](arrow/README.md) captures local columnar segments;
 [ingest](ingest/README.md) manages bounded background work;

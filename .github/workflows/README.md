@@ -6,7 +6,12 @@
 from Cargo metadata, fans out per-crate build/test, verifies the combined
 workspace, checks formatting/clippy (including excluded docgen), builds docs
 with warnings denied, checks the generated README, builds at MSRV, and audits
-dependencies. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. Lint and docs also cover `tpp-database` with all features, whose
+optional `mongodb` backend the workspace run never compiles. The `live` job
+starts `database/docker/compose.mongodb.live.yaml` (a single-node MongoDB
+replica set) and runs `cargo test -p tpp-database --all-features`, so the
+`mongodb_live` target exercises a real server and fails rather than skips
+without one. The final `ci-gate` requires every listed prerequisite to pass.
 
 Use the corresponding local commands during development:
 
@@ -16,6 +21,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 just docs-check
+# The live job, with its server:
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml up -d --wait mongodb
+cargo test -p tpp-database --all-features
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml down
 ```
 
 `release.yaml` responds to workspace `vX.Y.Z` or crate-scoped `crate/vX.Y.Z`

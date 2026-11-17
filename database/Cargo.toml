@@ -4,14 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "runtime-go-shaped database contracts with InfluxDB 3 and Arrow capture backends"
+description = "runtime-go-shaped database contracts: proto records in MongoDB, time series in InfluxDB 3 and Arrow captures"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
-keywords = ["database", "influxdb", "timeseries", "async"]
+keywords = ["database", "mongodb", "influxdb", "timeseries", "async"]
 categories = ["database", "asynchronous"]
 
 [package.metadata.docgen]
 go-source = "runtime-go/database"
-use-for = "Store records and time series in InfluxDB 3, or capture them as Arrow"
+use-for = "Store proto records in MongoDB, time series in InfluxDB 3, or capture them as Arrow"
 
 [lib]
 name = "database"
@@ -22,6 +22,12 @@ telemetry-sdk = ["telemetry/tpp-sdk"]
 # The InfluxDB 3 backend. A feature because influxdb3-client 0.3, its latest release, requires
 # Arrow 59: turning this off is what leaves a capture-only build on one Arrow major, 60.
 influxdb = ["dep:influxdb3-client", "dep:reqwest", "dep:rustls", "dep:webpki-roots"]
+# The MongoDB record backend (`database::mongodb`): the official driver over rustls and ring,
+# with bson 3. Off by default, so a build that does not store documents links no driver.
+mongodb = ["dep:mongodb", "dep:bson"]
+# Makes the `*_live` test targets build. Once on, they fail rather than skip without a server:
+# start the one they name from database/docker first.
+live-tests = []
 
 [dependencies]
 telemetry.workspace = true
@@ -52,6 +58,10 @@ webpki-roots = { version = "1", optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
+# `compat-3-3-0` is the driver's required forward-compatibility pledge; `rustls-tls` selects
+# ring, as everything else here does; `dns-resolver` resolves `mongodb+srv://` URIs.
+mongodb = { version = "3.10", default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"], optional = true }
+bson = { version = "3.1", features = ["serde", "serde_json-1"], optional = true }
 
 [[example]]
 name = "capture"
@@ -63,6 +73,11 @@ name = "influxdb"
 path = "examples/influxdb/main.rs"
 required-features = ["influxdb"]
 
+[[test]]
+name = "mongodb_live"
+path = "tests/mongodb_live/main.rs"
+required-features = ["mongodb", "live-tests"]
+
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }
@@ -72,4 +87,6 @@ tonic.workspace = true
 tokio-stream.workspace = true
 # The records tests build their Book descriptor without protoc.
 prost-types = "0.14"
+# The mongodb_live test reads stored documents raw.
+bson = "3.1"
 

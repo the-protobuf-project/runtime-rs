@@ -6,6 +6,9 @@
 //! schema, batches, time series, streams — each always present and refusing
 //! by name where a backend lacks it. Backends are [`influxdb`] and [`arrow`].
 //!
+//! [`records`] is the proto-message record contract, runtime-go's `database/store`;
+//! the `mongodb` feature adds `database::mongodb`, which implements it over MongoDB.
+//!
 //! # Generated models
 //!
 //! Generated code implements [`Model`](store::Model) for each message and
@@ -40,6 +43,10 @@
 
 #![warn(missing_docs)]
 
+// Lets the mongodb unit tests include the integration fixtures, which name the crate.
+#[cfg(all(test, feature = "mongodb"))]
+extern crate self as database;
+
 pub mod arrow;
 mod buffered;
 mod collection;
@@ -47,6 +54,8 @@ mod collection;
 pub mod influxdb;
 pub mod ingest;
 mod mirror;
+#[cfg(feature = "mongodb")]
+pub mod mongodb;
 mod observe;
 pub mod records;
 pub mod store;

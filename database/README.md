@@ -4,8 +4,8 @@ Descriptor-driven storage shaped after
 [runtime-go/database](https://github.com/the-protobuf-project/runtime-go/tree/main/database),
 so one store generator emits Go and Rust clients from the same template.
 Backends: InfluxDB 3 (`influxdb3-client` 0.3.0, live-tested against Core
-3.12.2) and Arrow IPC captures. Every Rust file stays under 200 lines; a test
-enforces it.
+3.12.2) and Arrow IPC captures for time series, and MongoDB for proto records
+(`database::records`). Every Rust file stays under 200 lines; a test enforces it.
 
 The `influxdb` feature, on by default, is the InfluxDB 3 backend. `influxdb3-client`
 0.3 requires Arrow 59 while the capture backend uses 60, so a capture-only build
@@ -132,6 +132,56 @@ written and given a `.bounds` sidecar on close so range reads skip it. A crash
 loses at most the batch being written; `load` returns the rest. Pages use
 offset tokens with totals. Open the files with pyarrow, polars or DuckDB.
 
+## MongoDB (`database::mongodb`)
+
+The port of runtime-go's `database/mongodb`, behind the `mongodb` feature (the
+official `mongodb` 3.x driver, bson 3, rustls over ring). It implements the
+`database::records` contract: a resource is a collection, a record a document,
+and each column a field, so the data reads naturally in any MongoDB tool.
+
+```rust
+use database::mongodb::{MongoClient, MongoConfig, MongoProvider};
+use database::records::{Provider, Resource};
+use prost_reflect::DynamicMessage;
+
+async fn save(books: &Resource, book: &DynamicMessage) -> database::Result<()> {
+    let client = MongoClient::connect(MongoConfig::address("localhost:27017")).await?;
+    let db = MongoProvider::new(client.clone()).set_database("tenant_a").await?;
+    db.schema.ensure_schema(books).await?; // the collection and its unique indexes
+    db.create(books, book).await?;
+    client.close().await; // the client is yours; nothing here closes it
+    Ok(())
+}
+```
+
+| runtime-go | Rust |
+| --- | --- |
+| `Config{URI, Address, Username, Password, AuthSource, ConnectTimeout, MaxPoolSize, MinPoolSize, MaxConnIdleTime}` | `MongoConfig { uri, address, username, password, auth_source, connect_timeout, max_pool_size, min_pool_size, max_conn_idle_time }` |
+| `NewClient` (pings), `Wrap`, `Unwrap`, `Close` | `MongoClient::connect`, `wrap`, `unwrap`, `close` |
+| `NewProvider`, `SetDatabase`, `DropDatabase` | `MongoProvider::new`, `set_database`, `drop_database` |
+| `New(client)` | `MongoDriver::new(&client)`: each resource in its `schema` database |
+| `Run` with a session-bound `*store.DB` | `db.tx.run(work)`: CRUD and bulk calls in `work` join the session |
+| `EnsureSchema` / `DropSchema` / `HasSchema` | `db.schema.*`: the collection plus a `uniq_<column>` index per unique column |
+| `CreateMany` / `GetMany` | `db.batch.*`: one ordered insert; one `$in` per 512 keys, `None` for missing |
+| `Watch` | `db.watch.watch(res, opts)`: a change stream, Extended JSON resume tokens |
+
+The selected name is a real MongoDB database, so tenants are isolated by the
+server; it is checked with `check_database_name` and the server pinged before a
+`DB` is returned. The encoding is Go's: the key is `_id`, integers int64, enums
+int32, times BSON dates (milliseconds, UTC), bytes generic binary (empty as
+null), an unset optional field null, and a `uint64` past `i64::MAX` a
+Decimal128 so it reads back exactly. Code 11000 is `AlreadyExists`; a missing
+document `NotFound`. Filters are the shared AIP-160 subset with values typed by
+column kind; `order_by` sorts by one column (the key as `_id`, ties by `_id`);
+pages use the shared offset tokens, and `omit_total` reads one past the page.
+
+Where it differs from Go: a column named twice in a filter keeps both bounds
+(Go's map kept the last); a transaction's work is `FnOnce`, so a commit with an
+unknown outcome is retried but the work is never rerun, and nesting is refused;
+bulk calls inside a transaction join it. Transactions and change streams need a
+replica set; [the live compose file](docker/compose.mongodb.live.yaml) runs a
+single-node one on `127.0.0.1:27117`.
+
 ## Examples and telemetry
 
 - [examples/influxdb](examples/influxdb/README.md): the full InfluxDB workflow
@@ -150,10 +200,13 @@ default. See [runtime telemetry](../telemetry/README.md).
 
 See [source composition](src/README.md), [store contracts](src/store/README.md),
 [InfluxDB](src/influxdb/README.md), [Arrow](src/arrow/README.md),
+[MongoDB](src/mongodb/mod.rs),
 [ingestion](src/ingest/README.md), [observations](src/observe/README.md),
 and [tests](tests/README.md).
 
 ```bash
 cargo test -p tpp-database
 cargo doc -p tpp-database --no-deps
+# MongoDB, against the live replica set (see tests/README.md):
+cargo test -p tpp-database --all-features
 ```
