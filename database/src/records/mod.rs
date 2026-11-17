@@ -27,9 +27,12 @@
 
 mod bridge;
 mod capabilities;
+mod convert;
 pub mod core;
 mod driver;
+mod kind;
 mod provider;
+mod refuses;
 mod resource;
 mod typed;
 mod value;

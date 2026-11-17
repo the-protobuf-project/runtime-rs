@@ -1,9 +1,5 @@
-//! What every driver shares: the AIP-160 filter subset, offset page tokens, and the columns
-//! a driver fills itself. Go's `database/core`.
+//! The AIP-160 filter subset every driver parses. Go's `core/filter.go`.
 
-use chrono::Utc;
-
-use super::{Generated, Resource, Row, Value};
 use crate::{Error, Result};
 
 /// One `column op value` comparison. Go's `core.Clause`.
@@ -156,93 +152,4 @@ fn unquote(s: &str) -> String {
         return s[1..s.len() - 1].to_owned();
     }
     s.to_owned()
-}
-
-/// The page size a backend uses when none is requested.
-pub const DEFAULT_PAGE_SIZE: i64 = 50;
-
-/// The total a backend reports when it skipped counting.
-pub const NO_TOTAL: i64 = -1;
-
-/// The requested page size, or the default.
-pub fn page_size(requested: i32) -> i64 {
-    if requested <= 0 {
-        DEFAULT_PAGE_SIZE
-    } else {
-        i64::from(requested)
-    }
-}
-
-/// The offset a token encodes; 0 for an empty or unreadable one. Go's `core.DecodeToken`.
-pub fn decode_token(token: &str) -> i64 {
-    token.parse::<i64>().ok().filter(|n| *n >= 0).unwrap_or(0)
-}
-
-/// The token after a page of `returned` rows at `offset`; empty once `total` is reached.
-pub fn encode_token(offset: i64, returned: i64, total: i64) -> String {
-    let next = offset + returned;
-    if next >= total {
-        String::new()
-    } else {
-        next.to_string()
-    }
-}
-
-/// How many rows to read: one past the page when the total is skipped, to learn whether
-/// another page exists.
-pub fn fetch_limit(limit: i64, omit_total: bool) -> i64 {
-    if omit_total { limit + 1 } else { limit }
-}
-
-/// The page out of `rows`, and the next token. Go's `core.TrimPage`.
-pub fn trim_page<T>(
-    mut rows: Vec<T>,
-    offset: i64,
-    limit: i64,
-    total: i64,
-    omit_total: bool,
-) -> (Vec<T>, String) {
-    if !omit_total {
-        let token = encode_token(offset, rows.len() as i64, total);
-        return (rows, token);
-    }
-    if rows.len() as i64 > limit {
-        rows.truncate(limit as usize);
-        return (rows, (offset + limit).to_string());
-    }
-    (rows, String::new())
-}
-
-/// Fills the columns a driver supplies: on create a generated key left empty and both audit
-/// times, on update the update time. Go's `core.FillManaged`.
-pub fn fill_managed(res: &Resource, cols: &mut Row, on_create: bool) {
-    let now = Value::Timestamp(Utc::now());
-    for c in &res.columns {
-        let empty = cols.get(&c.name).is_none_or(Value::is_empty);
-        match c.generated {
-            Some(strategy) if on_create && empty => {
-                cols.insert(c.name.clone(), Value::String(generate_id(strategy)));
-            }
-            _ if on_create && (c.auto_create || c.auto_update) => {
-                cols.insert(c.name.clone(), now.clone());
-            }
-            _ if !on_create && c.auto_update => {
-                cols.insert(c.name.clone(), now.clone());
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Whether any column is filled by the driver.
-pub fn has_managed(res: &Resource) -> bool {
-    res.columns.iter().any(|c| c.managed())
-}
-
-/// A new identifier. Go's `core.GenerateID`.
-pub fn generate_id(strategy: Generated) -> String {
-    match strategy {
-        Generated::Uuid => uuid::Uuid::new_v4().to_string(),
-        Generated::Ulid => ulid::Ulid::generate().to_string(),
-    }
 }
