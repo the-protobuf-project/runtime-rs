@@ -54,3 +54,9 @@ required-features = ["live-tests"]
 name = "dragonfly_live"
 path = "tests/dragonfly_live.rs"
 required-features = ["live-tests"]
+
+[[bench]]
+name = "redis_paths"
+path = "benches/redis_paths.rs"
+harness = false
+required-features = ["live-tests"]

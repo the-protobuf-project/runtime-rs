@@ -1,7 +1,8 @@
 //! Shared bounded fallbacks for strategy operations spanning many entries.
 //!
-//! These helpers preserve result order, use Bulk in bounded batches when
-//! available, and cap concurrent Driver calls otherwise. SetScanner processes
+//! These helpers preserve result order, use Bulk in 256-key batches when
+//! available, at most `concurrency` of them in flight, and cap concurrent
+//! Driver calls otherwise. SetScanner processes
 //! large membership sets page by page without changing public behavior.
 
 use std::{collections::HashSet, sync::Arc};
@@ -160,7 +161,11 @@ async fn cleanup_stale(sets: &Arc<dyn Sets>, set_key: &str, stale: &[String]) {
 /// item. Every other Driver failure aborts rather than returning a misleading
 /// partial listing.
 ///
-/// **Cost**: Up to one Driver read per key with bounded concurrency.
+/// **Cost**: With Bulk, one round trip per 256 keys, up to `concurrency` of
+/// them in flight at once over the multiplexed connection, so a long listing
+/// costs about one round trip's latency rather than one per batch; results are
+/// still combined in key order. Without Bulk, up to one Driver read per key
+/// with the same bound.
 pub(crate) async fn get_all(
     driver: Arc<dyn Driver>,
     bulk: Option<&dyn Bulk>,
@@ -168,13 +173,18 @@ pub(crate) async fn get_all(
     keys: Vec<String>,
 ) -> Result<Vec<Vec<u8>>> {
     if let Some(bulk) = bulk {
-        let mut bodies = Vec::with_capacity(keys.len());
-        for batch in keys.chunks(BULK_BATCH_SIZE) {
-            let values = bulk.get_many(batch).await?;
-            validate_count("get_many", batch.len(), values.len())?;
-            bodies.extend(values);
-        }
-        return Ok(bodies.into_iter().flatten().collect());
+        let batches: Vec<Vec<Option<Vec<u8>>>> = stream::iter(
+            // Built eagerly so the stream holds futures, not a closure: a
+            // closure over borrowed batches defeats Send inference in the
+            // async trait methods that call this.
+            keys.chunks(BULK_BATCH_SIZE)
+                .map(|batch| get_batch(bulk, batch))
+                .collect::<Vec<_>>(),
+        )
+        .buffered(concurrency.max(1))
+        .try_collect()
+        .await?;
+        return Ok(batches.into_iter().flatten().flatten().collect());
     }
 
     let bodies: Vec<Option<Vec<u8>>> = stream::iter(keys.into_iter().map(|key| {
@@ -194,7 +204,8 @@ pub(crate) async fn get_all(
     Ok(bodies.into_iter().flatten().collect())
 }
 
-/// Reports ordered liveness using Bulk batches or bounded per-key fallback.
+/// Reports ordered liveness using Bulk batches, up to `concurrency` in flight,
+/// or bounded per-key fallback.
 async fn exists_all(
     driver: Arc<dyn Driver>,
     bulk: Option<&dyn Bulk>,
@@ -202,13 +213,18 @@ async fn exists_all(
     keys: &[String],
 ) -> Result<Vec<bool>> {
     if let Some(bulk) = bulk {
-        let mut found = Vec::with_capacity(keys.len());
-        for batch in keys.chunks(BULK_BATCH_SIZE) {
-            let values = bulk.exists_many(batch).await?;
-            validate_count("exists_many", batch.len(), values.len())?;
-            found.extend(values);
-        }
-        return Ok(found);
+        let batches: Vec<Vec<bool>> = stream::iter(
+            // Built eagerly so the stream holds futures, not a closure: a
+            // closure over borrowed batches defeats Send inference in the
+            // async trait methods that call this.
+            keys.chunks(BULK_BATCH_SIZE)
+                .map(|batch| exists_batch(bulk, batch))
+                .collect::<Vec<_>>(),
+        )
+        .buffered(concurrency.max(1))
+        .try_collect()
+        .await?;
+        return Ok(batches.into_iter().flatten().collect());
     }
 
     stream::iter(keys.iter().cloned().map(|key| {
@@ -218,6 +234,24 @@ async fn exists_all(
     .buffered(concurrency.max(1))
     .try_collect()
     .await
+}
+
+/// One ordered, count-checked Bulk read of at most [`BULK_BATCH_SIZE`] keys.
+///
+/// A named function rather than a closure so the future's lifetimes are tied
+/// to its arguments, which a stream of borrowed batches inside an async trait
+/// method requires.
+async fn get_batch(bulk: &dyn Bulk, batch: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    let values = bulk.get_many(batch).await?;
+    validate_count("get_many", batch.len(), values.len())?;
+    Ok(values)
+}
+
+/// One ordered, count-checked Bulk liveness check; see [`get_batch`].
+async fn exists_batch(bulk: &dyn Bulk, batch: &[String]) -> Result<Vec<bool>> {
+    let values = bulk.exists_many(batch).await?;
+    validate_count("exists_many", batch.len(), values.len())?;
+    Ok(values)
 }
 
 /// Rejects malformed capability responses before ordered results are combined.
@@ -384,6 +418,28 @@ mod tests {
         assert_eq!(batches.len(), 2);
         assert_eq!(batches[0].len(), 256);
         assert_eq!(batches[1].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_all_bulk_batches_in_flight_together_keep_key_order() {
+        let bulk = RecordingBulk {
+            get_batches: Mutex::new(Vec::new()),
+            short_get: false,
+        };
+        let keys: Vec<String> = (0..1000).map(|index| format!("key-{index}")).collect();
+
+        let values = get_all(
+            Arc::new(ConcurrencyDriver::new()),
+            Some(&bulk),
+            4,
+            keys.clone(),
+        )
+        .await
+        .unwrap();
+
+        let expected: Vec<Vec<u8>> = keys.iter().map(|key| key.clone().into_bytes()).collect();
+        assert_eq!(values, expected);
+        assert_eq!(bulk.get_batches.lock().await.len(), 4);
     }
 
     #[tokio::test]
