@@ -18,6 +18,7 @@ impl Expr {
                 .get(&c.column)
                 .and_then(|have| compare(have, &c.value))
                 .is_some_and(|o| c.op.holds(o)),
+            Expr::Null(column) => row.get(column).is_none_or(|v| *v == Value::Null),
             Expr::Contains(c) => match row.get(&c.column) {
                 Some(Value::String(s)) => s.to_lowercase().contains(&c.value.to_lowercase()),
                 _ => false,

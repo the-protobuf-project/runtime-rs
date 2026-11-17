@@ -110,8 +110,7 @@ impl<R: Runtime> Driver for TauriStoreDriver<R> {
     }
 
     async fn count(&self, res: &Resource, opts: &ListOptions) -> Result<i64> {
-        self.read(|s| Ok(s.matching(res, &opts.filter)?.len() as i64))
-            .await
+        self.read(|s| Ok(s.matching(res, opts)?.len() as i64)).await
     }
 
     async fn exists(&self, res: &Resource, key: &str) -> Result<bool> {

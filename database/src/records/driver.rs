@@ -40,7 +40,7 @@ pub trait Driver: Send + Sync {
 
 /// Paging, ordering and filtering for `list` and `count`, shaped after AIP-132 rather than
 /// limit/offset. Go's `store.ListOptions`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ListOptions {
     /// Caps the records returned; `<= 0` means the driver default.
     pub page_size: i32,
@@ -51,6 +51,12 @@ pub struct ListOptions {
     /// An AIP-160 filter expression, parsed by [`core::filter::parse`](super::core::filter::parse).
     /// Empty matches every record. Redis refuses any filter.
     pub filter: String,
+    /// Restrictions added in code rather than written in `filter`, ANDed with it: what the
+    /// filter grammar cannot say, such as [`Expr::Null`](super::core::filter::Expr::Null).
+    /// Every provider that filters applies them, through
+    /// [`core::filter::listing`](super::core::filter::listing); Redis refuses them as it
+    /// refuses a filter. Columns are backend names.
+    pub restrict: Vec<super::core::filter::Expr>,
     /// Skips counting the total, which is then -1: a backend reads one row past the page to
     /// learn whether another exists instead of scanning every match.
     pub omit_total: bool,

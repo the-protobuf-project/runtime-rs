@@ -171,7 +171,7 @@ mod mysql {
                 }
                 .boxed()
             });
-            case(db, raw, String::new())
+            case(db, raw, "\"lib_v1\".\"novel_format\"".into())
         })
         .await;
     }

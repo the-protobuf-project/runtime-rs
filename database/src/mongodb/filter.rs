@@ -7,7 +7,7 @@ use super::codec::to_bson;
 use super::error::invalid;
 use crate::Result;
 use crate::records::core::filter::{self, Comparison, Expr, Op};
-use crate::records::{Resource, Value};
+use crate::records::{ListOptions, Resource, Value};
 
 /// The Mongo query for `expr`: [`filter::parse`]'s tree, each column mapped to its field
 /// (`_id` for the key) and each value encoded as the column stores it, so a number compares
@@ -17,8 +17,8 @@ use crate::records::{Resource, Value};
 /// `NOT coalesce(x, false)`, holds where `x` meets a null or missing field. `!=` is
 /// `$nin: [value, null]`, not `$ne`, so a null field fails it as in SQL. Contains is a
 /// case-insensitive `$regex` of the escaped value.
-pub(super) fn parse_filter(res: &Resource, expr: &str) -> Result<Document> {
-    match filter::parse(res, expr).map_err(|e| invalid(e.to_string()))? {
+pub(super) fn parse_filter(res: &Resource, opts: &ListOptions) -> Result<Document> {
+    match filter::listing(res, opts).map_err(|e| invalid(e.to_string()))? {
         None => Ok(Document::new()),
         Some(e) => query(res, &e),
     }
@@ -42,6 +42,8 @@ fn query(res: &Resource, e: &Expr) -> Result<Document> {
         Expr::Or(es) => doc! { "$or": all(es)? },
         Expr::Not(inner) => doc! { "$nor": [query(res, inner)?] },
         Expr::Compare(c) => doc! { field(&c.column): comparison(c)? },
+        // `null` matches a null field and a missing one, as SQL's `IS NULL` does a NULL.
+        Expr::Null(column) => doc! { field(column): Bson::Null },
         Expr::Contains(c) => {
             doc! { field(&c.column): { "$regex": regex_escape(&c.value), "$options": "i" } }
         }

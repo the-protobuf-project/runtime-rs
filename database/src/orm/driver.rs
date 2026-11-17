@@ -129,7 +129,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
     }
 
     async fn list(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
-        let cond = query::filter(E::DIALECT, res, &opts.filter)?;
+        let cond = query::filter(E::DIALECT, res, opts)?;
         let total = match opts.omit_total {
             true => core::NO_TOTAL,
             false => self.count(res, opts).await?,
@@ -159,7 +159,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
     async fn count(&self, res: &Resource, opts: &ListOptions) -> Result<i64> {
         let mut q = Query::select();
         q.expr(Expr::col(Asterisk).count()).from(self.table(res));
-        q.cond_where(query::filter(E::DIALECT, res, &opts.filter)?);
+        q.cond_where(query::filter(E::DIALECT, res, opts)?);
         self.conn.count(self.sql(&q)).await
     }
 

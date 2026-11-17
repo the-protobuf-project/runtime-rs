@@ -32,17 +32,24 @@ pub(super) fn resolve(res: &Resource, src: &str, node: Node) -> Result<Expr> {
                 return Err(refuse(src, at, format!("cannot filter by {field:?}")));
             };
             let unsupported = || refuse(src, at, format!("unsupported operator for {field:?}"));
+            // An enum stored by its label filters as Go's enum fields do: `=` and `!=`, by
+            // number or value name, compared with the label it is stored as.
+            let kind = match col.labels.is_empty() {
+                true => col.kind,
+                false => Kind::Enum,
+            };
             let typed = |kind| match (kind, value.as_str()) {
                 (Kind::Timestamp, v) => timestamp(v),
+                (Kind::Enum, v) if !col.labels.is_empty() => label(res, col, v),
                 (Kind::Enum, v) => enum_number(res, col, v),
                 (kind, v) => coerce(kind, v),
             };
             // Go parses an ordered or boolean value before it checks the operator.
-            let early = match col.kind {
+            let early = match kind {
                 Kind::String | Kind::Unknown | Kind::Bytes | Kind::Enum => None,
                 kind => Some(typed(kind).map_err(|e| refuse(src, value_at, e))?),
             };
-            let op = match (col.kind, op) {
+            let op = match (kind, op) {
                 (Kind::String | Kind::Unknown, ":") => {
                     let column = col.name.clone();
                     return Ok(Expr::Contains(Contains { column, value }));
@@ -61,7 +68,7 @@ pub(super) fn resolve(res: &Resource, src: &str, node: Node) -> Result<Expr> {
             };
             let value = match early {
                 Some(v) => v,
-                None => typed(col.kind).map_err(|e| refuse(src, value_at, e))?,
+                None => typed(kind).map_err(|e| refuse(src, value_at, e))?,
             };
             let (column, kind) = (col.name.clone(), col.kind);
             Ok(Expr::Compare(Comparison {
@@ -124,6 +131,18 @@ fn enum_number(res: &Resource, col: &Column, v: &str) -> std::result::Result<Val
         .find(|x| x.name().strip_prefix(&prefix).unwrap_or(x.name()) == want)
         .map(|x| Value::Int(i64::from(x.number())))
         .ok_or_else(|| format!("{v:?} is not a value of enum {}", e.full_name()))
+}
+
+/// The label an enum stored by label holds for value `v`, read as [`enum_number`] reads it.
+fn label(res: &Resource, col: &Column, v: &str) -> std::result::Result<Value, String> {
+    let Value::Int(n) = enum_number(res, col, v)? else {
+        unreachable!("enum_number yields an integer")
+    };
+    i32::try_from(n)
+        .ok()
+        .and_then(|n| col.label_of(n))
+        .map(|l| Value::String(l.to_owned()))
+        .ok_or_else(|| format!("{v:?} is not a stored value of {:?}", col.name))
 }
 
 /// `UnitType` as `UNIT_TYPE`. Go's `naming.ScreamingSnake`.

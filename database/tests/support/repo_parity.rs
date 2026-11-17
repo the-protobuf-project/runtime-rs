@@ -17,6 +17,11 @@ use futures::future::BoxFuture;
 use super::library::{self, Novel, Writer, novel};
 use crate::fails;
 
+#[path = "repo_parity_enums.rs"]
+mod enums;
+#[allow(unused_imports)] // the suites without parity cases include this module too
+pub use enums::enums_store_their_label;
+
 /// One stored column, as text: `(table, column, name)`; `None` for null.
 pub type Raw = Arc<dyn Fn(&str, &str, &str) -> BoxFuture<'static, Option<String>> + Send + Sync>;
 
@@ -127,42 +132,6 @@ pub fn references_store_the_bare_id(db: DB, raw: Raw, t: String) -> BoxFuture<'s
             .await
             .unwrap();
         assert_eq!(raw("novels", "author", name).await.as_deref(), Some(""));
-    }
-    .boxed()
-}
-
-/// An enum is stored as its label, read back as its number, filtered by its label; the
-/// unspecified zero is stored as null.
-pub fn enums_store_their_label(db: DB, raw: Raw, t: String) -> BoxFuture<'static, ()> {
-    async move {
-        let repo = novels(&db, &t).await;
-        let ebook = repo
-            .create(&Novel {
-                format: 3,
-                ..novel("p1", "n1", "Dune")
-            })
-            .await
-            .unwrap();
-        assert_eq!(ebook.format, 3);
-        assert_eq!(
-            raw("novels", "format", "publishers/p1/novels/n1")
-                .await
-                .as_deref(),
-            Some("EBOOK")
-        );
-        let plain = repo.create(&novel("p1", "n2", "Emma")).await.unwrap();
-        assert_eq!(plain.format, 0);
-        assert_eq!(
-            raw("novels", "format", "publishers/p1/novels/n2").await,
-            None
-        );
-        let input = database::repository::ListInput {
-            filter: "format = EBOOK".into(),
-            ..Default::default()
-        };
-        let found = repo.list(&input).await.unwrap().items;
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].name, "publishers/p1/novels/n1");
     }
     .boxed()
 }

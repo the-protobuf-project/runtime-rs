@@ -60,7 +60,8 @@ async fn parity(case: Parity) {
         }
         .boxed()
     });
-    case(db, raw, String::new()).await;
+    // A Postgres enum type, as generated: SQLite must store text in its place.
+    case(db, raw, "\"lib_v1\".\"novel_format\"".into()).await;
 }
 
 crate::repository_suite!(run);

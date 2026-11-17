@@ -5,10 +5,10 @@
 use sea_query::{Alias, BinOper, Condition, Expr as Sql, ExprTrait, Func, LikeExpr, Order};
 
 use super::Dialect;
-use super::values::bind;
+use super::values::{self, bind};
 use crate::Result;
 use crate::records::core::filter::{self, Expr, Op};
-use crate::records::{Resource, core};
+use crate::records::{ListOptions, Resource, core};
 
 /// An AIP-160 expression as a bound predicate, as Go's gorm engine writes it: columns
 /// resolved through `res` by [`filter::parse`] (an undeclared one is refused by name rather
@@ -16,19 +16,20 @@ use crate::records::{Resource, core};
 ///
 /// - `AND` and `OR` are sea-query's `all` and `any`.
 /// - `NOT x` is `NOT COALESCE(x, FALSE)`, so it holds where `x` compares a null column.
+/// - A restriction's [`Expr::Null`] is `column IS NULL`.
 /// - Contains is `LOWER(column) LIKE '%value%' ESCAPE '!'`, the value lowercased and its
 ///   `%`, `_` and `!` escaped: Go's `ILIKE`, on every dialect.
-pub(crate) fn filter(d: Dialect, res: &Resource, expr: &str) -> Result<Condition> {
-    match filter::parse(res, expr)? {
+pub(crate) fn filter(d: Dialect, res: &Resource, opts: &ListOptions) -> Result<Condition> {
+    match filter::listing(res, opts)? {
         None => Ok(Condition::all()),
-        Some(e) => condition(d, &e),
+        Some(e) => condition(d, res, &e),
     }
 }
 
-fn condition(d: Dialect, e: &Expr) -> Result<Condition> {
+fn condition(d: Dialect, res: &Resource, e: &Expr) -> Result<Condition> {
     let fold = |mut cond: Condition, all: &[Expr]| -> Result<Condition> {
         for e in all {
-            cond = cond.add(condition(d, e)?);
+            cond = cond.add(condition(d, res, e)?);
         }
         Ok(cond)
     };
@@ -37,12 +38,14 @@ fn condition(d: Dialect, e: &Expr) -> Result<Condition> {
         Expr::And(all) => fold(Condition::all(), all)?,
         Expr::Or(any) => fold(Condition::any(), any)?,
         Expr::Not(inner) => {
-            let held = Sql::from(condition(d, inner)?);
+            let held = Sql::from(condition(d, res, inner)?);
             one(Func::coalesce([held, Sql::val(false)]).not())
         }
         Expr::Compare(c) => {
-            one(Sql::col(Alias::new(&c.column)).binary(operator(c.op), bind(d, c.kind, &c.value)?))
+            let v = values::expr(d, res.lookup_column(&c.column), bind(d, c.kind, &c.value)?);
+            one(Sql::col(Alias::new(&c.column)).binary(operator(c.op), v))
         }
+        Expr::Null(column) => one(Sql::col(Alias::new(column)).is_null()),
         Expr::Contains(c) => {
             let pattern = format!("%{}%", escape(&c.value.to_lowercase()));
             let lower = Sql::from(Func::lower(Sql::col(Alias::new(&c.column))));

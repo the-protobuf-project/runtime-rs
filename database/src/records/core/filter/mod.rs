@@ -37,7 +37,7 @@ pub(crate) mod syntax;
 pub use eval::compare;
 pub use syntax::MAX_DEPTH;
 
-use crate::records::{Kind, Resource, Value};
+use crate::records::{Kind, ListOptions, Resource, Value};
 use crate::{Error, Result};
 
 /// A filter, resolved: columns are the backend names [`Resource`] declares, values are typed
@@ -55,6 +55,11 @@ pub enum Expr {
     /// The string column holds `value`, ignoring case: `column : value`, or one column of a
     /// free-text term. False on a null column. `%`, `_` and `*` are literal.
     Contains(Contains),
+    /// The column, by backend name, is null or absent. Never read from filter text, whose
+    /// grammar, as Go's, has no null test: a caller restricts with it in code
+    /// ([`ListOptions::restrict`](crate::records::ListOptions::restrict)), as Go's
+    /// repository adds `delete_time IS NULL` outside `filterx.Parse`.
+    Null(String),
 }
 
 /// One `column op value` comparison.
@@ -130,6 +135,18 @@ pub fn parse(res: &Resource, text: &str) -> Result<Option<Expr>> {
     syntax::parse(text)?
         .map(|node| resolve::resolve(res, text, node))
         .transpose()
+}
+
+/// What a listing selects: `opts.filter` parsed over `res`, and every one of
+/// `opts.restrict`, all ANDed; `None` when neither says anything.
+pub fn listing(res: &Resource, opts: &ListOptions) -> Result<Option<Expr>> {
+    let mut all: Vec<Expr> = parse(res, &opts.filter)?.into_iter().collect();
+    all.extend(opts.restrict.iter().cloned());
+    Ok(match all.len() {
+        0 => None,
+        1 => all.pop(),
+        _ => Some(Expr::And(all)),
+    })
 }
 
 /// The error for what `src` holds at `at`.

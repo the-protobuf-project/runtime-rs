@@ -71,8 +71,8 @@ pub(super) fn descending(order_by: &str, res: &Resource) -> bool {
 
 /// Refuses a filter rather than ignoring it: Redis has no query language, and returning the
 /// unfiltered set is the one outcome the contract forbids. Go's `refuseFilter`.
-pub(super) fn refuse_filter(filter: &str) -> Result<()> {
-    if filter.trim().is_empty() {
+pub(super) fn refuse_filter(filter: &str, restricted: bool) -> Result<()> {
+    if filter.trim().is_empty() && !restricted {
         return Ok(());
     }
     Err(Error::Unimplemented {
@@ -144,8 +144,8 @@ mod tests {
         }
         assert!(!descending("title desc", &res));
         assert!(!descending("", &res));
-        refuse_filter("  ").unwrap();
-        let err = refuse_filter("a = 1").unwrap_err();
+        refuse_filter("  ", false).unwrap();
+        let err = refuse_filter("a = 1", false).unwrap_err();
         assert!(err.to_string().contains("AIP-160"), "{err}");
         assert!(matches!(
             err,

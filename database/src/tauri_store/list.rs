@@ -11,11 +11,11 @@ use crate::records::core::{self, filter};
 use crate::records::{ListOptions, ListResult, Resource, Row, Value, columns_to_message};
 
 impl<R: tauri::Runtime> Inner<R> {
-    /// Every record of `res` matching `filter`, in store order: the [`filter::parse`] tree
-    /// evaluated over each row by [`filter::Expr::matches`], the reference the translating
-    /// providers agree with.
-    pub(super) fn matching(&self, res: &Resource, filter: &str) -> Result<Vec<Row>> {
-        let expr = filter::parse(res, filter)?;
+    /// Every record of `res` matching `opts`' filter and restrictions, in store order: the
+    /// [`filter::listing`] tree evaluated over each row by [`filter::Expr::matches`], the
+    /// reference the translating providers agree with.
+    pub(super) fn matching(&self, res: &Resource, opts: &ListOptions) -> Result<Vec<Row>> {
+        let expr = filter::listing(res, opts)?;
         let prefix = self.keys.records(res);
         let mut rows = Vec::new();
         for (key, json) in self.store.entries() {
@@ -31,7 +31,7 @@ impl<R: tauri::Runtime> Inner<R> {
     }
 
     pub(super) fn list(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
-        let mut rows = self.matching(res, &opts.filter)?;
+        let mut rows = self.matching(res, opts)?;
         let order = core::order_by(res, &opts.order_by);
         rows.sort_by(|a, b| {
             order.iter().fold(Ordering::Equal, |acc, (col, desc)| {

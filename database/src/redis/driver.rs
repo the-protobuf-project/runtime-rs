@@ -94,7 +94,7 @@ impl Driver for RedisDriver {
 
     /// How many records the resource holds, in O(1). A filter is refused.
     async fn count(&self, res: &Resource, opts: &ListOptions) -> Result<i64> {
-        refuse_filter(&opts.filter)?;
+        refuse_filter(&opts.filter, !opts.restrict.is_empty())?;
         redis::cmd("ZCARD")
             .arg(self.keys.ids(res))
             .query_async(&mut self.conn())

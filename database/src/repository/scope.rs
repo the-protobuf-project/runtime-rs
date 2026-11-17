@@ -10,11 +10,11 @@ use crate::{Error, Result};
 pub(super) struct Scope {
     /// The parent's segments; empty for every record (no parent, or ids all `-`).
     pub(super) parent: Vec<String>,
-    /// A filter clause on the parent column, `publisher_id = "p"`, when the parent's own id
-    /// is known: Go's `Where("<parent>_id = ?", id)`. Without one, a non-empty `parent` is
-    /// matched against the records' names, `-` ids matching any: Go's `name LIKE`, which
-    /// the filter grammar cannot say.
-    pub(super) clause: Option<String>,
+    /// The parent column and the parent's id, `("publisher_id", "p")`, when that id is given:
+    /// Go's `Where("<parent>_id = ?", id)`, restricted in code. Without one, a non-empty
+    /// `parent` is matched against the records' names, `-` ids matching any: Go's
+    /// `name LIKE`, which no restriction here says.
+    pub(super) clause: Option<(String, String)>,
 }
 
 impl Names {
@@ -45,7 +45,7 @@ impl Names {
             return Ok(Scope::default());
         }
         let clause = match (&self.parent_column, last) {
-            (Some(column), id) if id != "-" => Some(format!("{column} = {}", quote(id))),
+            (Some(column), id) if id != "-" => Some((column.clone(), id.to_owned())),
             _ => None,
         };
         Ok(Scope {
@@ -65,9 +65,4 @@ pub(super) fn under(parent: &[String], name: &str) -> bool {
             .zip(&parts)
             .enumerate()
             .all(|(i, (p, n))| p == n || (i % 2 == 1 && p == "-"))
-}
-
-/// `s` as a quoted filter value.
-fn quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('"', ""))
 }
