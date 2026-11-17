@@ -31,3 +31,4 @@ pub fn coerce(kind: Kind, raw: &str) -> std::result::Result<Value, String> {
         Kind::String | Kind::Unknown => Value::String(raw.to_owned()),
     })
 }
+

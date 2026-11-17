@@ -59,7 +59,7 @@ impl Driver for MongoDriver {
     async fn delete(&self, res: &Resource, key: &str) -> Result<()> {
         let coll = self.collection(res)?;
         let deleted = exec!(self, coll.delete_one(doc! { "_id": key_bson(res, key) }))
-            .map_err(|e| backend(format!("cannot delete {key}"), e))?;
+            .map_err(|e| write(format!("cannot delete {key}"), e))?;
         if deleted.deleted_count == 0 {
             return Err(Error::NotFound);
         }

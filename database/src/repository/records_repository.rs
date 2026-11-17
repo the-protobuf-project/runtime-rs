@@ -1,24 +1,30 @@
-//! [`Repository`] over any [`records`](crate::records) provider.
-//!
-//! The contract is fixed here so generators can target it; the method bodies are the
-//! implementation still to come and refuse until then.
+//! [`Repository`] over any [`records`](crate::records) provider: the trait's methods, each
+//! delegating to the module that implements it (`read`, `write`, `soft`).
 
 use std::marker::PhantomData;
 use std::sync::Arc;
 
 use prost::Message;
-use prost_reflect::ReflectMessage;
+use prost_reflect::{DynamicMessage, ReflectMessage};
 
-use super::{ListInput, Page, Repository, Rules};
+use super::shape::Shape;
+use super::{Hooks, ListInput, Page, Repository, Rules};
 use crate::records::{DB, Resource};
 use crate::{Error, Result};
 
 /// A [`Repository`] of `M` over a records [`DB`], whichever provider is behind it.
 pub struct RecordsRepository<M> {
-    db: DB,
-    resource: Arc<Resource>,
-    rules: Rules,
+    pub(super) db: DB,
+    pub(super) inner: Arc<Inner<M>>,
     _m: PhantomData<fn() -> M>,
+}
+
+/// What a write's transaction needs, shared with it.
+pub(super) struct Inner<M> {
+    pub(super) res: Arc<Resource>,
+    pub(super) rules: Rules,
+    pub(super) shape: Shape,
+    pub(super) hooks: Hooks<M>,
 }
 
 impl<M> RecordsRepository<M>
@@ -26,7 +32,9 @@ where
     M: ReflectMessage + Message + Default + Send + Sync + 'static,
 {
     /// `M`'s repository over `db`, stored as `resource` describes and behaving as `rules`
-    /// says. Fails when `resource` does not describe `M` or `rules` names a field `M` lacks.
+    /// says. Fails when `resource` does not describe `M`, when `rules` names a field `M`
+    /// lacks or the resource does not store, or when the etag is not a string or a
+    /// soft-delete time not a `google.protobuf.Timestamp`.
     pub fn new(db: &DB, resource: Arc<Resource>, rules: Rules) -> Result<Self> {
         let want = M::default().descriptor();
         if want.full_name() != resource.message.full_name() {
@@ -37,8 +45,7 @@ where
                 want.full_name()
             )));
         }
-        let fields = [&rules.etag, &rules.delete_time, &rules.expire_time];
-        for field in fields.into_iter().flatten().chain(&rules.output_only) {
+        for field in &rules.output_only {
             if want.get_field_by_name(field).is_none() {
                 return Err(Error::Invalid(format!(
                     "{} has no field {field:?}",
@@ -46,25 +53,74 @@ where
                 )));
             }
         }
+        let shape = Shape::new(&resource, &rules)?;
         Ok(Self {
             db: db.clone(),
-            resource,
-            rules,
+            inner: Arc::new(Inner {
+                res: resource,
+                rules,
+                shape,
+                hooks: Hooks::default(),
+            }),
             _m: PhantomData,
         })
     }
 
+    /// This repository running `hooks` around its calls, as Go's `With<Model>Hooks`.
+    pub fn with_hooks(self, hooks: Hooks<M>) -> Self {
+        let inner = &self.inner;
+        let shape = inner.shape.clone();
+        Self {
+            inner: Arc::new(Inner {
+                res: inner.res.clone(),
+                rules: inner.rules.clone(),
+                shape,
+                hooks,
+            }),
+            ..self
+        }
+    }
+
     /// The database, descriptor and rules, for what the trait does not cover.
     pub fn parts(&self) -> (&DB, &Resource, &Rules) {
-        (&self.db, &self.resource, &self.rules)
+        (&self.db, &self.inner.res, &self.inner.rules)
     }
 }
 
-fn pending(capability: &'static str) -> Error {
-    Error::Unimplemented {
-        backend: "repository",
-        capability,
+impl<M> Inner<M>
+where
+    M: ReflectMessage + Message + Default + Send + Sync + 'static,
+{
+    /// `msg` as `M`.
+    pub(super) fn decode(&self, msg: &DynamicMessage) -> Result<M> {
+        msg.transcode_to::<M>()
+            .map_err(|e| Error::Invalid(format!("decoding a {}: {e}", self.res.name)))
     }
+
+    /// `msg` as `M`, through the `after_read` hook: what every read returns.
+    pub(super) async fn read(&self, msg: &DynamicMessage) -> Result<M> {
+        let m = self.decode(msg)?;
+        match &self.hooks.after_read {
+            Some(h) => h(m).await,
+            None => Ok(m),
+        }
+    }
+
+    /// The `before_delete` hook, when there is one.
+    pub(super) async fn before_delete(&self, name: &str) -> Result<()> {
+        match &self.hooks.before_delete {
+            Some(h) => h(name.to_owned()).await,
+            None => Ok(()),
+        }
+    }
+}
+
+/// Refuses an empty resource name, which addresses nothing.
+pub(super) fn named(name: &str) -> Result<&str> {
+    if name.is_empty() {
+        return Err(Error::Invalid("a resource name is required".into()));
+    }
+    Ok(name)
 }
 
 #[async_trait::async_trait]
@@ -72,39 +128,49 @@ impl<M> Repository<M> for RecordsRepository<M>
 where
     M: ReflectMessage + Message + Default + Send + Sync + 'static,
 {
-    async fn create(&self, _: &M) -> Result<M> {
-        Err(pending("create"))
+    async fn create(&self, m: &M) -> Result<M> {
+        self.create_record(m).await
     }
 
-    async fn get(&self, _: &str) -> Result<M> {
-        Err(pending("get"))
+    async fn get(&self, name: &str) -> Result<M> {
+        let msg = self.db.get(&self.inner.res, named(name)?).await?;
+        self.inner.read(&msg).await
     }
 
-    async fn list(&self, _: &ListInput) -> Result<Page<M>> {
-        Err(pending("list"))
+    async fn list(&self, input: &ListInput) -> Result<Page<M>> {
+        self.list_records(input).await
     }
 
-    async fn count(&self, _: &ListInput) -> Result<i64> {
-        Err(pending("count"))
+    async fn count(&self, input: &ListInput) -> Result<i64> {
+        self.count_records(input).await
     }
 
-    async fn update(&self, _: &M, _: &[String]) -> Result<M> {
-        Err(pending("update"))
+    async fn update(&self, m: &M, paths: &[String]) -> Result<M> {
+        self.update_record(m, paths, false).await
     }
 
-    async fn update_output_only(&self, _: &M, _: &[String]) -> Result<M> {
-        Err(pending("update_output_only"))
+    async fn update_output_only(&self, m: &M, paths: &[String]) -> Result<M> {
+        if paths.is_empty() {
+            return Err(Error::Invalid(
+                "update_output_only needs the fields to write".into(),
+            ));
+        }
+        self.update_record(m, paths, true).await
     }
 
-    async fn delete(&self, _: &str, _: Option<&str>) -> Result<()> {
-        Err(pending("delete"))
+    async fn delete(&self, name: &str, if_match: Option<&str>) -> Result<()> {
+        self.delete_record(named(name)?, if_match.unwrap_or_default())
+            .await
     }
 
-    async fn undelete(&self, _: &str, _: Option<&str>) -> Result<M> {
-        Err(pending("undelete"))
+    async fn undelete(&self, name: &str, if_match: Option<&str>) -> Result<M> {
+        self.undelete_record(named(name)?, if_match.unwrap_or_default())
+            .await
     }
 
-    async fn purge(&self, _: &str) -> Result<()> {
-        Err(pending("purge"))
+    async fn purge(&self, name: &str) -> Result<()> {
+        let name = named(name)?;
+        self.inner.before_delete(name).await?;
+        self.db.delete(&self.inner.res, name).await
     }
 }

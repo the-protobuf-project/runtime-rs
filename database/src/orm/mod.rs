@@ -43,6 +43,7 @@ mod mysql;
 mod postgres;
 mod provider;
 mod query;
+mod read;
 mod rows;
 mod schema;
 #[cfg(feature = "orm-sqlite")]

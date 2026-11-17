@@ -108,6 +108,12 @@ impl records::Driver for Driver {
         })
     }
 
+    /// Read from the provider, never the cache: what a write is about to check must be what
+    /// is stored.
+    async fn get_for_update(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
+        self.next.get_for_update(res, key).await
+    }
+
     /// Overwrites a record and drops the cached copy.
     async fn update(&self, res: &Resource, msg: &DynamicMessage) -> Result<WriteResult> {
         let out = self.next.update(res, msg).await?;

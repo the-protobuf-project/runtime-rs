@@ -28,11 +28,20 @@
 //!   or an undelete of a live record), [`Error::Conflict`](crate::Error::Conflict), and
 //!   [`Error::Invalid`](crate::Error::Invalid) for a refused filter, mask or token.
 
+mod atomic;
+mod hooks;
+mod mask;
+mod read;
 mod records_repository;
+mod shape;
+mod soft;
+mod write;
 
 use std::time::Duration;
 
+pub use hooks::Hooks;
 pub use records_repository::RecordsRepository;
+pub use shape::new_etag;
 
 use crate::Result;
 

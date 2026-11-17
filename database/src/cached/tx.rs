@@ -136,6 +136,10 @@ impl records::Driver for Recorder {
         self.next.get(res, key).await
     }
 
+    async fn get_for_update(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
+        self.next.get_for_update(res, key).await
+    }
+
     async fn update(&self, res: &Resource, msg: &DynamicMessage) -> Result<WriteResult> {
         let out = self.next.update(res, msg).await?;
         self.wrote(res, key_of(res, msg));

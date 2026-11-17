@@ -17,6 +17,15 @@ pub trait Driver: Send + Sync {
     async fn create(&self, res: &Resource, msg: &DynamicMessage) -> Result<WriteResult>;
     /// The record under `key`; `NotFound` when there is none.
     async fn get(&self, res: &Resource, key: &str) -> Result<DynamicMessage>;
+    /// The record under `key`, locked against other writers until the transaction this
+    /// driver is bound to ends, where the backend locks rows (`SELECT ... FOR UPDATE` on
+    /// Postgres and MySQL). A read-check-write in a transaction uses it so two writers take
+    /// turns. Elsewhere it is [`get`](Self::get): outside a transaction, and on a backend
+    /// whose transactions already exclude a concurrent writer (SQLite, the Tauri store) or
+    /// refuse one (MongoDB's write conflicts).
+    async fn get_for_update(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
+        self.get(res, key).await
+    }
     /// Overwrites the record identified by `msg`'s primary key; `NotFound` when there is none.
     async fn update(&self, res: &Resource, msg: &DynamicMessage) -> Result<WriteResult>;
     /// Removes the record under `key`; `NotFound` when there is none.

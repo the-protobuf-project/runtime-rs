@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use prost_reflect::DynamicMessage;
-use sea_query::{Alias, Asterisk, Expr, ExprTrait, Query, SelectStatement, TableRef};
+use sea_query::{Alias, Asterisk, Expr, ExprTrait, Query, TableRef};
 use sea_query_sqlx::SqlxBinder;
 
 use super::engine::{Conn, Engine};
@@ -44,36 +44,20 @@ impl<E: Engine> SqlDriver<E> {
     }
 
     /// The table, schema-qualified when there is a schema. Go's `Driver.table`.
-    fn table(&self, res: &Resource) -> TableRef {
+    pub(super) fn table(&self, res: &Resource) -> TableRef {
         match self.schema_of(res) {
             "" => Alias::new(&res.table).into(),
             s => (Alias::new(s), Alias::new(&res.table)).into(),
         }
     }
 
-    fn sql(&self, q: &impl SqlxBinder) -> (String, sea_query_sqlx::SqlxValues) {
+    pub(super) fn sql(&self, q: &impl SqlxBinder) -> (String, sea_query_sqlx::SqlxValues) {
         q.build_sqlx(E::Builder::default())
     }
 
-    fn by_key(&self, res: &Resource, key: &str) -> Result<Expr> {
+    pub(super) fn by_key(&self, res: &Resource, key: &str) -> Result<Expr> {
         let (pk, v) = values::key(E::DIALECT, res, key)?;
         Ok(Expr::col(Alias::new(pk)).eq(v))
-    }
-
-    /// Rows of a `SELECT *` as column maps keyed by the descriptor. Go's `fetch`.
-    async fn fetch(&self, res: &Resource, q: &SelectStatement) -> Result<Vec<Row>> {
-        let rows = self.conn.fetch(self.sql(q)).await?;
-        rows.iter()
-            .map(|row| {
-                let mut out = Row::new();
-                for col in &res.columns {
-                    if let Some(v) = E::decode(row, col)? {
-                        out.insert(col.name.clone(), v);
-                    }
-                }
-                Ok(out)
-            })
-            .collect()
     }
 
     fn values(&self, res: &Resource, cols: &Row) -> Result<Vec<(Alias, sea_query::Value)>> {
@@ -100,15 +84,12 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
     }
 
     async fn get(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
-        let mut q = Query::select();
-        q.column(Asterisk)
-            .from(self.table(res))
-            .and_where(self.by_key(res, key)?)
-            .limit(1);
-        match self.fetch(res, &q).await?.first() {
-            Some(row) => records::columns_to_message(res, row),
-            None => Err(Error::NotFound),
-        }
+        self.read(res, key, false).await
+    }
+
+    /// `FOR UPDATE` inside a transaction; SQLite, which locks the database instead, has none.
+    async fn get_for_update(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
+        self.read(res, key, matches!(self.conn, Conn::Tx(..))).await
     }
 
     async fn update(&self, res: &Resource, msg: &DynamicMessage) -> Result<WriteResult> {
