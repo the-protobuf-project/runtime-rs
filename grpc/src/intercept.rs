@@ -530,10 +530,11 @@ fn decode_typed<M: prost::Message + Default>(
 ///
 /// A set that does not decode is logged and skipped rather than failing the start: it is
 /// reflection's input too, and a bad one should cost [`UnaryCall::message`], not the server.
+/// Editions files are lowered first, as prost-reflect cannot read them itself.
 pub(crate) fn descriptor_pool(sets: &[&'static [u8]]) -> DescriptorPool {
     let mut pool = DescriptorPool::new();
     for set in sets {
-        if let Err(err) = pool.decode_file_descriptor_set(*set) {
+        if let Err(err) = protovalidate::descriptors::decode_file_descriptor_set(&mut pool, set) {
             tracing::warn!(error = %err, "gRPC: a descriptor set did not decode; skipping it");
         }
     }

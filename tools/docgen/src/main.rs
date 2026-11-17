@@ -448,10 +448,10 @@ fn render(ws: &Workspace) -> String {
     b.push_str("just docs-check   # verify it is current (also runs in CI)\n");
     b.push_str("```\n");
     b.push_str(
-        "\nUse the Rust version declared in [Cargo.toml](Cargo.toml). Install `protoc` for\n",
+        "\nUse the Rust version declared in [Cargo.toml](Cargo.toml). Install `protoc` only\n",
     );
-    b.push_str("validation dependencies and explicit test-fixture regeneration. Run commands\n");
-    b.push_str("from the workspace root unless a guide says otherwise.\n\n");
+    b.push_str("for explicit test-fixture regeneration. Run commands from the workspace root\n");
+    b.push_str("unless a guide says otherwise.\n\n");
     b.push_str("```bash\ncargo test --workspace\ncargo test --workspace --doc\ncargo doc --workspace --no-deps\n```\n\n");
     b.push_str("[Developer tooling](tools/README.md) maintains this generated index.\n");
     b.push_str(

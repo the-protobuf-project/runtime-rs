@@ -104,9 +104,9 @@ just docs         # regenerate this README from Cargo metadata
 just docs-check   # verify it is current (also runs in CI)
 ```
 
-Use the Rust version declared in [Cargo.toml](Cargo.toml). Install `protoc` for
-validation dependencies and explicit test-fixture regeneration. Run commands
-from the workspace root unless a guide says otherwise.
+Use the Rust version declared in [Cargo.toml](Cargo.toml). Install `protoc` only
+for explicit test-fixture regeneration. Run commands from the workspace root
+unless a guide says otherwise.
 
 ```bash
 cargo test --workspace

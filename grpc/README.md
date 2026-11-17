@@ -224,8 +224,7 @@ own, because a layered service no longer carries the generated `NamedService`.
 ## Develop and verify
 
 Run from the workspace root using the Rust version in [Cargo.toml](../Cargo.toml).
-Install `protoc` for dependencies that compile validation protos and for
-explicit fixture regeneration. Checked-in shop fixtures avoid regenerating
+Install `protoc` only for explicit fixture regeneration. Checked-in shop fixtures avoid regenerating
 application test code during ordinary builds.
 
 ```bash

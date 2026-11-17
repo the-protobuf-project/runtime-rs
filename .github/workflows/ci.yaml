@@ -70,11 +70,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # prost-protovalidate-types compiles buf/validate/validate.proto in its
-      # build script, so tpp-grpc cannot build without protoc on the PATH.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Build
         run: cargo build -p ${{ matrix.crate }} --all-targets
 
@@ -95,11 +90,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-
-      # prost-protovalidate-types compiles buf/validate/validate.proto in its
-      # build script, so tpp-grpc cannot build without protoc on the PATH.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Build
         run: cargo build --workspace --all-targets
@@ -124,11 +114,6 @@ jobs:
           components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
-
-      # prost-protovalidate-types compiles buf/validate/validate.proto in its
-      # build script, so tpp-grpc cannot build without protoc on the PATH.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Format check
         run: cargo fmt --all --check
@@ -163,11 +148,6 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # prost-protovalidate-types compiles buf/validate/validate.proto in its
-      # build script, so tpp-grpc cannot build without protoc on the PATH.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
-
       - name: Build docs (warnings as errors)
         env:
           RUSTDOCFLAGS: "-D warnings"
@@ -194,11 +174,6 @@ jobs:
           toolchain: ${{ needs.detect-crates.outputs.msrv }}
 
       - uses: Swatinem/rust-cache@v2
-
-      # prost-protovalidate-types compiles buf/validate/validate.proto in its
-      # build script, so tpp-grpc cannot build without protoc on the PATH.
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
 
       - name: Build with MSRV toolchain
         run: cargo build --workspace --all-targets --locked
