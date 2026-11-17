@@ -48,6 +48,8 @@
 
 pub mod arrow;
 mod buffered;
+#[cfg(feature = "cached")]
+pub mod cached;
 mod collection;
 #[cfg(feature = "influxdb")]
 pub mod influxdb;

@@ -35,7 +35,9 @@ append duplicate rows to the Arrow copy while InfluxDB merges point identities.
 [InfluxDB](influxdb/README.md) maps requests to SDK writes/Flight SQL;
 [Arrow](arrow/README.md) captures local columnar segments;
 [ingest](ingest/README.md) manages bounded background work;
-[observe](observe/README.md) wraps every capability with shared signals.
+[observe](observe/README.md) wraps every capability with shared signals;
+`cached/` (feature `cached`) puts a tpp-cache read-through cache in front of a
+records DB, invalidating on every write and after every committed transaction.
 Missing backend capabilities refuse by name rather than disappearing.
 
 ```bash

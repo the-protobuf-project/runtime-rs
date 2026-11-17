@@ -7,7 +7,9 @@ from Cargo metadata, fans out per-crate build/test, verifies the combined
 workspace, tests tpp-database's feature-gated SQL backend (SQLite in-process,
 then Postgres and MySQL as service containers), checks formatting/clippy (including excluded docgen), builds docs
 with warnings denied, checks the generated README, builds at MSRV, and audits
-dependencies. The final `ci-gate` requires every listed prerequisite to pass.
+dependencies. `database-cached` lints, documents and tests tpp-database's
+off-by-default `cached` feature, its live suite against a Redis service on
+`127.0.0.1:16379`. The final `ci-gate` requires every listed prerequisite to pass.
 
 Use the corresponding local commands during development:
 
@@ -17,6 +19,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 just docs-check
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml up -d --wait redis
+cargo test -p tpp-database --features cached,live-tests --test cached --test cached_capabilities --test cached_live
+docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
 ```
 
 `release.yaml` responds to workspace `vX.Y.Z` or crate-scoped `crate/vX.Y.Z`

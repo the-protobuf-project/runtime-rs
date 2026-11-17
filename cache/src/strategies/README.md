@@ -40,7 +40,10 @@ partial backend failures remain possible.
 `aside.rs` reads a versioned envelope distinguishing a value, remembered
 absence, and its freshness deadline. Fresh hits return immediately. Cold
 misses join one in-process load (`flight.rs`); optional fenced claims reduce
-duplicate work across processes. Loader `NotFound` can be remembered. Stale
+duplicate work across processes. Loader `NotFound` can be remembered; any
+other loader error reaches every collapsed caller unchanged and is not cached,
+and `CacheError::Loader` carries a foreign one so its owner can downcast it
+(database's `cached` returns its store errors typed this way). Stale
 values may return while `refresher.rs` admits one bounded background refresh.
 When capacity is full, refresh is declined rather than queued; later reads can
 retry. Close stops admission and drains accepted refresh work.
