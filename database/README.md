@@ -323,6 +323,40 @@ page with `omit_total`; a filter is refused by name, as Go refuses it.
 failure. Schema always exists, `drop_schema` walks the resource's keys, and
 transactions are refused. Live tests: [docker](docker/README.md).
 
+## Tauri store records (`database::tauri_store`, feature `tauri-store`)
+
+For desktop and mobile apps: records in a
+[tauri-plugin-store](https://v2.tauri.app/plugin/store/) file in the app's data
+directory. runtime-go has no counterpart, since Tauri is Rust's; the key layout
+follows the Redis backend's, with the selected database as a key prefix, so one
+file serves many tenants.
+
+```rust,ignore
+tauri::Builder::default()
+    .plugin(tauri_plugin_store::Builder::default().build())
+    .setup(|app| {
+        let provider = TauriStoreProvider::open(app.handle(), "records.json")?;
+        let db = tauri::async_runtime::block_on(provider.set_database(""))?;
+        app.manage(db);
+        Ok(())
+    });
+```
+
+| | |
+|---|---|
+| Durability | Each write is saved before it returns; `.durable(false)` leaves saving to the plugin's autosave or `DB::close`. The plugin writes the file in place, so a crash mid-save can truncate it. |
+| Uniqueness | Unique values are reserved under their own keys, checked and written under the store's lock: race-free within the process, not across processes sharing a file. |
+| Transactions | The work holds the lock; commit is one save, rollback restores the selected database's keys. Nesting is refused. |
+| Listing | Filters, `order_by` and paging run in memory with the shared `core` subset; nulls sort first. |
+| Bulk | `create_many` is all or nothing, in one save. |
+| Watching | Refused: the plugin's change events go to the webview. |
+
+`TauriStoreProvider::open` turns the plugin's autosave off so a transaction
+reaches the file only when it commits; `TauriStoreProvider::new` takes a store
+you built. On Linux Tauri links GTK whatever its features, so building
+`tauri-store` needs `libgtk-3-dev`. The tests run on Tauri's mock runtime:
+`cargo test -p tpp-database --features tauri-store --test tauri_store`.
+
 ## Examples and telemetry
 
 - [examples/influxdb](examples/influxdb/README.md): the full InfluxDB workflow
@@ -348,7 +382,7 @@ and [tests](tests/README.md).
 ```bash
 cargo test -p tpp-database
 cargo test -p tpp-database --features orm   # SQLite in-process
-cargo doc -p tpp-database --no-deps --all-features
+cargo doc -p tpp-database --no-deps --all-features   # Linux: tauri-store needs libgtk-3-dev
 cargo doc -p tpp-database --no-deps
 # MongoDB, against the live replica set (see tests/README.md):
 cargo test -p tpp-database --all-features

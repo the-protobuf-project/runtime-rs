@@ -171,7 +171,7 @@ jobs:
       # Feature-gated code the workspace run does not compile: the SQL, MongoDB and
       # cached backends of database are off by default.
       - name: Clippy (tpp-database, all features)
-        run: cargo clippy -p tpp-database --all-targets --all-features -- -D warnings
+        run: cargo clippy -p tpp-database --all-targets --features orm,mongodb,redis,cached,live-tests -- -D warnings
 
       # tools/docgen is excluded from the workspace, so --workspace above
       # does not reach it. Held to the same bar rather than left to rot.
@@ -208,7 +208,7 @@ jobs:
       - name: Build docs (tpp-database, all features)
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc -p tpp-database --no-deps --all-features
+        run: cargo doc -p tpp-database --no-deps --features orm,mongodb,redis,cached,live-tests
 
       - uses: extractions/setup-just@v4
 
@@ -355,6 +355,37 @@ jobs:
           --test cached --test cached_capabilities --test cached_live
 
   # ------------------------------------------------------------------
+  # The Tauri store backend. Tauri links GTK on Linux whatever its
+  # features, so this is the one job that installs it; the lint and docs
+  # jobs above name the server backends rather than --all-features.
+  # ------------------------------------------------------------------
+  database-tauri-store:
+    name: Database (Tauri store)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install GTK
+        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+
+      - name: Clippy (tauri-store)
+        run: cargo clippy -p tpp-database --all-targets --features tauri-store -- -D warnings
+
+      - name: Docs (tauri-store)
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc -p tpp-database --no-deps --features tauri-store
+
+      - name: Test (mock runtime)
+        run: cargo test -p tpp-database --features tauri-store --test tauri_store --lib
+
+  # ------------------------------------------------------------------
   # Single status gate that PRs can require before merge. Reading the
   # results out of `needs` keeps this correct as jobs are added — only
   # the needs list below has to be maintained.
@@ -362,7 +393,7 @@ jobs:
   ci-gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [detect-crates, test, workspace, database-sql, database-cached, live, lint, docs, msrv, audit]
+    needs: [detect-crates, test, workspace, database-sql, database-cached, database-tauri-store, live, lint, docs, msrv, audit]
     if: always()
     steps:
       - name: Check all jobs passed

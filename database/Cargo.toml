@@ -38,6 +38,9 @@ mongodb = ["dep:mongodb", "dep:bson"]
 redis = ["dep:redis"]
 # Makes the `*_live` test targets build. Once on, they fail rather than skip without a server:
 # start the one they name from database/docker first.
+# The Tauri store backend, `database::tauri_store`: records in a tauri-plugin-store file in
+# the app's data directory, for desktop and mobile apps. Rust-only: Go has no Tauri.
+tauri-store = ["dep:tauri", "dep:tauri-plugin-store"]
 live-tests = []
 
 [dependencies]
@@ -71,6 +74,10 @@ redis = { workspace = true, optional = true }
 arrow-array = "60"
 arrow-schema = "60"
 arrow-ipc = "60"
+# The Tauri store backend (feature `tauri-store`). No default features: the backend needs the
+# runtime and the store, not a webview.
+tauri = { version = "2", optional = true, default-features = false }
+tauri-plugin-store = { version = "2", optional = true }
 # The SQL backend (feature `orm-*`). No default features: no macros, no `any` driver, no
 # migrations; TLS is rustls on ring, as everywhere else in this workspace (never native-tls).
 sqlx = { version = "0.9", optional = true, default-features = false, features = ["runtime-tokio", "tls-rustls-ring-webpki", "chrono"] }
@@ -147,6 +154,11 @@ name = "redis_live"
 path = "tests/redis_live/main.rs"
 required-features = ["redis", "live-tests"]
 
+[[test]]
+name = "tauri_store"
+path = "tests/tauri_store/main.rs"
+required-features = ["tauri-store"]
+
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }
@@ -156,6 +168,8 @@ tonic.workspace = true
 tokio-stream.workspace = true
 # The records tests build their Book descriptor without protoc.
 prost-types = "0.14"
+# The tauri-store tests run on Tauri's mock runtime.
+tauri = { version = "2", default-features = false, features = ["test"] }
 # Counts the statements sqlx logs, as Go's orm tests wrap GORM's logger.
 tracing.workspace = true
 # The mongodb_live test reads stored documents raw.
