@@ -59,7 +59,10 @@ fn the_sql_backend_speaks_rustls_on_ring_and_links_no_native_tls() {
         "the tree was read: {tree}"
     );
     assert!(tree.contains("ring v"), "ring is the provider: {tree}");
-    for absent in ["aws-lc", "native-tls", "openssl"] {
+    // `openssl v` and `openssl-sys`, not "openssl": openssl-probe, which only finds the
+    // system's CA files on Linux and links no OpenSSL, arrives through the default influxdb
+    // feature's rustls-native-certs.
+    for absent in ["aws-lc", "native-tls", "openssl v", "openssl-sys"] {
         assert!(!tree.contains(absent), "{absent} is in the graph:\n{tree}");
     }
 }

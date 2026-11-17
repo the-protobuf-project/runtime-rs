@@ -192,6 +192,11 @@ async fn store(pool: PgPool, books: Resource, book: DynamicMessage) -> database:
 - Typed parameters (sqlx's, unlike Go's) mean a record key is typed by the key
   column's kind, and an unsigned value past 2^63 is refused outside MySQL.
 - On SQLite an in-memory database is per connection: use a one-connection pool.
+- SQLite is bundled at 3.53 (`libsqlite3-sys` 0.37, the newest sqlx 0.9 allows), which
+  carries CVE-2026-119375 (RUSTSEC-2026-0459): opening a database file with a crafted
+  `-wal` file can return stale process memory. Open only database files the service
+  itself wrote. The advisory is accepted in `.cargo/audit.toml` until sqlx allows
+  `libsqlite3-sys` 0.39.
 
 `docker/compose.orm.live.yaml` runs Postgres (`127.0.0.1:15432`) and MySQL
 (`127.0.0.1:13306`) for the `orm_live` test; SQLite tests run in-process.
