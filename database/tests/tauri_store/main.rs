@@ -2,6 +2,8 @@
 //! directory: CRUD and its outcomes, uniqueness under concurrency, listing, transactions,
 //! bulk, tenants, and what reaches the file.
 
+#[path = "../support/filter_conformance.rs"]
+mod filter_conformance;
 #[path = "../support/records.rs"]
 mod support;
 

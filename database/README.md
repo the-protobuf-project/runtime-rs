@@ -50,10 +50,10 @@ What each records provider can do beyond create, get, update, delete, list, coun
 
 | | Transactions | Schema | Bulk | Watch | Filters | Order by |
 | --- | --- | --- | --- | --- | --- | --- |
-| SQL | yes, savepoints when nested | `CREATE TABLE` | refused | refused | yes | any columns |
-| MongoDB | yes, replica set needed | collection + unique indexes | yes | change streams | yes | first column |
+| SQL | yes, savepoints when nested | `CREATE TABLE` | refused | refused | AIP-160 | any columns |
+| MongoDB | yes, replica set needed | collection + unique indexes | yes | change streams | AIP-160 | first column |
 | Redis | refused | always present | yes | refused | refused | key only |
-| Tauri store | yes, nesting refused | always present | yes, all or nothing | refused | yes | any columns |
+| Tauri store | yes, nesting refused | always present | yes, all or nothing | refused | AIP-160, in memory | any columns |
 | Cache | the wrapped provider's | the wrapped provider's | the wrapped provider's | the wrapped provider's | passed through | passed through |
 
 A capability a provider lacks is never missing from the `DB`: calling it returns
@@ -335,25 +335,56 @@ Inputs are checked before anything reaches the server, and every refusal is
 
 ## Filters, ordering and paging
 
-**Filters** are the AIP-160 subset runtime-go accepts: `column op value` joined by `AND`.
+**Filters** are [AIP-160](https://google.aip.dev/160). Every provider but Redis parses
+them into one tree, `records::core::filter::Expr`, and runs the same conformance table,
+so a filter matches the same records on SQL, MongoDB and the Tauri store.
 
 ```text
 pages >= 300
 title = "Dune" AND pages < 500
-status = 2 AND in_print = true
+status = 2 OR (in_print = true AND NOT subtitle:*)
+-title = "Dune" pages > 100          # juxtaposition is AND, `-` is NOT
 create_time >= "2026-01-01T00:00:00Z"
+subtitle = null
 ```
 
-- **Operators** are `=`, `!=`, `>`, `>=`, `<` and `<=`. `AND` is case-insensitive.
-  `OR` is refused, because no provider here can express it.
-- **Quotes:** values may be quoted with `"` or `'`. Inside quotes, operators and
-  `AND` are text: `title = "x AND y"` is one clause. `name = ""` compares with the
-  empty string.
-- **Value types** follow the column's kind: integers in base 10, booleans as Go reads
-  them (`1`, `t`, `true`, `TRUE`, `0`, `f`, `false` and so on), times in RFC 3339.
-- **Nulls** match no comparison, `!=` included, as in SQL.
+- **Logic:** `AND`, `OR`, `NOT` and `-`, with parentheses. `NOT` binds tightest, then
+  `OR`, then `AND`, as AIP-160 specifies, so `a AND b OR c` is `a AND (b OR c)`.
+  Keywords are case-insensitive. Writing terms side by side means `AND`.
+- **Comparators:** `=`, `!=`, `<`, `<=`, `>` and `>=`. The has operator takes `*`:
+  `subtitle:*` matches records where the column holds a value.
+- **Values** are typed by the column's kind. Integers are base 10, and booleans read the
+  way Go reads them (`1`, `t`, `true`, `TRUE`, `0`, `f`, `false` and so on). Timestamps
+  are RFC 3339, quoted or not. `null` without quotes is the null literal, and only `=`
+  and `!=` take it.
+- **Strings** take `"` or `'` quotes, with the escapes `\"`, `\'`, `\\`, `\n`, `\r`, `\t` and
+  `\*`. Inside quotes, operators and keywords are just text. `name = ""` compares
+  with the empty string.
+- **Nulls follow SQL:** a comparison with a null column matches nothing, including `!=`
+  and `NOT`. With no subtitle, a book matches neither `subtitle = "x"`,
+  `subtitle != "x"` nor `NOT subtitle = "x"`. Use `subtitle:*`, `subtitle = null` or
+  `NOT subtitle:*` to test whether a column holds a value.
+- **Refused by name** as `Error::Invalid`, with the position of the problem:
+  - wildcards (`title = "Dune*"`; write a literal star as `\*`);
+  - function calls (`size(title) > 2`);
+  - traversal into messages (`author.name = "x"`);
+  - bare values, which AIP-160 treats as a global search (`Dune`);
+  - the has operator with anything but `*`;
+  - `<`, `<=`, `>` and `>=` on bytes;
+  - durations (`1.5s`), since no column kind stores a Duration;
+  - columns the resource does not declare.
 - **Redis refuses any filter,** since it has no query language. List by key and
   narrow in your code.
+
+| Provider | How a filter runs |
+| --- | --- |
+| SQL | A sea-query `Condition`: `all`, `any` and `not` over bound comparisons, `IS [NOT] NULL` for has and null |
+| MongoDB | A query: `$and` and `$or`, with `NOT` pushed down to the comparisons (`$nor` would match nulls), `$nin: [v, null]` for `!=`, and `$exists: true, $ne: null` for has |
+| Tauri store | Evaluated in memory by `Expr::matches` |
+| Redis | Refused |
+
+`records::core::parse_filter` still returns runtime-go's flat list of `Clause`s for a
+filter that is only `AND`s, and refuses anything more.
 
 **Ordering** takes AIP-132 `field [desc], other`. The key always ends the order, so
 records with equal values keep a stable order from page to page.
@@ -395,7 +426,7 @@ Callers match on `database::Error`, never on a provider's own messages:
 | `NotFound` | `get`, `update` or `delete` of a key with no record |
 | `AlreadyExists` | `create` of a taken key; any write of a value another record holds in a unique column |
 | `Invalid(reason)` | A refused input ([Validation](#validation)), or a transaction's `DB` used after it ended |
-| `Unimplemented { backend, capability }` | A capability the provider lacks, or a filter on Redis |
+| `Unimplemented { backend, capability }` | A capability the provider lacks, or any AIP-160 filter on Redis |
 | `Backend { backend, source }` | The server or driver failed: connection lost, timeout, permission |
 
 ## Transactions, bulk, schema and watching
@@ -454,12 +485,15 @@ stream ends after its first error; resume from the last token you saw.
 - Times are BSON dates, so they keep milliseconds, not nanoseconds.
 - A column named twice in a filter keeps both bounds (`pages >= 2 AND pages < 5`).
   Go kept only the last.
+- A filter on a `uint64` past `i64::MAX` compares against the Decimal128 the value is
+  stored as. Bytes compare as the binary they are stored as. An empty bytes value is
+  stored as null, so `cover:*` is false for it, unlike on SQL.
 
 **Redis**
 - Records are proto wire bytes, so bytes and integers past 2^53 survive exactly.
 - An update or delete compares the stored bytes it read, and retries up to 16 times
   if another writer changed the record in between.
-- Transactions are refused, and so are filters.
+- Transactions are refused, and so are filters: Redis cannot run AIP-160.
 
 **Tauri store**
 - The plugin writes its file in place, not through a rename, so a crash mid-save can

@@ -5,9 +5,8 @@ use chrono::{TimeZone, Utc};
 use prost_reflect::DynamicMessage;
 
 use super::error::invalid;
-use super::filter::coerce;
 use crate::Result;
-use crate::records::{Kind, Resource, Row, Value, columns_to_message};
+use crate::records::{Kind, Resource, Row, Value, columns_to_message, core};
 
 /// The stored document for a row: the primary key moves to `_id`, every other column keeps
 /// its name, so the document reads naturally in any MongoDB tool. Go's `toDocument`.
@@ -52,10 +51,15 @@ pub(super) fn from_document(res: &Resource, doc: Document) -> Result<DynamicMess
     columns_to_message(res, &row)
 }
 
-/// The `_id` a key string selects, typed as the primary key is stored, so an integer key
-/// matches an integer `_id`. A key the kind cannot read stays a string, and matches nothing.
+/// The `_id` a key string selects, typed and encoded as the primary key is stored, so an
+/// integer key matches an integer `_id`. A key the kind cannot read stays a string, and
+/// matches nothing.
 pub(super) fn key_bson(res: &Resource, key: &str) -> Bson {
-    coerce(kind_of(res, &res.pk_column), key).unwrap_or_else(|_| Bson::String(key.to_owned()))
+    let kind = kind_of(res, &res.pk_column);
+    core::coerce(kind, key)
+        .ok()
+        .and_then(|v| to_bson(kind, &v).ok())
+        .unwrap_or_else(|| Bson::String(key.to_owned()))
 }
 
 /// A stored `_id` as the key string the contract carries. Go's `fmt.Sprint(id)`.

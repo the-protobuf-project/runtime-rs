@@ -2,42 +2,54 @@
 //! are resolved through the descriptor and quoted by sea-query, and values are bound, never
 //! interpolated. Go's `buildWhere`, `sqlOperator` and `orderClause` in `orm/filter.go`.
 
-use sea_query::{Alias, BinOper, Condition, Expr, ExprTrait, Order};
+use sea_query::{Alias, BinOper, Condition, Expr as Sql, ExprTrait, Order};
 
 use super::Dialect;
-use super::values::{bind, coerce};
+use super::values::bind;
+use crate::Result;
+use crate::records::core::filter::{self, Expr, Op};
 use crate::records::{Resource, core};
-use crate::{Error, Result};
 
-/// An AIP-160 expression as a bound predicate: [`core::parse_filter`]'s conjunction, each
-/// column looked up in `res` and each value typed by its kind. A column the resource does not
-/// declare is refused by name rather than ignored, which would return every row.
+/// An AIP-160 expression as a bound predicate: [`filter::parse`]'s tree, columns resolved
+/// through `res` (an undeclared one is refused by name rather than ignored, which would
+/// return every row), values bound as their column's kind. `AND`, `OR` and `NOT` are
+/// sea-query's `all`, `any` and `not`; SQL's own three-valued logic is the null rule every
+/// other provider follows.
 pub(crate) fn filter(d: Dialect, res: &Resource, expr: &str) -> Result<Condition> {
-    let mut cond = Condition::all();
-    for c in core::parse_filter(expr)? {
-        let col = res.lookup_column(&c.column).ok_or_else(|| {
-            Error::Invalid(format!(
-                "filter names {:?}, which resource {:?} has no column for",
-                c.column, res.name
-            ))
-        })?;
-        let v = coerce(col.kind, &c.value)
-            .map_err(|e| Error::Invalid(format!("filter on {:?}: {e}", c.column)))?;
-        cond = cond
-            .add(Expr::col(Alias::new(&col.name)).binary(operator(&c.op), bind(d, col.kind, &v)?));
+    match filter::parse(res, expr)? {
+        None => Ok(Condition::all()),
+        Some(e) => condition(d, &e),
     }
-    Ok(cond)
+}
+
+fn condition(d: Dialect, e: &Expr) -> Result<Condition> {
+    let fold = |mut cond: Condition, all: &[Expr]| -> Result<Condition> {
+        for e in all {
+            cond = cond.add(condition(d, e)?);
+        }
+        Ok(cond)
+    };
+    Ok(match e {
+        Expr::And(all) => fold(Condition::all(), all)?,
+        Expr::Or(any) => fold(Condition::any(), any)?,
+        Expr::Not(inner) => condition(d, inner)?.not(),
+        Expr::Compare(c) => Condition::all().add(
+            Sql::col(Alias::new(&c.column)).binary(operator(c.op), bind(d, c.kind, &c.value)?),
+        ),
+        Expr::Has(c) => Condition::all().add(Sql::col(Alias::new(c)).is_not_null()),
+        Expr::Null(c) => Condition::all().add(Sql::col(Alias::new(c)).is_null()),
+    })
 }
 
 /// A comparison as SQL; `!=` renders as `<>`. Go's `sqlOperator`.
-fn operator(op: &str) -> BinOper {
+fn operator(op: Op) -> BinOper {
     match op {
-        "!=" => BinOper::NotEqual,
-        ">" => BinOper::GreaterThan,
-        ">=" => BinOper::GreaterThanOrEqual,
-        "<" => BinOper::SmallerThan,
-        "<=" => BinOper::SmallerThanOrEqual,
-        _ => BinOper::Equal,
+        Op::Eq => BinOper::Equal,
+        Op::Ne => BinOper::NotEqual,
+        Op::Gt => BinOper::GreaterThan,
+        Op::Ge => BinOper::GreaterThanOrEqual,
+        Op::Lt => BinOper::SmallerThan,
+        Op::Le => BinOper::SmallerThanOrEqual,
     }
 }
 

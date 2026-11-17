@@ -31,12 +31,13 @@
 //! Decimal128: BSON has no unsigned 64-bit integer, and Decimal128 holds it exactly while
 //! still sorting and comparing as a number on the server.
 //!
-//! # Filtering is a small subset, deliberately
+//! # Filtering
 //!
-//! [`ListOptions::filter`](crate::records::ListOptions::filter) accepts conjunctions of
-//! `column op value` with `= != > >= < <=`, values typed by the column's kind, and refuses
-//! anything else by name: a backend that accepted the whole of AIP-160 and honoured part of
-//! it would return the wrong records with nothing to say so.
+//! [`ListOptions::filter`](crate::records::ListOptions::filter) takes AIP-160 as
+//! [`records::core::filter`](crate::records::core::filter) parses it: `AND`, `OR`, `NOT`,
+//! comparisons and has, values typed by the column's kind. `NOT` is pushed down to the
+//! comparisons rather than sent as `$nor`, and `!=` is `$nin: [value, null]`, so a null
+//! field matches no comparison, as on SQL. What the parser refuses is refused by name.
 
 mod bulk;
 mod client;

@@ -77,8 +77,9 @@ pub(super) fn refuse_filter(filter: &str) -> Result<()> {
     }
     Err(Error::Unimplemented {
         backend: BACKEND,
-        capability: "apply a filter: it has no query language, so list by key and narrow in \
-                     the caller, or hold this resource in a backend that can query",
+        capability: "apply an AIP-160 filter (comparisons, AND, OR, NOT, has): it has no \
+                     query language, so list by key and narrow in the caller, or hold this \
+                     resource in a backend that can query",
     })
 }
 
@@ -145,6 +146,7 @@ mod tests {
         assert!(!descending("", &res));
         refuse_filter("  ").unwrap();
         let err = refuse_filter("a = 1").unwrap_err();
+        assert!(err.to_string().contains("AIP-160"), "{err}");
         assert!(matches!(
             err,
             Error::Unimplemented {

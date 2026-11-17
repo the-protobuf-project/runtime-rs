@@ -39,7 +39,8 @@ pub struct ListOptions {
     pub page_token: String,
     /// An AIP-132 order expression, e.g. `title desc`.
     pub order_by: String,
-    /// An AIP-160 filter expression.
+    /// An AIP-160 filter expression, parsed by [`core::filter::parse`](super::core::filter::parse).
+    /// Empty matches every record. Redis refuses any filter.
     pub filter: String,
     /// Skips counting the total, which is then -1: a backend reads one row past the page to
     /// learn whether another exists instead of scanning every match.

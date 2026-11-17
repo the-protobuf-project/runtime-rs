@@ -108,8 +108,8 @@ pub async fn edges(db: &DB) {
     for (bad, names) in [
         ("shelf = 3", "shelf"),
         ("published_year >= soon", "published_year"),
-        ("title = A OR title = B", "OR"),
-        ("title LIKE A", "not understood"),
+        ("title = A*", "wildcard"),
+        ("title LIKE A", "bare value"),
     ] {
         let err = db
             .list(&res, &ListOptions::default().filter(bad))
@@ -131,6 +131,7 @@ pub async fn edges(db: &DB) {
         ("genre = 1", vec!["a", "c"]),
         ("published_year = 2000 AND genre = 0", vec!["b"]),
         ("title = \"x AND y\"", vec![]),
+        ("title = A OR title = B", vec!["a", "b"]),
     ] {
         let page = db
             .list(&res, &ListOptions::default().filter(filter))
@@ -165,5 +166,16 @@ pub async fn edges(db: &DB) {
         (3, ""),
         "default page size"
     );
+    drop(db, &res).await;
+}
+
+/// The shared AIP-160 conformance table on a table of its own, typed by the dialect's
+/// defaults, so Postgres, MySQL and SQLite answer it as every other provider does.
+pub async fn conformance(db: &DB, dialect: Dialect) {
+    let mut res: Resource = books();
+    res.table = format!("filters_{}_{}", std::process::id(), dialect.name());
+    res.columns.iter_mut().for_each(|c| c.sql_type.clear());
+    db.schema.ensure_schema(&res).await.unwrap();
+    super::filter_conformance::run(dialect.name(), db, &res, book).await;
     drop(db, &res).await;
 }

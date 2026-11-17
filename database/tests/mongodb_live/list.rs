@@ -1,5 +1,5 @@
 //! Paging, ordering and filters. Go's `TestListPagesAndFilters` and `TestListDescending`,
-//! with `omit_total` and a filter on every column kind.
+//! with `omit_total`, a filter on every column kind, and the shared AIP-160 table.
 
 use database::records::{DB, ListOptions, Resource};
 use prost_reflect::Value as P;
@@ -139,11 +139,13 @@ async fn filters_are_typed_by_column_kind() {
             let opts = ListOptions::default().filter(filter);
             assert_eq!(f.db.count(&f.res, &opts).await.unwrap(), want, "{filter}");
         }
-        for bad in [
-            "price > cheap",
-            "in_print = yes",
-            "isbn = 18446744073709551615",
-        ] {
+        // Past i64::MAX a uint64 is stored as Decimal128, and its filter value encodes the same.
+        let mut max = book("max", "Max", 1);
+        max.set_field_by_name("isbn", P::U64(u64::MAX));
+        f.db.create(&f.res, &max).await.unwrap();
+        let opts = ListOptions::default().filter("isbn = 18446744073709551615");
+        assert_eq!(f.db.count(&f.res, &opts).await.unwrap(), 1);
+        for bad in ["price > cheap", "in_print = yes", "isbn = -1"] {
             let opts = ListOptions::default().filter(bad);
             assert!(
                 f.db.count(&f.res, &opts).await.is_err(),
@@ -151,5 +153,14 @@ async fn filters_are_typed_by_column_kind() {
             );
         }
     })
+    .await;
+}
+
+/// The shared AIP-160 table: OR, NOT, has and nulls answer as on SQL and the Tauri store.
+#[tokio::test]
+async fn aip160_conformance() {
+    with_db(
+        |f| async move { crate::filter_conformance::run("mongodb", &f.db, &f.res, book).await },
+    )
     .await;
 }

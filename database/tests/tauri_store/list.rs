@@ -95,3 +95,11 @@ async fn without_durability_the_file_waits_for_close() {
         Err(Error::Unimplemented { .. })
     ));
 }
+
+/// The shared AIP-160 table, evaluated in memory, answers as SQL and MongoDB do.
+#[tokio::test]
+async fn aip160_conformance() {
+    let (_app, p, _) = provider();
+    let (db, res) = (db(&p).await, support::books());
+    crate::filter_conformance::run("tauri store", &db, &res, support::book).await;
+}
