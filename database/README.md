@@ -353,8 +353,8 @@ tauri::Builder::default()
 
 `TauriStoreProvider::open` turns the plugin's autosave off so a transaction
 reaches the file only when it commits; `TauriStoreProvider::new` takes a store
-you built. On Linux Tauri links GTK whatever its features, so building
-`tauri-store` needs `libgtk-3-dev`. The tests run on Tauri's mock runtime:
+you built. On Linux Tauri links WebKitGTK and GTK whatever its features, so building
+`tauri-store` needs `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`, as any Tauri app does. The tests run on Tauri's mock runtime:
 `cargo test -p tpp-database --features tauri-store-test --test tauri_store`.
 
 ## Examples and telemetry
@@ -382,7 +382,7 @@ and [tests](tests/README.md).
 ```bash
 cargo test -p tpp-database
 cargo test -p tpp-database --features orm   # SQLite in-process
-cargo doc -p tpp-database --no-deps --all-features   # Linux: tauri-store needs libgtk-3-dev
+cargo doc -p tpp-database --no-deps --all-features   # Linux: tauri-store needs libwebkit2gtk-4.1-dev
 cargo doc -p tpp-database --no-deps
 # MongoDB, against the live replica set (see tests/README.md):
 cargo test -p tpp-database --all-features

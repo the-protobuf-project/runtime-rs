@@ -355,9 +355,10 @@ jobs:
           --test cached --test cached_capabilities --test cached_live
 
   # ------------------------------------------------------------------
-  # The Tauri store backend. Tauri links GTK on Linux whatever its
-  # features, so this is the one job that installs it; the lint and docs
-  # jobs above name the server backends rather than --all-features.
+  # The Tauri store backend. On Linux, tauri-runtime links WebKitGTK and
+  # GTK whatever Tauri's features, so this is the one job that installs
+  # them; the lint and docs jobs above name the server backends rather
+  # than --all-features.
   # ------------------------------------------------------------------
   database-tauri-store:
     name: Database (Tauri store)
@@ -371,8 +372,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Install GTK
-        run: sudo apt-get update && sudo apt-get install -y libgtk-3-dev
+      # WebKitGTK 4.1's headers bring GTK 3, libsoup 3 and JavaScriptCore's:
+      # every system library the Linux build links (Tauri's own prerequisites).
+      - name: Install WebKitGTK and GTK
+        run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev
 
       - name: Clippy (tauri-store)
         run: cargo clippy -p tpp-database --all-targets --features tauri-store-test -- -D warnings
