@@ -365,8 +365,10 @@ impl AsideImpl {
         let owned_id = id.to_owned();
         let owned_opts = opts.clone();
 
+        // Keyed by the entry's full key, not the ID: views of sibling databases share one
+        // Flight (`DB::under`), and two namespaces holding one ID are two different values.
         self.flight
-            .run(id, move || async move {
+            .run(&self.keyspace.aside_entry(id), move || async move {
                 aside.load_and_store(&owned_id, &owned_opts).await
             })
             .await
