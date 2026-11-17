@@ -26,7 +26,7 @@ flowchart LR
 | Let AI agents call a service over MCP or A2A | [`agents`](agents) | `runtime-go/agents` |
 | Cache records in Redis, Dragonfly or memcached | [`cache`](cache) | `runtime-go/cache` |
 | Load configuration from embedded defaults, profiles, files and the environment | [`config`](config) | `protoc-gen-service app/config` |
-| Store proto records in Postgres, MySQL, SQLite or MongoDB, and time series in InfluxDB 3 or Arrow captures | [`database`](database) | `runtime-go/database` |
+| Store proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri app, and time series in InfluxDB 3 or Arrow | [`database`](database) | `runtime-go/database` |
 | Serve one service over gRPC, REST, HTTP/3, MCP and A2A on one port | [`grpc`](grpc) | `runtime-go/grpc` |
 | Call HTTP, GraphQL and WebSocket APIs | [`network`](network) | `runtime-go/network` |
 | Publish and consume messages over Kafka, NATS, RabbitMQ, Redis, MQTT, ZeroMQ or OPC UA | [`streams`](streams) | `runtime-go/streams` |
@@ -71,7 +71,7 @@ Every crate declares a `description` in its `Cargo.toml` and carries crate-level
 | [`agents`](agents) <br/>`tpp-agents` | One runtime for the agent-facing protocols a service speaks — MCP and A2A on shared listeners with a single drain | [Guide](agents/README.md) · [Source](agents/src/README.md) · [Tests](agents/tests/README.md) · [API](https://docs.rs/tpp-agents) |
 | [`cache`](cache) <br/>`tpp-cache` | Cache drivers and read-through/write-through strategies over pluggable backends | [Guide](cache/README.md) · [Source](cache/src/README.md) · [Tests](cache/tests/README.md) · [API](https://docs.rs/tpp-cache) |
 | [`config`](config) <br/>`tpp-config` | Layered application configuration: embedded release defaults, a development profile, TOML/YAML/JSON files and prefixed environment variables, extracted into typed sections | [Guide](config/README.md) · [Source](config/src/README.md) · [Tests](config/tests/README.md) · [API](https://docs.rs/tpp-config) |
-| [`database`](database) <br/>`tpp-database` | runtime-go-shaped database contracts: proto records in Postgres, MySQL, SQLite or MongoDB, time series in InfluxDB 3 and Arrow captures | [Guide](database/README.md) · [Source](database/src/README.md) · [Tests](database/tests/README.md) · [API](https://docs.rs/tpp-database) |
+| [`database`](database) <br/>`tpp-database` | One database contract over many providers: proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri store, time series in InfluxDB 3 or Arrow | [Guide](database/README.md) · [Source](database/src/README.md) · [Tests](database/tests/README.md) · [API](https://docs.rs/tpp-database) |
 | [`grpc`](grpc) <br/>`tpp-grpc` | One server speaking gRPC, a JSON/REST gateway, optional HTTP/3, and the agent protocols on shared TLS | [Guide](grpc/README.md) · [Source](grpc/src/README.md) · [Tests](grpc/tests/README.md) · [API](https://docs.rs/tpp-grpc) |
 | [`network`](network) <br/>`tpp-network` | Core clients: HTTP, WebSocket, and GraphQL, over a shared ConnectionOptions | [Guide](network/README.md) · [Source](network/src/README.md) · [Tests](network/tests/README.md) · [API](https://docs.rs/tpp-network) |
 | [`streams`](streams) <br/>`tpp-streams` | Backend-agnostic publish/subscribe streams over Kafka, NATS, RabbitMQ, Redis, MQTT, ZeroMQ, and OPC UA | [Guide](streams/README.md) · [Source](streams/src/README.md) · [Tests](streams/tests/README.md) · [API](https://docs.rs/tpp-streams) |

@@ -88,3 +88,8 @@ pub use store::{DB, Error, Provider, Result};
 /// configures them without naming the telemetry crate.
 pub use telemetry::Telemetry;
 pub use typed_ingest::TypedBatchWriter;
+
+/// The README's Rust snippets, compiled as doctests so the guide cannot drift from the API.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
