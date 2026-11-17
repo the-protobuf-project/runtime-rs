@@ -77,7 +77,8 @@ fn stored_values_widen_back() {
 #[test]
 fn filters_become_typed_queries() {
     let res = support::books();
-    let q = |expr: &str| parse_filter(&res, &ListOptions::default().filter(expr)).unwrap();
+    let p = |expr: &str| parse_filter(&res, &ListOptions::default().filter(expr));
+    let q = |expr: &str| p(expr).unwrap();
     assert_eq!(q(""), doc! {});
     assert_eq!(q("name = books/a"), doc! { "_id": { "$eq": "books/a" } });
     assert_eq!(q("pages >= 20"), doc! { "pages": { "$gte": 20_i64 } });
@@ -110,13 +111,7 @@ fn filters_become_typed_queries() {
     let cover = q("cover = \"png\"").get_document("cover").unwrap().clone();
     assert!(matches!(cover.get("$eq"), Some(Bson::Binary(_))), "{cover}");
     for bad in ["nosuch = 1", "pages = x", "title < a", "pages : 1"] {
-        assert!(
-            matches!(
-                parse_filter(&res, &ListOptions::default().filter(bad)),
-                Err(Error::Invalid(_))
-            ),
-            "{bad}"
-        );
+        assert!(matches!(p(bad), Err(Error::Invalid(_))), "{bad}");
     }
 }
 
