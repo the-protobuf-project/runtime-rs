@@ -120,7 +120,8 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring",
 tonic-types = "0.14"
 # The buf.validate rules engine: reads the rules from the descriptors at runtime and
 # checks a prost-reflect message against them, which is what protovalidate does in Go.
-prost-protovalidate = "0.6"
+# Not on crates.io; the release tag pins it.
+protovalidate = { package = "protovalidate-rs", git = "https://github.com/oh-tarnished/protovalidate-rs", tag = "v1.0.0" }
 # Idempotency key names are a SHA-256 of (method, request_id), as in Go.
 sha2 = "0.11"
 # Compiles the test protos; dev-only.

@@ -69,7 +69,7 @@ unicode-width = { workspace = true }
 async-trait = { workspace = true }
 telemetry = { workspace = true }
 tonic-types = { workspace = true }
-prost-protovalidate = { workspace = true }
+protovalidate = { workspace = true }
 sha2 = { workspace = true }
 
 h3 = { workspace = true, optional = true }

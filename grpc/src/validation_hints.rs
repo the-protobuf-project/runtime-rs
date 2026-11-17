@@ -9,13 +9,13 @@
 //! travels as a `google.rpc.BadRequest` field violation a client can show next to the input
 //! it belongs to.
 //!
-//! This is Go's `validation_hints.go` over [`prost_protovalidate`]'s violations. The one
+//! This is Go's `validation_hints.go` over [`protovalidate`]'s violations. The one
 //! difference is where resource patterns come from: Go walks its global registry, while
 //! here they are read from the pool the violated field's descriptor belongs to — the
 //! descriptor sets registered with [`crate::HybridServer::with_reflection`].
 
-use prost_protovalidate::Violation;
 use prost_reflect::{FieldDescriptor, Kind, Value};
+use protovalidate::Violation;
 use tonic::{Code, Status};
 use tonic_types::{BadRequest, ErrorDetail, ErrorInfo, FieldViolation, StatusExt};
 
@@ -29,19 +29,19 @@ pub const VALIDATION_REASON: &str = "INVALID_REQUEST_FIELDS";
 /// It is public so a custom [`crate::Validator`] built on the same engine reports failures
 /// exactly as the default one does. An error that is not a set of violations — a rule that
 /// failed to compile — is still `INVALID_ARGUMENT`, carrying its text, as in Go.
-pub fn validation_status(err: &prost_protovalidate::Error) -> Status {
+pub fn validation_status(err: &protovalidate::Error) -> Status {
     let violations = match err {
-        prost_protovalidate::Error::Validation(verr) if !verr.is_empty() => verr.violations(),
+        protovalidate::Error::Validation(verr) if !verr.violations.is_empty() => &verr.violations,
         other => return Status::invalid_argument(other.to_string()),
     };
 
     let mut lines = Vec::with_capacity(violations.len());
     let mut fields = Vec::with_capacity(violations.len());
     for violation in violations {
-        let field = violation.field_path();
+        let field = protovalidate::display_path(&violation.field);
         let line = join_field(&field, &describe(violation));
         fields.push(FieldViolation {
-            reason: violation.rule_id().to_string(),
+            reason: violation.rule_id.clone(),
             ..FieldViolation::new(field, line.clone())
         });
         lines.push(line);
@@ -85,8 +85,8 @@ fn join_field(field: &str, desc: &str) -> String {
 
 /// Says what the field must be.
 fn describe(violation: &Violation) -> String {
-    let field = violation.field_descriptor();
-    let rule = violation.rule_id();
+    let field = violation.field_descriptor.as_ref();
+    let rule = violation.rule_id.as_str();
     if rule == "required" {
         if let Some(pattern) = field.and_then(name_pattern) {
             return format!("is required: the name of a resource, {pattern}");
@@ -98,7 +98,8 @@ fn describe(violation: &Violation) -> String {
     {
         let pattern = name_pattern(fd).or_else(|| {
             violation
-                .rule_value()
+                .rule_value
+                .as_ref()
                 .and_then(Value::as_str)
                 .and_then(pattern_template)
         });
@@ -107,7 +108,7 @@ fn describe(violation: &Violation) -> String {
         }
     }
 
-    let message = violation.message().to_string();
+    let message = violation.message.clone();
     let scalar = field.is_some_and(|fd| !fd.is_list() && !fd.is_map() && !is_message(fd));
     match sent(violation) {
         got if scalar && !got.is_empty() => format!("{message}; got {got}"),
@@ -118,7 +119,7 @@ fn describe(violation: &Violation) -> String {
 /// Renders the value a violation is about, for the message; empty for a value that does
 /// not read on one line — a message, a list, a map.
 fn sent(violation: &Violation) -> String {
-    let (Some(fd), Some(value)) = (violation.field_descriptor(), violation.field_value()) else {
+    let (Some(fd), Some(value)) = (&violation.field_descriptor, &violation.field_value) else {
         return String::new();
     };
     if fd.is_list() || fd.is_map() || is_message(fd) {
@@ -238,7 +239,8 @@ mod tests {
         for (field, value) in fields {
             message.set_field_by_name(field, value.clone());
         }
-        let err = prost_protovalidate::Validator::new()
+        let err = protovalidate::Validator::new()
+            .unwrap()
             .validate(&message)
             .expect_err("the request breaks its rules");
         validation_status(&err)
@@ -281,8 +283,8 @@ mod tests {
         );
         assert_eq!(
             status.message(),
-            "2 fields need fixing:\n - page_size: value must be greater than or equal to 0; \
-             got -1\n - label must look like labels/{id}; got \"x\""
+            "2 fields need fixing:\n - page_size must be greater than or equal to 0; got -1\
+             \n - label must look like labels/{id}; got \"x\""
         );
         assert_eq!(
             status

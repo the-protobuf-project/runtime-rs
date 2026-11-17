@@ -2,8 +2,9 @@
 //!
 //! Go builds this on `buf.build/go/protovalidate`, which reads `buf.validate` rules out of
 //! the generated descriptors and checks a message against them. The Rust engine is
-//! [`prost_protovalidate`], which does the same against a [`prost_reflect`] message —
-//! including CEL rules — so validation needs no generated code: the request is decoded
+//! [`protovalidate`] (protovalidate-rs), a rule-for-rule port of it that passes Buf's
+//! conformance suite, and checks a [`prost_reflect`] message — so validation needs no
+//! generated code: the request is decoded
 //! against the descriptor sets registered with [`HybridServer::with_reflection`] and
 //! handed to the engine as is. That is [`ProtoValidator`], what
 //! [`HybridServer::with_validation`] runs.
@@ -60,23 +61,27 @@ where
 }
 
 /// The default engine: the request's `buf.validate` rules, checked by
-/// [`prost_protovalidate`]. Go's `protovalidate.New()`.
+/// [`protovalidate`]. Go's `protovalidate.New()`.
 ///
 /// Its compiled rules are cached per message type, so build it once and share it.
 pub struct ProtoValidator {
-    engine: prost_protovalidate::Validator,
+    engine: protovalidate::Validator,
 }
 
 impl ProtoValidator {
     /// A validator with the engine's default options.
+    ///
+    /// # Panics
+    ///
+    /// If the engine's CEL environment cannot be built, which depends on no input.
     #[must_use]
     pub fn new() -> Self {
-        Self::with_engine(prost_protovalidate::Validator::new())
+        Self::with_engine(protovalidate::Validator::new().expect("the CEL environment builds"))
     }
 
-    /// A validator over an engine the caller configured — fail-fast, a filter, a clock.
+    /// A validator over an engine the caller configured: fail-fast, say.
     #[must_use]
-    pub fn with_engine(engine: prost_protovalidate::Validator) -> Self {
+    pub fn with_engine(engine: protovalidate::Validator) -> Self {
         Self { engine }
     }
 }
