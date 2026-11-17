@@ -75,3 +75,11 @@ fn one_dialect_links_one_sql_client() {
         assert!(!tree.contains(absent), "{absent} is in the graph:\n{tree}");
     }
 }
+
+#[test]
+fn the_mongodb_driver_selects_ring_as_well() {
+    let tree = packages(&["--features", "mongodb"]);
+    assert!(tree.contains("mongodb v3"), "the tree was read: {tree}");
+    assert!(tree.contains("ring v"), "ring is the provider: {tree}");
+    assert!(!tree.contains("aws-lc"), "aws-lc is in the graph:\n{tree}");
+}

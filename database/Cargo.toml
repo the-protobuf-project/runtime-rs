@@ -4,14 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "runtime-go-shaped database contracts with SQL (Postgres, MySQL, SQLite), InfluxDB 3 and Arrow capture backends"
+description = "runtime-go-shaped database contracts: proto records in Postgres, MySQL, SQLite or MongoDB, time series in InfluxDB 3 and Arrow captures"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
-keywords = ["database", "sql", "influxdb", "timeseries", "async"]
+keywords = ["database", "sql", "mongodb", "influxdb", "async"]
 categories = ["database", "asynchronous"]
 
 [package.metadata.docgen]
 go-source = "runtime-go/database"
-use-for = "Store proto records in Postgres, MySQL or SQLite, and time series in InfluxDB 3 or Arrow captures"
+use-for = "Store proto records in Postgres, MySQL, SQLite or MongoDB, and time series in InfluxDB 3 or Arrow captures"
 
 [lib]
 name = "database"
@@ -31,7 +31,11 @@ orm-mysql = ["dep:sqlx", "dep:sea-query", "dep:sea-query-sqlx", "sqlx/mysql", "s
 orm-sqlite = ["dep:sqlx", "dep:sea-query", "dep:sea-query-sqlx", "sqlx/sqlite-bundled", "sea-query/backend-sqlite", "sea-query-sqlx/sqlx-sqlite"]
 # `database::cached`: a read-through cache in front of any records driver, over tpp-cache.
 cached = ["dep:cache"]
-# Selects the targets that need a live service, which then fail rather than skip without one.
+# The MongoDB record backend (`database::mongodb`): the official driver over rustls and ring,
+# with bson 3. Off by default, so a build that does not store documents links no driver.
+mongodb = ["dep:mongodb", "dep:bson"]
+# Makes the `*_live` test targets build. Once on, they fail rather than skip without a server:
+# start the one they name from database/docker first.
 live-tests = []
 
 [dependencies]
@@ -69,6 +73,10 @@ sqlx = { version = "0.9", optional = true, default-features = false, features = 
 sea-query = { version = "1", optional = true, default-features = false, features = ["thread-safe", "with-chrono"] }
 sea-query-sqlx = { version = "0.9", optional = true, default-features = false, features = ["with-chrono"] }
 cache = { workspace = true, optional = true }
+# `compat-3-3-0` is the driver's required forward-compatibility pledge; `rustls-tls` selects
+# ring, as everything else here does; `dns-resolver` resolves `mongodb+srv://` URIs.
+mongodb = { version = "3.10", default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"], optional = true }
+bson = { version = "3.1", features = ["serde", "serde_json-1"], optional = true }
 
 [[example]]
 name = "capture"
@@ -125,6 +133,11 @@ name = "cached_live"
 path = "tests/cached_live.rs"
 required-features = ["cached", "live-tests"]
 
+[[test]]
+name = "mongodb_live"
+path = "tests/mongodb_live/main.rs"
+required-features = ["mongodb", "live-tests"]
+
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }
@@ -136,4 +149,6 @@ tokio-stream.workspace = true
 prost-types = "0.14"
 # Counts the statements sqlx logs, as Go's orm tests wrap GORM's logger.
 tracing.workspace = true
+# The mongodb_live test reads stored documents raw.
+bson = "3.1"
 

@@ -12,6 +12,9 @@
 //! `orm-mysql` or `orm-sqlite`), runs every resource on PostgreSQL, MySQL or
 //! SQLite through sqlx and sea-query.
 //!
+//! [`records`] is the proto-message record contract, runtime-go's `database/store`;
+//! the `mongodb` feature adds `database::mongodb`, which implements it over MongoDB.
+//!
 //! # Generated models
 //!
 //! Generated code implements [`Model`](store::Model) for each message and
@@ -46,6 +49,10 @@
 
 #![warn(missing_docs)]
 
+// Lets the mongodb unit tests include the integration fixtures, which name the crate.
+#[cfg(all(test, feature = "mongodb"))]
+extern crate self as database;
+
 pub mod arrow;
 mod buffered;
 #[cfg(feature = "cached")]
@@ -55,6 +62,8 @@ mod collection;
 pub mod influxdb;
 pub mod ingest;
 mod mirror;
+#[cfg(feature = "mongodb")]
+pub mod mongodb;
 mod observe;
 #[cfg(any(
     feature = "orm-postgres",

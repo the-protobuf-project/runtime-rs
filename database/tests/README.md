@@ -22,6 +22,8 @@ cargo test -p tpp-database
 | `file_size` | Rust sources/tests stay below 200 lines |
 | `records` | The record contract: filter subset, page tokens, managed columns, message/column bridge |
 | `orm_driver`, `orm_provider`, `orm_sqlite`, `orm_statements`, `orm_dialect` (feature `orm-sqlite`) | runtime-go's `orm` tests on in-process SQLite: CRUD, error mapping, managed columns, paging, schema, tenants, transactions, statement counts, quoting and default types |
+| `records` | The record contract without a backend: filters, tokens, bridge, refusals |
+| `mongodb_live` | MongoDB against a live replica set (needs `mongodb` + `live-tests`) |
 
 The ignored `live`, `live_lifecycle`, and `live_rate` targets require explicit
 real-server settings. They write data; lifecycle/rate tests create and delete
@@ -56,6 +58,22 @@ docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml up -d --w
 cargo test -p tpp-database --features cached,live-tests --test cached_live
 docker compose -p runtime-cache-live -f cache/docker/compose.live.yaml down
 ```
+`mongodb_live` ports runtime-go's `mongodb_test.go` case for case (CRUD,
+round trips, duplicate keys, unique indexes, paging, filters, ordering,
+transactions, schema, bulk, change streams with resume, tenant isolation) and
+reads stored documents raw to pin Go's encoding. It builds only with the
+`mongodb` and `live-tests` features; once built an unreachable server fails it,
+as the cache live tests do. Each test works in its own database and drops it.
+`RUNTIME_DATABASE_MONGODB_ADDRESS` defaults to `127.0.0.1:27117`:
+
+```bash
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml up -d --wait mongodb
+cargo test -p tpp-database --all-features
+docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml down
+```
+
+The codec, filter translation, config and name checks also run offline as unit
+tests under `--features mongodb`.
 
 `arrow_throughput` is a separate ignored release-mode performance measurement:
 

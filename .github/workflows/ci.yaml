@@ -168,7 +168,8 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Feature-gated code the workspace run does not compile (the SQL backend).
+      # Feature-gated code the workspace run does not compile: the SQL, MongoDB and
+      # cached backends of database are off by default.
       - name: Clippy (tpp-database, all features)
         run: cargo clippy -p tpp-database --all-targets --all-features -- -D warnings
 
@@ -213,6 +214,40 @@ jobs:
 
       - name: Validate crate docs + README freshness
         run: just docs-check
+
+  # ------------------------------------------------------------------
+  # Live backends — the `live-tests` targets against real servers, each
+  # started from the crate's own Compose file exactly as a developer
+  # starts it locally. With the feature on, an unreachable server fails
+  # the target rather than skipping it, so a green run means the backend
+  # was really exercised. MongoDB runs as a single-node replica set:
+  # transactions and change streams need one.
+  # ------------------------------------------------------------------
+  live:
+    name: Live (tpp-database, MongoDB)
+    runs-on: ubuntu-latest
+    env:
+      COMPOSE: docker compose -p runtime-database-mongodb-live -f database/docker/compose.mongodb.live.yaml
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start MongoDB
+        run: $COMPOSE up -d --wait mongodb
+
+      - name: Test (all features, live MongoDB)
+        run: cargo test -p tpp-database --all-features
+
+      - name: Server logs on failure
+        if: failure()
+        run: $COMPOSE logs mongodb
+
+      - name: Stop MongoDB
+        if: always()
+        run: $COMPOSE down
 
   # ------------------------------------------------------------------
   # MSRV — the workspace must build on the minimum Rust version it
@@ -306,7 +341,7 @@ jobs:
   ci-gate:
     name: CI gate
     runs-on: ubuntu-latest
-    needs: [detect-crates, test, workspace, database-sql, database-cached, lint, docs, msrv, audit]
+    needs: [detect-crates, test, workspace, database-sql, database-cached, live, lint, docs, msrv, audit]
     if: always()
     steps:
       - name: Check all jobs passed
