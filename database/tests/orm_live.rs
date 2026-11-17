@@ -16,6 +16,8 @@
 //! database are the Compose file's. Every run makes its own tables and drops them.
 
 mod support {
+    #[path = "filter_conformance.rs"]
+    pub mod filter_conformance;
     #[path = "orm.rs"]
     pub mod orm;
     #[path = "orm_edges.rs"]
@@ -97,6 +99,7 @@ on_every_engine! {
     every_dialect_transactions => |d| async move { orm_tx::transactions(&open(d).await).await };
     schema_lifecycle => |d| async move { orm_scenarios::schema_lifecycle(&open(d).await).await };
     every_kind => |d| async move { orm_edges::every_kind(&open(d).await, d).await };
+    aip160_conformance => |d| async move { orm_edges::conformance(&open(d).await, d).await };
     contract_edges => |d| async move { orm_edges::edges(&open(d).await).await };
     omit_total_pages_to_the_end => |d| async move {
         orm_scenarios::omit_total_pages_to_the_end(&open(d).await).await

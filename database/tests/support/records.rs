@@ -96,8 +96,16 @@ fn build_book() -> MessageDescriptor {
 }
 
 /// The `Book` resource, in table `books`, keyed by `name`; `subtitle` is nullable, `title`
-/// unique, and the two times are audit columns the driver fills.
+/// unique, the two times are audit columns the driver fills, and free text searches
+/// `subtitle` and `title`.
 pub fn books() -> Resource {
+    Resource {
+        search: vec!["subtitle".into(), "title".into()],
+        ..book_columns()
+    }
+}
+
+fn book_columns() -> Resource {
     let mut create = Column::new("create_time", Kind::Timestamp).sql_type("TIMESTAMPTZ");
     create.auto_create = true;
     let mut update = Column::new("update_time", Kind::Timestamp).sql_type("TIMESTAMPTZ");

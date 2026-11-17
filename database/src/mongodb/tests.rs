@@ -11,10 +11,12 @@ use bson::{Bson, Decimal128, doc, oid::ObjectId};
 use prost_reflect::Value as P;
 
 use super::codec::{from_bson, from_document, key_bson, key_string, to_document};
-use super::filter::{coerce, parse_filter, sort_of};
+use super::filter::{parse_filter, sort_of};
 use super::{MongoClient, MongoConfig, MongoProvider};
 use crate::Error;
-use crate::records::{Kind, Provider, Value, core, message_to_columns};
+use crate::records::{
+    Column, Kind, ListOptions, Provider, Resource, Value, core, message_to_columns,
+};
 
 #[test]
 fn documents_key_by_id_and_type_by_kind() {
@@ -75,40 +77,53 @@ fn stored_values_widen_back() {
 #[test]
 fn filters_become_typed_queries() {
     let res = support::books();
-    let q = |expr| parse_filter(&res, expr).unwrap();
+    let p = |expr: &str| parse_filter(&res, &ListOptions::default().filter(expr));
+    let q = |expr: &str| p(expr).unwrap();
     assert_eq!(q(""), doc! {});
-    assert_eq!(q("name = books/a"), doc! { "_id": "books/a" });
+    assert_eq!(q("name = books/a"), doc! { "_id": { "$eq": "books/a" } });
     assert_eq!(q("pages >= 20"), doc! { "pages": { "$gte": 20_i64 } });
     assert_eq!(
         q("in_print = true AND price < 2.5"),
-        doc! { "in_print": true, "price": { "$lt": 2.5 } }
+        doc! { "$and": [ { "in_print": { "$eq": true } }, { "price": { "$lt": 2.5 } } ] }
     );
-    assert_eq!(q("status != 1"), doc! { "status": { "$ne": 1_i64 } });
     assert_eq!(
-        q("pages > 1 AND pages <= 9"),
-        doc! { "$and": [ { "pages": { "$gt": 1_i64 } }, { "pages": { "$lte": 9_i64 } } ] }
+        q("status != PUBLISHED"),
+        doc! { "status": { "$nin": [Bson::Int32(2), Bson::Null] } }
     );
-    for bad in ["nosuch = 1", "pages = x", "pages LIKE 1", "a = 1 OR b = 2"] {
-        assert!(
-            matches!(parse_filter(&res, bad), Err(Error::Invalid(_))),
-            "{bad}"
-        );
+    // NOT is `$nor`, which, as Go's NOT coalesce, holds where the field is null.
+    assert_eq!(
+        q("NOT pages < 9"),
+        doc! { "$nor": [ { "pages": { "$lt": 9_i64 } } ] }
+    );
+    // Contains and free text are case-insensitive regexes of the escaped value.
+    assert_eq!(
+        q("title:a.b"),
+        doc! { "title": { "$regex": "a\\.b", "$options": "i" } }
+    );
+    assert_eq!(
+        q("dune"),
+        doc! { "$or": [
+            { "subtitle": { "$regex": "dune", "$options": "i" } },
+            { "title": { "$regex": "dune", "$options": "i" } },
+        ] }
+    );
+    // Bytes compare as the binary they are stored as.
+    let cover = q("cover = \"png\"").get_document("cover").unwrap().clone();
+    assert!(matches!(cover.get("$eq"), Some(Bson::Binary(_))), "{cover}");
+    for bad in ["nosuch = 1", "pages = x", "title < a", "pages : 1"] {
+        assert!(matches!(p(bad), Err(Error::Invalid(_))), "{bad}");
     }
 }
 
 #[test]
-fn values_coerce_as_go_parses_them() {
-    assert_eq!(coerce(Kind::Uint, "5"), Ok(Bson::Int64(5)));
-    assert!(coerce(Kind::Uint, "18446744073709551615").is_err());
-    assert!(coerce(Kind::Uint, "-1").is_err());
-    assert_eq!(coerce(Kind::Bool, "T"), Ok(Bson::Boolean(true)));
-    assert!(coerce(Kind::Bool, "yes").is_err());
-    assert!(matches!(
-        coerce(Kind::Timestamp, "2024-01-02T03:04:05.5Z"),
-        Ok(Bson::DateTime(_))
-    ));
-    assert!(coerce(Kind::Timestamp, "2024-01-02").is_err());
-    assert_eq!(coerce(Kind::Bytes, "abc"), Ok(Bson::String("abc".into())));
+fn keys_encode_as_the_key_column_stores_them() {
+    let ts = prost_reflect::DescriptorPool::global()
+        .get_message_by_name("google.protobuf.Timestamp")
+        .unwrap();
+    let key = Column::new("seconds", Kind::Int).primary_key();
+    let ints = Resource::new(ts, "t", "seconds", vec![key]);
+    assert_eq!(key_bson(&ints, "42"), Bson::Int64(42));
+    assert_eq!(key_bson(&ints, "x"), Bson::String("x".into()));
 }
 
 #[test]

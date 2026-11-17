@@ -162,6 +162,31 @@ name = "tauri_store"
 path = "tests/tauri_store/main.rs"
 required-features = ["tauri-store-test"]
 
+[[test]]
+name = "repository_sqlite"
+path = "tests/repository_sqlite.rs"
+required-features = ["orm-sqlite"]
+
+[[test]]
+name = "repository_tauri"
+path = "tests/repository_tauri.rs"
+required-features = ["tauri-store-test"]
+
+[[test]]
+name = "repository_sql"
+path = "tests/repository_sql.rs"
+required-features = ["orm-postgres", "orm-mysql", "live-tests"]
+
+[[test]]
+name = "repository_mongodb"
+path = "tests/repository_mongodb.rs"
+required-features = ["mongodb", "live-tests"]
+
+[[test]]
+name = "repository_redis"
+path = "tests/repository_redis.rs"
+required-features = ["redis", "live-tests"]
+
 [dev-dependencies]
 opentelemetry_sdk = { version = "0.33", features = ["testing"] }
 tokio = { workspace = true, features = ["test-util", "signal"] }

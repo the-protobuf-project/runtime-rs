@@ -20,8 +20,9 @@
 //! so two writers racing on one value cannot both win and a failed write leaves nothing behind.
 //!
 //! `list` pages and orders by primary key in the server, either direction; another `order_by`
-//! column falls back to the key. A filter is refused by name, as Go refuses it: Redis has no
-//! query language, and filtering here would read the whole table to return ten rows.
+//! column falls back to the key. Any AIP-160 filter is refused by name, as Go refuses it:
+//! Redis has no query language, and filtering here would read the whole table to return ten
+//! rows.
 //!
 //! # One client for cache and database
 //!

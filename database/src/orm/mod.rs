@@ -23,7 +23,9 @@
 //! [`Migrator`](crate::records::Migrator); batches and watches refuse by name.
 //!
 //! - Identifiers are quoted per dialect (backticks on MySQL, double quotes elsewhere) and
-//!   filter values are bound, typed by their column's kind.
+//!   filter values are bound, typed by their column's kind. An AIP-160 filter becomes a
+//!   sea-query `Condition` as Go's gorm engine writes it: `NOT COALESCE(x, FALSE)` and
+//!   `LOWER(col) LIKE '%v%'` for contains and free text.
 //! - A unique or primary-key violation is [`Error::AlreadyExists`](crate::Error); a missing
 //!   row on get, update or delete is [`Error::NotFound`](crate::Error).
 //! - Keys and audit times are filled by [`core::fill_managed`](crate::records::core), and
@@ -41,6 +43,7 @@ mod mysql;
 mod postgres;
 mod provider;
 mod query;
+mod read;
 mod rows;
 mod schema;
 #[cfg(feature = "orm-sqlite")]

@@ -15,7 +15,7 @@ impl RedisDriver {
     /// A key whose record is gone, from a delete that failed partway, is dropped from the
     /// index and skipped, as Go does. A filter is refused.
     pub(super) async fn list_page(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
-        refuse_filter(&opts.filter)?;
+        refuse_filter(&opts.filter, !opts.restrict.is_empty())?;
         let limit = core::page_size(opts.page_size);
         let offset = core::decode_token(&opts.page_token);
         let fetch = core::fetch_limit(limit, opts.omit_total);

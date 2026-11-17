@@ -30,6 +30,7 @@ The first part of this guide covers records and the second covers time series.
 - [Outcomes and errors](#outcomes-and-errors)
 - [Transactions, bulk, schema and watching](#transactions-bulk-schema-and-watching)
 - [Edge cases, provider by provider](#edge-cases-provider-by-provider)
+- [Repositories](#repositories)
 - [Time series: InfluxDB and Arrow](#time-series-influxdb-and-arrow)
 - [Telemetry](#telemetry)
 - [Testing](#testing)
@@ -50,10 +51,10 @@ What each records provider can do beyond create, get, update, delete, list, coun
 
 | | Transactions | Schema | Bulk | Watch | Filters | Order by |
 | --- | --- | --- | --- | --- | --- | --- |
-| SQL | yes, savepoints when nested | `CREATE TABLE` | refused | refused | yes | any columns |
-| MongoDB | yes, replica set needed | collection + unique indexes | yes | change streams | yes | first column |
+| SQL | yes, savepoints when nested | `CREATE TABLE` | refused | refused | AIP-160 | any columns |
+| MongoDB | yes, replica set needed | collection + unique indexes | yes | change streams | AIP-160 | first column |
 | Redis | refused | always present | yes | refused | refused | key only |
-| Tauri store | yes, nesting refused | always present | yes, all or nothing | refused | yes | any columns |
+| Tauri store | yes, nesting refused | always present | yes, all or nothing | refused | AIP-160, in memory | any columns |
 | Cache | the wrapped provider's | the wrapped provider's | the wrapped provider's | the wrapped provider's | passed through | passed through |
 
 A capability a provider lacks is never missing from the `DB`: calling it returns
@@ -335,25 +336,65 @@ Inputs are checked before anything reaches the server, and every refusal is
 
 ## Filters, ordering and paging
 
-**Filters** are the AIP-160 subset runtime-go accepts: `column op value` joined by `AND`.
+**Filters** are [AIP-160](https://google.aip.dev/160) as protoc-gen-store's generated Go
+`filterx` reads it, so a Rust service accepts the filters a Go one does and matches the
+same records. Every provider but Redis parses them into one tree,
+`records::core::filter::Expr`, and runs the same conformance table.
 
 ```text
 pages >= 300
 title = "Dune" AND pages < 500
-status = 2 AND in_print = true
-create_time >= "2026-01-01T00:00:00Z"
+status = PUBLISHED OR (in_print = true AND NOT subtitle : novel)
+-title = Dune pages > 100            # whitespace is AND, `-` is NOT
+create_time >= 2026-01-01
+dune                                 # free text over the search columns
 ```
 
-- **Operators** are `=`, `!=`, `>`, `>=`, `<` and `<=`. `AND` is case-insensitive.
-  `OR` is refused, because no provider here can express it.
-- **Quotes:** values may be quoted with `"` or `'`. Inside quotes, operators and
-  `AND` are text: `title = "x AND y"` is one clause. `name = ""` compares with the
-  empty string.
-- **Value types** follow the column's kind: integers in base 10, booleans as Go reads
-  them (`1`, `t`, `true`, `TRUE`, `0`, `f`, `false` and so on), times in RFC 3339.
-- **Nulls** match no comparison, `!=` included, as in SQL.
+- **Logic:** `AND` or whitespace, `OR`, `NOT` and `-`, with parentheses. `AND` is a
+  keyword in any case, but `OR` and `NOT` only in capitals; lowercase `or` and `not` are
+  ordinary words. `NOT` binds tightest, then `OR`, then `AND`, so `a AND b OR c` is
+  `a AND (b OR c)`. Stray `AND`s are skipped. Parentheses and negations nest at most 32
+  deep.
+- **Values** are barewords (`SUMMER25`, `2026-01-01`) or double-quoted strings. A string
+  has no escapes and ends at the next `"`. A single quote is an ordinary character, so
+  `title = 'Dune'` compares with `'Dune'`, quotes included. Only spaces and tabs separate
+  terms. `*`, `%` and `_` are literal: there are no wildcards.
+- **Operators by column kind,** as Go's gorm engine applies them. Any other operator is
+  refused as `unsupported operator`.
+
+  | Kind | Operators | Value |
+  | --- | --- | --- |
+  | String | `=`, `!=`, and `:` for a case-insensitive contains | as written |
+  | Integer, float | `=`, `!=`, `<`, `<=`, `>`, `>=` | base 10, or a number |
+  | Timestamp | `=`, `<`, `<=`, `>`, `>=` | RFC 3339, quoted because of its colons, or a bare `YYYY-MM-DD` as midnight UTC |
+  | Boolean | `=`, `!=` | as Go reads it: `1`, `t`, `true`, `TRUE`, `0`, `f`, `false` and so on |
+  | Enum | `=`, `!=` | the number, or the value name in any case with or without its prefix (`PUBLISHED`, `status_published`) |
+  | Bytes | `=`, `!=` | as written |
+
+- **Free text:** a value with no operator after it, such as `dune` or `"a novel"`, matches
+  a record when any of the resource's search columns contains it, ignoring case.
+  `Resource::search` lists those columns. A resource without any refuses free text
+  (`free-text search is not supported here`).
+- **Nulls:** a comparison or contains on a null column is false, including `!=`. `NOT` is
+  true wherever its operand is false, so a book without a subtitle matches
+  `NOT subtitle = "x"` but not `subtitle != "x"`. This is Go's `NOT coalesce(..., false)`.
+  There is no presence test in filter text: `field:*` contains a literal `*`.
+- **Refused** as `Error::Invalid` in Go's words, with the filter and the position. That
+  covers unknown fields, unsupported operators, malformed values, unbalanced or empty
+  parentheses, an unterminated string, a lone `!` or `-`, a missing operand or value, and
+  nesting past 32. A dotted field (`author.name`) is an unknown field.
 - **Redis refuses any filter,** since it has no query language. List by key and
   narrow in your code.
+
+| Provider | How a filter runs |
+| --- | --- |
+| SQL | A sea-query `Condition`: `all` and `any`, `NOT COALESCE(x, FALSE)` for NOT, and `LOWER(col) LIKE '%v%' ESCAPE '!'` for contains and free text |
+| MongoDB | A query: `$and`, `$or` and `$nor`, `$nin: [v, null]` for `!=`, and a case-insensitive `$regex` of the escaped value for contains and free text |
+| Tauri store | Evaluated in memory by `Expr::matches` |
+| Redis | Refused |
+
+`records::core::parse_filter` still returns runtime-go's flat list of `Clause`s for a
+filter that is only `AND`s, and refuses `OR`, `NOT` and free text.
 
 **Ordering** takes AIP-132 `field [desc], other`. The key always ends the order, so
 records with equal values keep a stable order from page to page.
@@ -395,7 +436,7 @@ Callers match on `database::Error`, never on a provider's own messages:
 | `NotFound` | `get`, `update` or `delete` of a key with no record |
 | `AlreadyExists` | `create` of a taken key; any write of a value another record holds in a unique column |
 | `Invalid(reason)` | A refused input ([Validation](#validation)), or a transaction's `DB` used after it ended |
-| `Unimplemented { backend, capability }` | A capability the provider lacks, or a filter on Redis |
+| `Unimplemented { backend, capability }` | A capability the provider lacks, or any AIP-160 filter on Redis |
 | `Backend { backend, source }` | The server or driver failed: connection lost, timeout, permission |
 
 ## Transactions, bulk, schema and watching
@@ -454,12 +495,15 @@ stream ends after its first error; resume from the last token you saw.
 - Times are BSON dates, so they keep milliseconds, not nanoseconds.
 - A column named twice in a filter keeps both bounds (`pages >= 2 AND pages < 5`).
   Go kept only the last.
+- A filter on a `uint64` past `i64::MAX` compares against the Decimal128 the value is
+  stored as. Bytes compare as the binary they are stored as. An empty bytes value is
+  stored as null, so it fails `cover != "x"`, where SQL's empty bytes pass.
 
 **Redis**
 - Records are proto wire bytes, so bytes and integers past 2^53 survive exactly.
 - An update or delete compares the stored bytes it read, and retries up to 16 times
   if another writer changed the record in between.
-- Transactions are refused, and so are filters.
+- Transactions are refused, and so are filters: Redis cannot run AIP-160.
 
 **Tauri store**
 - The plugin writes its file in place, not through a rename, so a crash mid-save can
@@ -472,6 +516,109 @@ stream ends after its first error; resume from the last token you saw.
 **Cache**
 - Keys are the record key alone, as in Go, so resources sharing one cache database
   must not share keys. AIP resource names never collide.
+
+## Repositories
+
+A repository is what a generated service persists one resource through: typed
+messages, resource names, etags, field masks and soft delete, on top of any records
+provider. `RecordsRepository<M>` implements the `Repository<M>` trait for any `DB`, as
+protoc-gen-store's Go `target=repository` does for GORM. Generated code supplies the
+`Resource` and the `Rules`; written by hand:
+
+```rust,ignore
+use database::repository::{Hooks, ListInput, RecordsRepository, Reference, Repository, Rules};
+
+let rules = Rules {
+    etag: Some("etag".into()),
+    delete_time: Some("delete_time".into()),        // turns on soft delete
+    expire_time: Some("expire_time".into()),
+    retention: Duration::from_secs(30 * 24 * 3600),
+    output_only: vec!["create_time".into(), "update_time".into(), "delete_time".into(),
+                      "expire_time".into(), "etag".into()],
+    pattern: "publishers/{publisher}/books/{book}".into(),
+    parent_column: Some("publisher_id".into()),     // field-less column, filled from the name
+    references: vec![Reference { field: "author".into(), pattern: "authors/{author}".into() }],
+};
+let books = RecordsRepository::<pb::Book>::new(&db, Arc::new(books_resource), rules)?
+    .with_hooks(Hooks::default().before_create(|mut b| async move { b.title = b.title.trim().into(); Ok(b) }));
+
+let book = books.create(&draft).await?;                          // etag minted, times set
+let book = books.update(&edit, &["title".into()]).await?;        // edit.etag guards it
+let page = books.list(&ListInput { parent: "publishers/p1".into(), ..Default::default() }).await?;
+books.delete(&book.name, Some(&book.etag)).await?;               // soft: delete_time set
+books.undelete(&book.name, None).await?;
+books.purge(&book.name).await?;
+```
+
+| Call | What it does |
+| --- | --- |
+| `create` | Runs `before_create`, mints the etag, writes, and returns the record read back. A root resource without a name gets `<collection>/<ULID>`; a taken name or unique value is `AlreadyExists` |
+| `get` | The record, soft-deleted or not |
+| `list`, `count` | `ListInput` as `ListOptions`; page tokens are the provider's. Soft-deleted records are left out unless `show_deleted`, and `parent` keeps one parent's records |
+| `update(m, paths)` | Merges the masked fields of `m` onto the stored record and mints an etag (below) |
+| `update_output_only(m, paths)` | The same for output-only fields, which `update` ignores; `paths` is required |
+| `delete(name, if_match)` | Soft delete, or a removal without a `delete_time` rule |
+| `undelete(name, if_match)` | Clears the soft-delete times; `AlreadyExists` on a live record |
+| `purge(name)` | Removes the record, deleted or not |
+
+**Etags** are ULIDs, monotonic within the process, minted on every write. A write
+carrying one (`m`'s etag field, or `if_match`) succeeds only while it is still the
+stored etag, else `Conflict`; an empty etag carries no precondition.
+
+**Field masks** (AIP-134):
+- an empty mask, or `*`, writes every mutable field;
+- an output-only path, the etag or an audit time is ignored (AIP-203);
+- a path naming no field is `Invalid`;
+- a path into a message field (`publish_time.seconds`) writes the whole field, and
+  one arm of a oneof the whole oneof.
+
+**Soft delete** (AIP-164), with a `delete_time` rule:
+- `delete` sets `delete_time`, moves `update_time` to the same instant, sets
+  `expire_time` to `delete_time` plus the retention (unset when zero), and mints an etag;
+- deleting a deleted record is `NotFound`;
+- `undelete` clears both times; `list` and `count` skip deleted records through a
+  `delete_time = null` clause ANDed onto the caller's filter.
+
+**Atomicity of a guarded write.** The etag check and the write run in one
+transaction where the provider has one:
+
+| Provider | How two writers holding one etag are kept apart |
+| --- | --- |
+| SQL | The read is `SELECT ... FOR UPDATE` (Postgres, MySQL): the second writer waits, then sees the new etag. SQLite locks the database |
+| MongoDB | A session transaction: the later writer's write conflict is `Conflict` |
+| Tauri store | The transaction holds the store's lock |
+| Redis | No transactions: the check and the write are two steps, so a writer landing between them is overwritten |
+
+**Names, parents and references**, as Go's adapter stores them, so Go and Rust share
+a table:
+- every name is checked against `pattern`, and a misfit is `Invalid`;
+- a root resource's field-less generated key column (`id`) is its name's last id; a
+  nested one's is a fresh ULID, since its id is unique only under its parent;
+- `parent_column` is filled from the parent's id in the name;
+- each of `references` is stored as the bare id and read back as the name;
+- an enum column with `labels` stores the label (`EBOOK`), not the number. On Postgres
+  a `sql_type` names its enum type, which `ensure_schema` creates.
+
+**Listing under a parent.** `ListInput.parent` narrows to one parent's records, as
+Go's `parentScope`:
+- with a `parent_column` and the parent's own id, by the clause `publisher_id = "p1"`;
+- with ids all `-` (AIP-159), or empty, every record;
+- otherwise (no parent column, or a `-` below a named ancestor) the repository matches
+  the records' names itself, reading every match.
+
+**Hooks** (`Hooks<M>`, Go's `<Model>Hooks`): `before_create`, `after_read`,
+`before_update` (inside the write's transaction, after the mask is applied) and
+`before_delete` (an error vetoes `delete` and `purge`).
+
+**Differences from Go.**
+- An unknown mask path is `Invalid`, where Go ignores it.
+- `*` is a full mask.
+- `create` takes the parent in the name rather than as an argument
+  (`publishers/p1/books/` mints the id).
+- Filters on a reference compare the stored bare id.
+- A parent column under a nested parent (Go looks up its surrogate) is refused.
+- Without a filter language (Redis), soft-deleted records and parents are filtered by
+  the repository, reading every record, and a caller's filter is refused as before.
 
 ## Time series: InfluxDB and Arrow
 
@@ -572,6 +719,8 @@ no-op by default. See [runtime telemetry](../telemetry/README.md).
 cargo test -p tpp-database                                    # contracts, Arrow, InfluxDB mocks
 cargo test -p tpp-database --features orm                     # SQLite, in process
 cargo test -p tpp-database --features tauri-store-test --test tauri_store   # Tauri's mock runtime
+cargo test -p tpp-database --features orm --test repository_sqlite          # repositories, in process
+cargo test -p tpp-database --features tauri-store-test --test repository_tauri
 ```
 
 The live suites need a server. Each has its own Compose file on a high port, so they
@@ -583,6 +732,7 @@ can run beside services you already have on the default ports:
 | MongoDB | `docker compose -f docker/compose.mongodb.live.yaml up -d --wait` (a single-node replica set on 27117) | `cargo test -p tpp-database --features mongodb,live-tests --test mongodb_live` |
 | Redis | `docker compose -f docker/compose.redis.live.yaml up -d --wait` (16381) | `cargo test -p tpp-database --features redis,live-tests --test redis_live` |
 | Cache | the cache's Redis, `../cache/docker/compose.live.yaml` (16379) | `cargo test -p tpp-database --features cached,live-tests --test cached_live` |
+| Repositories | the SQL, MongoDB and Redis files above | `cargo test -p tpp-database --features orm,mongodb,redis,live-tests --test repository_sql --test repository_mongodb --test repository_redis` |
 
 With `live-tests` on, an unreachable server fails the suite rather than skipping it,
 so a passing run means the provider was really exercised. CI runs every suite.

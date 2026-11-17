@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use prost_reflect::DynamicMessage;
-use sea_query::{Alias, Asterisk, Expr, ExprTrait, Query, SelectStatement, TableRef};
+use sea_query::{Alias, Asterisk, Expr, ExprTrait, Query, TableRef};
 use sea_query_sqlx::SqlxBinder;
 
 use super::engine::{Conn, Engine};
@@ -44,42 +44,31 @@ impl<E: Engine> SqlDriver<E> {
     }
 
     /// The table, schema-qualified when there is a schema. Go's `Driver.table`.
-    fn table(&self, res: &Resource) -> TableRef {
+    pub(super) fn table(&self, res: &Resource) -> TableRef {
         match self.schema_of(res) {
             "" => Alias::new(&res.table).into(),
             s => (Alias::new(s), Alias::new(&res.table)).into(),
         }
     }
 
-    fn sql(&self, q: &impl SqlxBinder) -> (String, sea_query_sqlx::SqlxValues) {
+    pub(super) fn sql(&self, q: &impl SqlxBinder) -> (String, sea_query_sqlx::SqlxValues) {
         q.build_sqlx(E::Builder::default())
     }
 
-    fn by_key(&self, res: &Resource, key: &str) -> Result<Expr> {
+    pub(super) fn by_key(&self, res: &Resource, key: &str) -> Result<Expr> {
         let (pk, v) = values::key(E::DIALECT, res, key)?;
         Ok(Expr::col(Alias::new(pk)).eq(v))
     }
 
-    /// Rows of a `SELECT *` as column maps keyed by the descriptor. Go's `fetch`.
-    async fn fetch(&self, res: &Resource, q: &SelectStatement) -> Result<Vec<Row>> {
-        let rows = self.conn.fetch(self.sql(q)).await?;
-        rows.iter()
-            .map(|row| {
-                let mut out = Row::new();
-                for col in &res.columns {
-                    if let Some(v) = E::decode(row, col)? {
-                        out.insert(col.name.clone(), v);
-                    }
-                }
-                Ok(out)
-            })
-            .collect()
-    }
-
-    fn values(&self, res: &Resource, cols: &Row) -> Result<Vec<(Alias, sea_query::Value)>> {
-        let col = |name: &str| res.lookup_column(name).map(|c| c.kind).unwrap_or_default();
+    /// Each column's value as an expression: bound, and cast where the column needs it.
+    fn values(&self, res: &Resource, cols: &Row) -> Result<Vec<(Alias, Expr)>> {
         cols.iter()
-            .map(|(k, v)| Ok((Alias::new(k), values::bind(E::DIALECT, col(k), v)?)))
+            .map(|(k, v)| {
+                let col = res.lookup_column(k);
+                let kind = col.map(|c| c.kind).unwrap_or_default();
+                let bound = values::bind(E::DIALECT, kind, v)?;
+                Ok((Alias::new(k), values::expr(E::DIALECT, col, bound)))
+            })
             .collect()
     }
 }
@@ -92,23 +81,19 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
         let (names, vals): (Vec<_>, Vec<_>) = self.values(res, &cols)?.into_iter().unzip();
         let mut q = Query::insert();
         q.into_table(self.table(res)).columns(names);
-        q.values(vals.into_iter().map(Expr::val))
-            .map_err(|e| Error::Invalid(e.to_string()))?;
+        q.values(vals).map_err(|e| Error::Invalid(e.to_string()))?;
         self.conn.execute(self.sql(&q)).await?;
         // What was stored, generated key and audit times included, not what was handed in.
         Ok(WriteResult::done(records::columns_to_message(res, &cols)?))
     }
 
     async fn get(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
-        let mut q = Query::select();
-        q.column(Asterisk)
-            .from(self.table(res))
-            .and_where(self.by_key(res, key)?)
-            .limit(1);
-        match self.fetch(res, &q).await?.first() {
-            Some(row) => records::columns_to_message(res, row),
-            None => Err(Error::NotFound),
-        }
+        self.read(res, key, false).await
+    }
+
+    /// `FOR UPDATE` inside a transaction; SQLite, which locks the database instead, has none.
+    async fn get_for_update(&self, res: &Resource, key: &str) -> Result<DynamicMessage> {
+        self.read(res, key, matches!(self.conn, Conn::Tx(..))).await
     }
 
     async fn update(&self, res: &Resource, msg: &DynamicMessage) -> Result<WriteResult> {
@@ -126,11 +111,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
         }
         let mut q = Query::update();
         q.table(self.table(res)).and_where(self.by_key(res, &key)?);
-        q.values(
-            self.values(res, &set)?
-                .into_iter()
-                .map(|(c, v)| (c, Expr::val(v))),
-        );
+        q.values(self.values(res, &set)?);
         if self.conn.execute(self.sql(&q)).await? == 0 {
             return Err(Error::NotFound);
         }
@@ -148,7 +129,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
     }
 
     async fn list(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
-        let cond = query::filter(E::DIALECT, res, &opts.filter)?;
+        let cond = query::filter(E::DIALECT, res, opts)?;
         let total = match opts.omit_total {
             true => core::NO_TOTAL,
             false => self.count(res, opts).await?,
@@ -178,7 +159,7 @@ impl<E: Engine> records::Driver for SqlDriver<E> {
     async fn count(&self, res: &Resource, opts: &ListOptions) -> Result<i64> {
         let mut q = Query::select();
         q.expr(Expr::col(Asterisk).count()).from(self.table(res));
-        q.cond_where(query::filter(E::DIALECT, res, &opts.filter)?);
+        q.cond_where(query::filter(E::DIALECT, res, opts)?);
         self.conn.count(self.sql(&q)).await
     }
 

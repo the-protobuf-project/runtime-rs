@@ -1,31 +1,21 @@
 //! Listing and counting. The store is an in-memory map, so a listing reads the resource's
-//! records and filters, orders and pages them here, with the same `core` filter subset,
+//! records and filters, orders and pages them here, with the same `core` filter tree,
 //! `order_by` resolution and offset tokens as every other backend.
 
 use std::cmp::Ordering;
 
 use super::codec;
 use super::driver::Inner;
-use crate::records::{ListOptions, ListResult, Resource, Row, Value, columns_to_message, core};
-use crate::{Error, Result};
+use crate::Result;
+use crate::records::core::{self, filter};
+use crate::records::{ListOptions, ListResult, Resource, Row, Value, columns_to_message};
 
 impl<R: tauri::Runtime> Inner<R> {
-    /// Every record of `res` matching `filter`, in store order.
-    pub(super) fn matching(&self, res: &Resource, filter: &str) -> Result<Vec<Row>> {
-        let clauses = core::parse_filter(filter)?
-            .into_iter()
-            .map(|c| {
-                let col = res.lookup_column(&c.column).ok_or_else(|| {
-                    Error::Invalid(format!(
-                        "filter names {:?}, which {} does not have",
-                        c.column, res.name
-                    ))
-                })?;
-                let v = core::coerce(col.kind, &c.value)
-                    .map_err(|e| Error::Invalid(format!("filter on {}: {e}", c.column)))?;
-                Ok((col.name.clone(), c.op, v))
-            })
-            .collect::<Result<Vec<_>>>()?;
+    /// Every record of `res` matching `opts`' filter and restrictions, in store order: the
+    /// [`filter::listing`] tree evaluated over each row by [`filter::Expr::matches`], the
+    /// reference the translating providers agree with.
+    pub(super) fn matching(&self, res: &Resource, opts: &ListOptions) -> Result<Vec<Row>> {
+        let expr = filter::listing(res, opts)?;
         let prefix = self.keys.records(res);
         let mut rows = Vec::new();
         for (key, json) in self.store.entries() {
@@ -33,12 +23,7 @@ impl<R: tauri::Runtime> Inner<R> {
                 continue;
             }
             let row = codec::decode(res, &json)?;
-            let keep = clauses.iter().all(|(col, op, want)| {
-                row.get(col)
-                    .and_then(|have| compare(have, want))
-                    .is_some_and(|o| holds(op, o))
-            });
-            if keep {
+            if expr.as_ref().is_none_or(|e| e.matches(&row)) {
                 rows.push(row);
             }
         }
@@ -46,7 +31,7 @@ impl<R: tauri::Runtime> Inner<R> {
     }
 
     pub(super) fn list(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
-        let mut rows = self.matching(res, &opts.filter)?;
+        let mut rows = self.matching(res, opts)?;
         let order = core::order_by(res, &opts.order_by);
         rows.sort_by(|a, b| {
             order.iter().fold(Ordering::Equal, |acc, (col, desc)| {
@@ -77,33 +62,6 @@ impl<R: tauri::Runtime> Inner<R> {
     }
 }
 
-/// How two values of one column compare; `None` when either is null or they are of different
-/// kinds, which no filter matches, as SQL's comparisons with `NULL` match nothing.
-fn compare(a: &Value, b: &Value) -> Option<Ordering> {
-    match (a, b) {
-        (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
-        (Value::Int(x), Value::Int(y)) => Some(x.cmp(y)),
-        (Value::Uint(x), Value::Uint(y)) => Some(x.cmp(y)),
-        (Value::Float(x), Value::Float(y)) => x.partial_cmp(y),
-        (Value::Bool(x), Value::Bool(y)) => Some(x.cmp(y)),
-        (Value::Bytes(x), Value::Bytes(y)) => Some(x.cmp(y)),
-        (Value::Timestamp(x), Value::Timestamp(y)) => Some(x.cmp(y)),
-        _ => None,
-    }
-}
-
-fn holds(op: &str, o: Ordering) -> bool {
-    match op {
-        "=" => o == Ordering::Equal,
-        "!=" => o != Ordering::Equal,
-        ">" => o == Ordering::Greater,
-        ">=" => o != Ordering::Less,
-        "<" => o == Ordering::Less,
-        "<=" => o != Ordering::Greater,
-        _ => false,
-    }
-}
-
 /// The order of two values in a listing: nulls first, as Postgres orders them descending
 /// and SQLite and MySQL ascending; incomparable values tie, leaving the key to decide.
 fn sort_key(a: Option<&Value>, b: Option<&Value>) -> Ordering {
@@ -112,8 +70,7 @@ fn sort_key(a: Option<&Value>, b: Option<&Value>) -> Ordering {
         (true, true) => Ordering::Equal,
         (true, false) => Ordering::Less,
         (false, true) => Ordering::Greater,
-        _ => {
-            compare(a.unwrap_or(&Value::Null), b.unwrap_or(&Value::Null)).unwrap_or(Ordering::Equal)
-        }
+        _ => filter::compare(a.unwrap_or(&Value::Null), b.unwrap_or(&Value::Null))
+            .unwrap_or(Ordering::Equal),
     }
 }

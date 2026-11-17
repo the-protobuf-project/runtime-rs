@@ -1,4 +1,4 @@
-//! The record-store contract without a backend: the filter subset, paging tokens, managed
+//! The record-store contract without a backend: the flat-conjunction filter, paging tokens, managed
 //! columns, the message/column bridge and capability refusals. Ported from runtime-go's
 //! `database/core` and `database/store` tests.
 

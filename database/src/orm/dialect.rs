@@ -78,12 +78,27 @@ impl Dialect {
         res.columns
             .iter()
             .map(|c| {
-                let ty = if c.sql_type.is_empty() {
+                // An enum stored by label is its Postgres enum type there; elsewhere text,
+                // held to the labels by a CHECK, as Go's gorm tag `check:... IN (...)` is.
+                let labelled = !c.labels.is_empty() && self != Dialect::Postgres;
+                let ty = if c.sql_type.is_empty() || labelled {
                     self.default_sql_type(c.kind)
                 } else {
                     &c.sql_type
                 };
                 let mut def = format!("{} {ty}", self.quote(&c.name));
+                if labelled {
+                    let labels: Vec<String> = c
+                        .labels
+                        .iter()
+                        .map(|(_, l)| format!("'{}'", l.replace('\'', "''")))
+                        .collect();
+                    def.push_str(&format!(
+                        " CHECK ({} IN ({}))",
+                        self.quote(&c.name),
+                        labels.join(", ")
+                    ));
+                }
                 if c.primary_key {
                     def.push_str(" PRIMARY KEY");
                 } else if c.unique {

@@ -20,10 +20,17 @@ cargo test -p tpp-database
 | `observations` | Every capability, complete stream lifetime, cancellation, safe exported signals |
 | `cached`, `cached_capabilities` | `database::cached` over an in-memory store and tpp-cache's in-memory Aside (feature `cached`) |
 | `file_size` | Rust sources/tests stay below 200 lines |
-| `records` | The record contract: filter subset, page tokens, managed columns, message/column bridge |
+| `records` | The record contract: the flat-conjunction filter, page tokens, managed columns, message/column bridge |
+| `filter`, `filter_errors` | AIP-160 parsed into `records::core::filter::Expr`: precedence, parentheses, quoting, typing, errors naming their position, and the conformance table over the in-memory reference |
 | `orm_driver`, `orm_provider`, `orm_sqlite`, `orm_statements`, `orm_dialect` (feature `orm-sqlite`) | runtime-go's `orm` tests on in-process SQLite: CRUD, error mapping, managed columns, paging, schema, tenants, transactions, statement counts, quoting and default types |
-| `records` | The record contract without a backend: filters, tokens, bridge, refusals |
+| `records` | The record contract without a backend: flat filters, tokens, bridge, refusals |
 | `mongodb_live` | MongoDB against a live replica set (needs `mongodb` + `live-tests`) |
+
+The AIP-160 conformance table, `support/filter_conformance.rs`, is five books, the
+filters and the books each must match, and the filters every provider refuses. Each
+provider's suite runs it as `aip160_conformance`: `orm_sqlite`, `orm_live` (Postgres and
+MySQL), `mongodb_live` and `tauri_store`, while `filter` runs it over the in-memory
+reference, `Expr::matches`.
 
 The ignored `live`, `live_lifecycle`, and `live_rate` targets require explicit
 real-server settings. They write data; lifecycle/rate tests create and delete

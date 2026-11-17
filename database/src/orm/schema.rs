@@ -6,6 +6,7 @@ use std::sync::Arc;
 use sea_query_sqlx::SqlxValues;
 use tokio::sync::Mutex;
 
+use super::Dialect;
 use super::driver::SqlDriver;
 use super::engine::{Conn, Engine, context, map};
 use crate::records::{Migrator, Resource, Transactional, TxWork};
@@ -85,6 +86,14 @@ impl<E: Engine> Migrator for SqlDriver<E> {
                 res.name
             )));
         }
+        for stmt in enum_types(E::DIALECT, res) {
+            if let Err(e) = self.conn.execute(bare(stmt)).await {
+                return Err(context(
+                    format!("cannot create the enum types of {}", res.name),
+                    e,
+                ));
+            }
+        }
         let table = self.quoted_table(res);
         let defs = E::DIALECT.column_defs(res);
         let stmt = format!("CREATE TABLE IF NOT EXISTS {table} ({defs})");
@@ -112,4 +121,32 @@ impl<E: Engine> Migrator for SqlDriver<E> {
         let q = E::has_table(self.schema_of(res), &res.table);
         Ok(self.conn.count(q).await? > 0)
     }
+}
+
+/// On Postgres, a `CREATE TYPE ... AS ENUM` for each enum column stored by label whose
+/// `sql_type` names its type, in number order, skipped when the type exists: the type the
+/// sql target's DDL declares. Elsewhere none: MySQL declares `ENUM(...)` inline and SQLite
+/// stores text.
+fn enum_types(d: Dialect, res: &Resource) -> Vec<String> {
+    if d != Dialect::Postgres {
+        return Vec::new();
+    }
+    let labelled = res.columns.iter();
+    let labelled = labelled.filter(|c| !c.labels.is_empty() && !c.sql_type.is_empty());
+    labelled
+        .map(|c| {
+            let mut labels = c.labels.clone();
+            labels.sort();
+            let labels: Vec<String> = labels
+                .iter()
+                .map(|(_, l)| format!("'{}'", l.replace('\'', "''")))
+                .collect();
+            format!(
+                "DO $$ BEGIN CREATE TYPE {} AS ENUM ({}); \
+                 EXCEPTION WHEN duplicate_object THEN NULL; END $$",
+                c.sql_type,
+                labels.join(", ")
+            )
+        })
+        .collect()
 }

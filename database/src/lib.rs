@@ -44,8 +44,9 @@
 //! db.close().await?; // drains every queue, then closes both stores
 //! ```
 //!
-//! Filters are the AIP-160 subset runtime-go accepts: conjunctions of
-//! `column op value` with = != > >= < <=. Times are epoch nanoseconds.
+//! Time-series filters are the AIP-160 subset runtime-go accepts: conjunctions of
+//! `column op value` with = != > >= < <=. Times are epoch nanoseconds. Record filters take
+//! the whole of AIP-160; see [`records::core::filter`].
 
 #![warn(missing_docs)]
 
@@ -74,6 +75,7 @@ pub mod orm;
 pub mod records;
 #[cfg(feature = "redis")]
 pub mod redis;
+pub mod repository;
 pub mod store;
 #[cfg(feature = "tauri-store")]
 pub mod tauri_store;

@@ -31,12 +31,13 @@
 //! Decimal128: BSON has no unsigned 64-bit integer, and Decimal128 holds it exactly while
 //! still sorting and comparing as a number on the server.
 //!
-//! # Filtering is a small subset, deliberately
+//! # Filtering
 //!
-//! [`ListOptions::filter`](crate::records::ListOptions::filter) accepts conjunctions of
-//! `column op value` with `= != > >= < <=`, values typed by the column's kind, and refuses
-//! anything else by name: a backend that accepted the whole of AIP-160 and honoured part of
-//! it would return the wrong records with nothing to say so.
+//! [`ListOptions::filter`](crate::records::ListOptions::filter) takes AIP-160 as
+//! [`records::core::filter`](crate::records::core::filter) parses it, as Go's `filterx` does.
+//! `AND`, `OR` and `NOT` are `$and`, `$or` and `$nor`. `!=` is `$nin: [value, null]`, so a
+//! null field fails it as in SQL. Contains and free text are case-insensitive `$regex`es of
+//! the escaped value. What the parser refuses is refused by name.
 
 mod bulk;
 mod client;

@@ -33,7 +33,12 @@ impl Migrator for MongoDriver {
                 return Err(backend(format!("cannot create {}", res.table), e));
             }
         }
-        for c in res.columns.iter().filter(|c| c.unique && !c.primary_key) {
+        // The key column is `_id`, unique by construction, whichever column is flagged primary.
+        for c in res
+            .columns
+            .iter()
+            .filter(|c| c.unique && c.name != res.pk_column)
+        {
             let index = IndexModel::builder()
                 .keys(doc! { c.name.clone(): 1 })
                 .options(

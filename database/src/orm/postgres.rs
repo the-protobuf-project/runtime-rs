@@ -39,6 +39,13 @@ impl Engine for Postgres {
                 DateTime<Utc> => Value::Timestamp,
                 NaiveDateTime => |t: NaiveDateTime| Value::Timestamp(t.and_utc()),
                 NaiveDate => |d: NaiveDate| Value::Timestamp(d.and_time(Default::default()).and_utc())),
+            // An enum stored by label is a Postgres enum type, whose text sqlx reads only
+            // unchecked: its wire format is the label's text.
+            Kind::String | Kind::Unknown if !col.labels.is_empty() => {
+                sqlx::Row::try_get_unchecked::<String, _>(row, i)
+                    .ok()
+                    .map(Value::String)
+            }
             Kind::String | Kind::Unknown => first_of!(row, i; String => Value::String),
         };
         v.map(Some).ok_or_else(|| undecodable(col))

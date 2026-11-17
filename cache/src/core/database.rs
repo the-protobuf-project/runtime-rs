@@ -136,8 +136,28 @@ pub struct DB {
     pub index: usize,
     /// Loader-independent dependencies for constructing Aside views.
     aside: AsideFactory,
+    /// What selected this database, kept so [`DB::under`] can select a sibling.
+    wiring: Wiring,
     /// Close-only ownership kept private so callers cannot bypass ordering.
     lifecycle: Lifecycle,
+}
+
+/// The selection-independent half of a [`DatabaseSpec`] plus the backend, retained so
+/// another namespace can be wired over the same connection and policy.
+#[derive(Clone)]
+struct Wiring {
+    driver: Arc<dyn Driver>,
+    capabilities: Capabilities,
+    prefix: String,
+    database: usize,
+    embed_db: bool,
+    default_ttl: Duration,
+    default_stale: Duration,
+    concurrency: usize,
+    require_ttl: bool,
+    new_id: NewId,
+    flight: Arc<Flight>,
+    refresher: Arc<Refresher>,
 }
 
 impl DB {
@@ -160,6 +180,26 @@ impl DB {
             NEGATIVE_TTL,
             LOCK_LEASE,
         ))
+    }
+
+    /// The same backend, prefix and policy selected under another namespace: every
+    /// strategy of the returned `DB` addresses `{prefix}:{namespace}:cache:...` exactly as
+    /// a `DB` selected by name from the provider would, without another selection.
+    ///
+    /// It is for a caller that owns one cache connection but addresses many namespaces,
+    /// such as a generated decorator whose namespace is derived per record (Go builds one
+    /// decorator per scope instead). The sibling shares this database's load and refresh
+    /// budgets, and a load is collapsed only with loads of the same key, so two siblings
+    /// never share a load. Closing a sibling drains the shared refreshes and releases
+    /// nothing: the backend belongs to the database it came from.
+    ///
+    /// **Cost**: Local allocations only; no backend round trip.
+    /// **Errors**: [`CacheError::Internal`] for a name [`check_namespace`] refuses.
+    ///
+    /// [`check_namespace`]: super::check_namespace
+    pub fn under(&self, namespace: &str) -> Result<DB> {
+        super::check_namespace(namespace)?;
+        Ok(assemble(self.wiring.clone(), namespace.to_owned(), None))
     }
 
     /// Drains background refreshes, then releases derived backend resources.
@@ -233,19 +273,38 @@ pub fn build_database(
     } else {
         spec.concurrency
     };
-    let keyspace = Keyspace::new(&spec.prefix, &spec.namespace, spec.database, spec.embed_db);
+    let new_id = match spec.new_id {
+        Some(new_id) => new_id,
+        None => default_new_id(),
+    };
+    let wiring = Wiring {
+        driver,
+        capabilities,
+        prefix: spec.prefix,
+        database: spec.database,
+        embed_db: spec.embed_db,
+        default_ttl: spec.default_ttl,
+        default_stale: spec.default_stale,
+        concurrency,
+        require_ttl: spec.require_ttl,
+        new_id,
+        flight: Arc::new(Flight::new(FLIGHT_BUDGET, FLIGHT_TIMEOUT)),
+        refresher: Arc::new(Refresher::new(REFRESH_BUDGET, LOAD_TIMEOUT)),
+    };
+    assemble(wiring, spec.namespace, spec.release)
+}
+
+/// Wires every strategy over `wiring` under `namespace`.
+fn assemble(wiring: Wiring, namespace: String, release: Option<Release>) -> DB {
+    let keyspace = Keyspace::new(&wiring.prefix, &namespace, wiring.database, wiring.embed_db);
+    let capabilities = &wiring.capabilities;
     let sets = capabilities.sets();
     let leases = capabilities.leases();
     let scanner = capabilities.scanner();
     let bulk = capabilities.bulk();
     let set_scanner = capabilities.set_scanner();
     let fenced = capabilities.fenced();
-    let new_id = match spec.new_id {
-        Some(new_id) => new_id,
-        None => default_new_id(),
-    };
-    let flight = Arc::new(Flight::new(FLIGHT_BUDGET, FLIGHT_TIMEOUT));
-    let refresher = Arc::new(Refresher::new(REFRESH_BUDGET, LOAD_TIMEOUT));
+    let driver = wiring.driver.clone();
 
     let document_wiring = DocumentWiring {
         driver: driver.clone(),
@@ -254,10 +313,10 @@ pub fn build_database(
         bulk: bulk.clone(),
         set_scanner: set_scanner.clone(),
         keyspace: keyspace.clone(),
-        default_ttl: spec.default_ttl,
-        require_ttl: spec.require_ttl,
-        concurrency,
-        new_id,
+        default_ttl: wiring.default_ttl,
+        require_ttl: wiring.require_ttl,
+        concurrency: wiring.concurrency,
+        new_id: wiring.new_id.clone(),
     };
     let document: Arc<dyn Document> = Arc::new(DocumentImpl::new_with_id(document_wiring.clone()));
     let volatile: Arc<dyn Volatile> = Arc::new(VolatileImpl::new_with_capabilities(
@@ -265,8 +324,8 @@ pub fn build_database(
         leases.clone(),
         scanner,
         keyspace.clone(),
-        spec.default_ttl,
-        spec.require_ttl,
+        wiring.default_ttl,
+        wiring.require_ttl,
     ));
     let indexed: Arc<dyn Indexed> = Arc::new(IndexedImpl::new_with_id(document_wiring));
 
@@ -275,25 +334,26 @@ pub fn build_database(
         volatile,
         indexed,
         backend: driver.name().to_owned(),
-        name: spec.namespace,
-        index: spec.database,
+        name: namespace,
+        index: wiring.database,
         aside: AsideFactory {
             driver,
             fenced,
             keyspace,
-            default_ttl: spec.default_ttl,
-            default_stale: spec.default_stale,
-            require_ttl: spec.require_ttl,
-            flight,
-            refresher: refresher.clone(),
+            default_ttl: wiring.default_ttl,
+            default_stale: wiring.default_stale,
+            require_ttl: wiring.require_ttl,
+            flight: wiring.flight.clone(),
+            refresher: wiring.refresher.clone(),
         },
         lifecycle: Lifecycle {
-            refresher,
+            refresher: wiring.refresher.clone(),
             state: Mutex::new(CloseState {
-                release: spec.release,
+                release,
                 receiver: None,
             }),
         },
+        wiring,
     }
 }
 
@@ -350,6 +410,49 @@ mod tests {
             db.indexed.ids_by_index("tenant", "acme").await.unwrap(),
             vec!["indexed-id".to_owned()]
         );
+    }
+
+    #[tokio::test]
+    async fn test_database_under_selects_a_sibling_namespace_over_one_backend() {
+        let driver = Arc::new(MemoryDriver::new());
+        let db = build_database(
+            driver.clone(),
+            Capabilities::new(),
+            DatabaseSpec {
+                prefix: "app".to_owned(),
+                namespace: "root".to_owned(),
+                default_ttl: Duration::from_secs(60),
+                ..DatabaseSpec::default()
+            },
+        );
+        let a = db.under("bookstore.v1.book.author.a").unwrap();
+        let b = db.under("bookstore.v1.book.author.b").unwrap();
+        assert_eq!(a.name, "bookstore.v1.book.author.a");
+
+        let loads = Arc::new(AtomicUsize::new(0));
+        let loader = |tag: &'static str, loads: Arc<AtomicUsize>| -> Loader {
+            Arc::new(move |_| {
+                loads.fetch_add(1, Ordering::SeqCst);
+                async move { Ok(tag.as_bytes().to_vec()) }.boxed()
+            })
+        };
+        let mut out = Vec::new();
+        a.aside(loader("\"a\"", loads.clone()))
+            .get_or_load("same", &mut out, &Options::default())
+            .await
+            .unwrap();
+        assert_eq!(out, b"\"a\"");
+        b.aside(loader("\"b\"", loads.clone()))
+            .get_or_load("same", &mut out, &Options::default())
+            .await
+            .unwrap();
+        assert_eq!(out, b"\"b\"", "one id under two namespaces is two entries");
+        assert_eq!(loads.load(Ordering::SeqCst), 2);
+
+        // The sibling's keys are the ones a provider selection of that name would build.
+        let direct = Keyspace::new("app", "bookstore.v1.book.author.a", 0, false);
+        assert!(driver.get(&direct.aside_entry("same")).await.is_ok());
+        assert!(db.under("bad:name").is_err());
     }
 
     #[tokio::test]

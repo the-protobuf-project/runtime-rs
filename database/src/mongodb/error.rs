@@ -30,12 +30,29 @@ pub(super) fn backend(what: impl Into<String>, source: MongoError) -> Error {
     }
 }
 
-/// `source` as `AlreadyExists` when it is a unique-index violation, else as [`backend`].
+/// The code a transaction's write reports when another transaction wrote the document
+/// since this one's snapshot.
+const WRITE_CONFLICT: i32 = 112;
+
+/// `source` as `AlreadyExists` when it is a unique-index violation, as `Conflict` when a
+/// concurrent transaction wrote the document first (another writer won; a retry against
+/// fresh state is meaningful, as Go maps a serialization failure), else as [`backend`].
 pub(super) fn write(what: impl Into<String>, source: MongoError) -> Error {
     if is_duplicate_key(&source) {
         Error::AlreadyExists
+    } else if code_of(&source) == Some(WRITE_CONFLICT) {
+        Error::Conflict
     } else {
         backend(what, source)
+    }
+}
+
+/// The server's code for a single write's or a command's failure.
+fn code_of(err: &MongoError) -> Option<i32> {
+    match err.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(e)) => Some(e.code),
+        ErrorKind::Command(e) => Some(e.code),
+        _ => None,
     }
 }
 

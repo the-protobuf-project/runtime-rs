@@ -59,7 +59,7 @@ impl Driver for MongoDriver {
     async fn delete(&self, res: &Resource, key: &str) -> Result<()> {
         let coll = self.collection(res)?;
         let deleted = exec!(self, coll.delete_one(doc! { "_id": key_bson(res, key) }))
-            .map_err(|e| backend(format!("cannot delete {key}"), e))?;
+            .map_err(|e| write(format!("cannot delete {key}"), e))?;
         if deleted.deleted_count == 0 {
             return Err(Error::NotFound);
         }
@@ -70,7 +70,7 @@ impl Driver for MongoDriver {
     /// `omit_total` reads one extra document to learn whether another follows.
     async fn list(&self, res: &Resource, opts: &ListOptions) -> Result<ListResult> {
         let coll = self.collection(res)?;
-        let filter = parse_filter(res, &opts.filter)?;
+        let filter = parse_filter(res, opts)?;
         let total = if opts.omit_total {
             core::NO_TOTAL
         } else {
@@ -102,7 +102,7 @@ impl Driver for MongoDriver {
 
     async fn count(&self, res: &Resource, opts: &ListOptions) -> Result<i64> {
         let coll = self.collection(res)?;
-        let filter = parse_filter(res, &opts.filter)?;
+        let filter = parse_filter(res, opts)?;
         self.count_filter(res, &coll, filter).await
     }
 

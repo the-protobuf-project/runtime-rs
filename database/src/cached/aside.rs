@@ -106,7 +106,7 @@ fn unwire(body: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// A cache failure as a database error: the cache backend's, not the store's.
-fn cache_error(err: CacheError) -> Error {
+pub(crate) fn cache_error(err: CacheError) -> Error {
     Error::Backend {
         backend: "cache",
         source: Box::new(err),
@@ -116,7 +116,7 @@ fn cache_error(err: CacheError) -> Error {
 /// The store's own error back out of the cache. One load's error reaches every caller it
 /// collapsed, so each gets an equal copy: the variant itself where it can be rebuilt, and
 /// otherwise a backend error sharing the original as its source.
-fn restore(source: Arc<dyn std::error::Error + Send + Sync>) -> Error {
+pub(crate) fn restore(source: Arc<dyn std::error::Error + Send + Sync>) -> Error {
     let Some(err) = source.downcast_ref::<Error>() else {
         return cache_error(CacheError::Loader(source));
     };

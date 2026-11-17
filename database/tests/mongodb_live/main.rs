@@ -13,6 +13,8 @@
 //! `RUNTIME_DATABASE_MONGODB_ADDRESS` defaults to `127.0.0.1:27117`. Every test works in its
 //! own database, dropped afterwards, panic or not.
 
+#[path = "../support/filter_conformance.rs"]
+mod filter_conformance;
 #[path = "../support/records.rs"]
 mod support;
 

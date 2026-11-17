@@ -3,6 +3,8 @@
 //! where Go's `TestTransactionCommits` and `TestTransactionRollsBack` run for SQLite.
 
 mod support {
+    #[path = "filter_conformance.rs"]
+    pub mod filter_conformance;
     #[path = "orm.rs"]
     pub mod orm;
     #[path = "orm_edges.rs"]
@@ -55,4 +57,9 @@ async fn contract_edges() {
 #[tokio::test]
 async fn omit_total_pages_to_the_end() {
     orm_scenarios::omit_total_pages_to_the_end(&open().await).await;
+}
+
+#[tokio::test]
+async fn aip160_conformance() {
+    orm_edges::conformance(&open().await, Dialect::Sqlite).await;
 }

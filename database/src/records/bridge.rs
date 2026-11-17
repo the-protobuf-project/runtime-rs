@@ -7,6 +7,7 @@ use prost_reflect::{DynamicMessage, FieldDescriptor, Kind as ProtoKind, ReflectM
 use super::convert::{to_bool, to_bytes, to_f64, to_i64, to_time, to_u64};
 use super::{Kind, Resource, Row, Value};
 use crate::{Error, Result};
+use prost_reflect::Value as P;
 
 const TIMESTAMP: &str = "google.protobuf.Timestamp";
 
@@ -21,8 +22,18 @@ pub fn message_to_columns(res: &Resource, msg: &impl ReflectMessage) -> Result<R
             out.insert(col.name.clone(), Value::Null);
             continue;
         }
-        let v = get_value(col.kind, &fd, &msg.get_field(&fd))
+        let mut v = get_value(col.kind, &fd, &msg.get_field(&fd))
             .map_err(|e| column_error(res, &col.name, e))?;
+        if !col.labels.is_empty() {
+            v = match v {
+                Value::Int(n) => col.label_of(n as i32).map(|l| Value::String(l.to_owned())),
+                other => Some(other),
+            }
+            .unwrap_or(Value::Null);
+            if v == Value::Null && col.not_null {
+                continue;
+            }
+        }
         out.insert(col.name.clone(), v);
     }
     Ok(out)
@@ -37,7 +48,10 @@ pub fn columns_to_message(res: &Resource, row: &Row) -> Result<DynamicMessage> {
             continue;
         };
         let fd = field(res, &msg, &col.name, &col.field)?;
-        let v = proto_value(col.kind, &fd, val).map_err(|e| column_error(res, &col.name, e))?;
+        let v = match (val, col.labels.is_empty()) {
+            (Value::String(l), false) => P::EnumNumber(col.number_of(l).unwrap_or(0)),
+            _ => proto_value(col.kind, &fd, val).map_err(|e| column_error(res, &col.name, e))?,
+        };
         msg.set_field(&fd, v);
     }
     Ok(msg)

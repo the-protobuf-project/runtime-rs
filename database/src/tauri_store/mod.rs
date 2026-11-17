@@ -27,7 +27,8 @@
 //! - **Transactions:** the work holds the lock; it commits with one save and rolls back by
 //!   restoring the selected database's keys. Nesting is refused.
 //! - **Listing:** filters, `order_by` and paging run in memory over the resource's records,
-//!   with the `core` subset every backend shares. Nulls sort first.
+//!   with the AIP-160 tree every backend shares, evaluated by
+//!   [`Expr::matches`](crate::records::core::filter::Expr::matches). Nulls sort first.
 //! - **Bulk:** `create_many` is all or nothing, in one save.
 //! - **Watching:** refused; the plugin's change events go to the webview.
 
