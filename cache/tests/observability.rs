@@ -72,7 +72,8 @@ async fn all_document_calls_share_the_runtime_policy() {
         Duration::from_secs(1)
     );
     let events = logs.0.lock().unwrap();
-    assert_eq!(events.len(), 7);
+    // Seven calls, each logged when it starts and when it completes.
+    assert_eq!(events.len(), 14);
     assert!(events.iter().any(|event| event.contains("not_found")));
     assert!(
         events

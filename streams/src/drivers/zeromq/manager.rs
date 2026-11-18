@@ -189,7 +189,7 @@ impl Subscriber for ZmqManager {
             () = tokio::time::sleep(self.shared.settle) => {}
             _ = closed.wait_for(|closed| *closed) => return Err(Self::closed()),
         }
-        tracing::info!(subject, endpoint, topic, "zeromq: subscribed");
+        tracing::debug!(subject, endpoint, topic, "zeromq: subscribed");
 
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let receive = Receive {
@@ -262,7 +262,7 @@ impl Receive {
                 _ = self.closed.wait_for(|closed| *closed) => break,
             }
         }
-        tracing::info!(subject, delivered, "zeromq: subscription closed");
+        tracing::debug!(subject, delivered, "zeromq: subscription closed");
     }
 
     /// Waits for the next message on this subject, or `None` once the

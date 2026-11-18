@@ -219,7 +219,7 @@ impl Subscriber for DurableManager {
         // getting as far as its first read.
         let mut last = last_id(&self.inner, &key).await?;
         let mut conn = self.inner.blocking_conn().await?;
-        tracing::info!(subject, key, from = %last, "subscribed");
+        tracing::debug!(subject, key, from = %last, "subscribed");
 
         let (tx, rx) = mpsc::channel(capacity(opts));
         let registry = self.inner.registry.clone();
@@ -264,7 +264,7 @@ impl Subscriber for DurableManager {
                     }
                 }
             }
-            tracing::info!(subject, delivered, "subscription closed");
+            tracing::debug!(subject, delivered, "subscription closed");
         });
         Ok(ReceiverStream::new(rx).boxed())
     }
@@ -348,7 +348,7 @@ impl Positioned for DurableManager {
 
         let reader = self.inner.blocking_conn().await?;
         let name = consumer_name();
-        tracing::info!(subject, consumer, identity = %name, from = start, "consuming");
+        tracing::debug!(subject, consumer, identity = %name, from = start, "consuming");
 
         let (tx, rx) = mpsc::channel(capacity(opts));
         let target = Arc::new(AckTarget {
@@ -473,7 +473,7 @@ impl ConsumeLoop {
                 Err(_) => break,
             }
         }
-        tracing::info!(subject = %self.subject, consumer = %self.group, delivered, "consumer stopped");
+        tracing::debug!(subject = %self.subject, consumer = %self.group, delivered, "consumer stopped");
         self.leave().await;
     }
 
@@ -493,7 +493,7 @@ impl ConsumeLoop {
             }
             match self.inner.blocking_conn().await {
                 Ok(conn) => {
-                    tracing::info!(subject = %self.subject, consumer = %self.group,
+                    tracing::debug!(subject = %self.subject, consumer = %self.group,
                         "consumer reconnected");
                     return Some(conn);
                 }

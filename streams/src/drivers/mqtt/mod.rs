@@ -364,7 +364,7 @@ impl Streams for MqttProvider {
         };
         let out = declaration(id.clone(), stream);
         self.inner.write().insert(id.clone(), out.clone());
-        tracing::info!(stream = %id, name = %out.name, subjects = ?out.subjects, "mqtt: stream declared");
+        tracing::debug!(stream = %id, name = %out.name, subjects = ?out.subjects, "mqtt: stream declared");
         Ok(out)
     }
 

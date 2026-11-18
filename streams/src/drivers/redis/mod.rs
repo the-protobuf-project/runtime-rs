@@ -408,7 +408,7 @@ impl Inner {
         // failure for seconds, a refused HELLO included.
         let client = match resp3.get_multiplexed_async_connection().await {
             Err(error) if error.kind() == redis::ErrorKind::RESP3NotSupported => {
-                tracing::info!("redis: server predates RESP3; using the client's protocol");
+                tracing::debug!("redis: server predates RESP3; using the client's protocol");
                 self.client.clone()
             }
             _ => resp3,

@@ -24,12 +24,15 @@ async fn completion_exports_metrics_logs_and_a_correlated_child_span() {
     let spans = h.traces.get_finished_spans().unwrap();
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].parent_span_id, parent_id);
+    // Started and completed, both correlated with the operation's span.
     let logs = h.logs.get_emitted_logs().unwrap();
-    assert_eq!(logs.len(), 1);
-    assert_eq!(
-        logs[0].record.trace_context().unwrap().span_id,
-        spans[0].span_context.span_id()
-    );
+    assert_eq!(logs.len(), 2);
+    for log in &logs {
+        assert_eq!(
+            log.record.trace_context().unwrap().span_id,
+            spans[0].span_context.span_id()
+        );
+    }
     let measurements = h.measurements();
     assert!(
         measurements
@@ -71,7 +74,7 @@ async fn dropping_an_inflight_future_finishes_once_as_cancelled() {
             .iter()
             .any(|kv| kv.key.as_str() == "outcome" && kv.value.to_string() == "cancelled")
     );
-    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 1);
+    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 2);
     assert!(
         h.measurements()
             .iter()

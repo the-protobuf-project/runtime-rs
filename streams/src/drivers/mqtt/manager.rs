@@ -393,7 +393,7 @@ impl Durable for MqttManager {
                 Session::Durable { expiry, prefetch },
             )
             .await?;
-        tracing::info!(subject, consumer, group = ?opts.group, client_id, "mqtt: consuming");
+        tracing::debug!(subject, consumer, group = ?opts.group, client_id, "mqtt: consuming");
 
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();

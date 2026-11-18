@@ -186,7 +186,7 @@ impl ZmqProvider {
             StreamError::internal(&format!("zeromq: cannot bind {}", config.endpoint), error)
         })?;
         let endpoint = bound.to_string();
-        tracing::info!(endpoint, "zeromq: publishing");
+        tracing::debug!(endpoint, "zeromq: publishing");
         Ok(Self::build(
             endpoint,
             config,
@@ -204,7 +204,7 @@ impl ZmqProvider {
     pub fn subscriber(config: ZmqConfig) -> Result<Self> {
         check_endpoint(&config.endpoint)?;
         let endpoint = config.endpoint.clone();
-        tracing::info!(endpoint, "zeromq: subscribing");
+        tracing::debug!(endpoint, "zeromq: subscribing");
         Ok(Self::build(endpoint, config, Role::Subscriber))
     }
 
@@ -290,7 +290,7 @@ impl Streams for ZmqProvider {
         };
         let out = declaration(id.clone(), stream);
         self.declared_mut().insert(id.clone(), out.clone());
-        tracing::info!(id, name = out.name, subjects = ?out.subjects, "zeromq: stream declared");
+        tracing::debug!(id, name = out.name, subjects = ?out.subjects, "zeromq: stream declared");
         Ok(out)
     }
 

@@ -237,7 +237,7 @@ impl Streams for KafkaProvider {
         // let a publish fail against a stream the caller was just told exists.
         self.create_subject_topics(&out).await?;
         self.write_meta(&out.id, Some(&out)).await?;
-        tracing::info!(id = %out.id, name = %out.name, subjects = ?out.subjects, "stream created");
+        tracing::debug!(id = %out.id, name = %out.name, subjects = ?out.subjects, "stream created");
         Ok(out)
     }
 
@@ -270,7 +270,7 @@ impl Streams for KafkaProvider {
         let out = declaration(name, stream);
         self.create_subject_topics(&out).await?;
         self.write_meta(&out.id, Some(&out)).await?;
-        tracing::info!(id = %out.id, "stream updated");
+        tracing::debug!(id = %out.id, "stream updated");
         Ok(out)
     }
 
@@ -300,7 +300,7 @@ impl Streams for KafkaProvider {
                 })?;
         }
         self.write_meta(&name, None).await?;
-        tracing::info!(id = %name, "stream deleted");
+        tracing::debug!(id = %name, "stream deleted");
         Ok(())
     }
 

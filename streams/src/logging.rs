@@ -70,7 +70,7 @@ struct Closed {
 impl Drop for Closed {
     /// Fires once, when the subscription stream that owns this guard is dropped.
     fn drop(&mut self) {
-        tracing::info!(
+        tracing::debug!(
             subject = self.subject,
             delivered = self.delivered,
             "subscription closed"
@@ -89,7 +89,7 @@ impl Subscriber for LoggingSubscriber {
                 return Err(error);
             }
         };
-        tracing::info!(subject, "subscribed");
+        tracing::debug!(subject, "subscribed");
         let mut closed = Closed {
             subject: subject.to_owned(),
             delivered: 0,

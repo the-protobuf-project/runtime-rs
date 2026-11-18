@@ -353,7 +353,7 @@ impl Subscriber for RabbitManager {
             )));
         }
         let consumer = self.attach(subject, Attach::Transient, opts).await?;
-        tracing::info!(subject, stream = %self.stream.id, "rabbitmq: subscribed");
+        tracing::debug!(subject, stream = %self.stream.id, "rabbitmq: subscribed");
 
         let registry = self.shared.config.registry.clone();
         let wanted = subject.to_owned();
@@ -408,7 +408,7 @@ impl Durable for RabbitManager {
         let amqp = self
             .attach(subject, Attach::Durable(&safe_name(consumer)), opts)
             .await?;
-        tracing::info!(subject, consumer, stream = %self.stream.id, "rabbitmq: consuming");
+        tracing::debug!(subject, consumer, stream = %self.stream.id, "rabbitmq: consuming");
 
         let registry = self.shared.config.registry.clone();
         let metrics = self.shared.config.metrics.clone();

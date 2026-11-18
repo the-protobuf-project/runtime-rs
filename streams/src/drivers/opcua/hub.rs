@@ -580,7 +580,7 @@ impl Hub {
             if monitored == index {
                 continue;
             }
-            tracing::info!(subject = %subject, from = monitored, to = index,
+            tracing::debug!(subject = %subject, from = monitored, to = index,
                 "opcua: the server renumbered a namespace; moving the monitored item");
             if let Some(found) = found
                 && let Err(error) = self

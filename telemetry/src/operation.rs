@@ -84,10 +84,10 @@ impl Operation {
             }
         }
         if let Some(logs) = &self.observer.0.telemetry.logs {
+            // Errors are errors; everything else, a conflict and a miss
+            // included, is a routine result and logs at debug.
             let level = if outcome.is_error() {
                 Severity::Error
-            } else if matches!(outcome, Outcome::Conflict | Outcome::NotFound) {
-                Severity::Info
             } else {
                 Severity::Debug
             };
