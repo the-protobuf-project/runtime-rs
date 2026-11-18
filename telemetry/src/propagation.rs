@@ -1,10 +1,13 @@
-//! W3C Trace Context in message and request headers, without global propagators.
+//! W3C Trace Context and W3C Baggage in message and request headers, without
+//! global propagators.
 //!
 //! `inject` writes the span a context carries as `traceparent` (and
-//! `tracestate`) into any header carrier; `extract` reads them back into a
-//! context whose remote span parents the receiver's own. The encoding is the
-//! one runtime-go's SDK propagator writes, so a trace crosses between the two
-//! languages through a stream message, an HTTP request or a gRPC call.
+//! `tracestate`), and its baggage as `baggage`, into any header carrier;
+//! `extract` reads them back into a context whose remote span parents the
+//! receiver's own and which carries the caller's baggage. The encoding is the
+//! one runtime-go's SDK propagator writes, so a trace and its baggage cross
+//! between the two languages through a stream message, an HTTP request or a
+//! gRPC call.
 use opentelemetry::{
     Context,
     propagation::{Extractor, Injector},
@@ -16,9 +19,15 @@ use std::str::FromStr;
 pub const TRACEPARENT: &str = "traceparent";
 /// The W3C header carrying vendor trace state.
 pub const TRACESTATE: &str = "tracestate";
-
-/// Writes the span `cx` carries into `headers`; writes nothing when it has none.
+/// The W3C header carrying baggage: request-scoped key/values every service
+/// downstream receives.
+pub const BAGGAGE: &str = "baggage";
+/// Writes the span `cx` carries, and its baggage, into `headers`; writes no
+/// trace headers when it carries no span, and no `baggage` when it has none.
 pub fn inject(cx: &Context, headers: &mut dyn Injector) {
+    if let Some(header) = crate::baggage::header(cx) {
+        headers.set(BAGGAGE, header);
+    }
     let span = cx.span();
     let sc = span.span_context();
     if !sc.is_valid() {
@@ -47,6 +56,10 @@ pub fn extract(headers: &dyn Extractor) -> Context {
 
 /// [`extract`] onto an existing context, keeping its other values.
 pub fn extract_into(cx: Context, headers: &dyn Extractor) -> Context {
+    let cx = match headers.get(BAGGAGE) {
+        Some(header) => crate::baggage::with_header(cx, header),
+        None => cx,
+    };
     match headers.get(TRACEPARENT).and_then(parse) {
         Some((trace_id, span_id, flags)) => {
             let state = headers

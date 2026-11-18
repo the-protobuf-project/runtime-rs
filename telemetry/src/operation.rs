@@ -13,6 +13,7 @@ pub struct Operation {
     pub(crate) observer: Observer,
     pub(crate) context: Context,
     pub(crate) attributes: Vec<KeyValue>,
+    pub(crate) baggage: Vec<KeyValue>,
     pub(crate) started: Instant,
     pub(crate) finished: bool,
     pub(crate) read: u64,
@@ -73,6 +74,7 @@ impl Operation {
         attributes.push(KeyValue::new("duration_seconds", duration));
         attributes.push(KeyValue::new("records_read", self.read as i64));
         attributes.push(KeyValue::new("records_written", self.written as i64));
+        attributes.extend(self.baggage.iter().cloned());
         let span = self.context.span();
         // Without an injected tracer, never modify/end the caller's parent span.
         if self.observer.0.telemetry.tracer.is_some() {
