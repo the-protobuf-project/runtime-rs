@@ -173,6 +173,13 @@ jobs:
       - name: Clippy (tpp-database, all features)
         run: cargo clippy -p tpp-database --all-targets --features orm,mongodb,redis,cached,live-tests -- -D warnings
 
+      # servicex alone, as a generated service depends on it: no server stack,
+      # and with the standard methods over repositories.
+      - name: Clippy (tpp-grpc servicex, no server)
+        run: |
+          cargo clippy -p tpp-grpc --no-default-features --lib -- -D warnings
+          cargo clippy -p tpp-grpc --no-default-features --features servicex-store --lib -- -D warnings
+
       # tools/docgen is excluded from the workspace, so --workspace above
       # does not reach it. Held to the same bar rather than left to rot.
       - name: Format check (tools/docgen)

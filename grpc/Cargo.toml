@@ -18,11 +18,17 @@ use-for = "Serve one service over gRPC, REST, HTTP/3, MCP and A2A on one port"
 name = "grpc"
 
 [features]
-default = ["tls", "http3", "a2a"]
+default = ["server", "tls", "http3", "a2a"]
+# The hybrid gRPC/REST/MCP server: everything in this crate but servicex. A generated
+# service in the handler model depends on this crate with default-features = false for
+# servicex alone, and compiles none of the server stack.
+server = ["dep:agents", "dep:tokio", "dep:tokio-util", "dep:tokio-stream", "dep:tonic-health", "dep:tonic-reflection", "dep:tonic-web", "dep:transcode", "dep:futures-util", "dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:hyper-util", "dep:http", "dep:bytes", "dep:http-body", "dep:http-body-util", "dep:serde", "dep:thiserror", "dep:tracing", "dep:owo-colors", "dep:unicode-width", "dep:async-trait", "dep:telemetry", "dep:protovalidate", "dep:sha2"]
+# servicex's standard-method handlers over runtime-rs repositories (store=true).
+servicex-store = ["dep:database"]
 # TLS for gRPC, the REST gateway and HTTP/3, on rustls with ring. A feature because ring
 # is C: with it off nothing in this crate's graph needs a C compiler, which is what lets a
 # local daemon serving only a Unix socket or named pipe cross-compile with Cargo alone.
-tls = ["tonic/tls-ring", "dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
+tls = ["server", "tonic/tls-ring", "dep:rustls", "dep:rustls-pemfile", "dep:tokio-rustls"]
 # HTTP/3 pulls in QUIC. It is a feature rather than a hard dependency because the
 # gateway is complete without it and quinn is a large tree to build for nothing. QUIC has
 # no plaintext mode, so it brings TLS with it.
@@ -30,47 +36,52 @@ http3 = ["tls", "dep:h3", "dep:h3-quinn", "dep:quinn"]
 # Agent2Agent. A feature because its SDK brings reqwest and aws-lc, which a server speaking
 # gRPC, REST and MCP has no use for. MCP has no feature of its own: the server is written
 # against it throughout.
-a2a = ["agents/a2a"]
+a2a = ["server", "agents/a2a"]
 
 [dependencies]
-agents = { workspace = true, features = ["mcp"] }
+# What the generated services' servicex needs, on with or without the server.
+futures-core = "0.3"
+# servicex's handlers over runtime-rs repositories (store=true), behind servicex-store.
+database = { package = "tpp-database", path = "../database", default-features = false, optional = true }
+agents = { workspace = true, features = ["mcp"], optional = true }
 
-tokio = { workspace = true, features = ["signal"] }
-tokio-util = { workspace = true }
-tokio-stream = { workspace = true }
+tokio = { workspace = true, features = ["signal"], optional = true }
+tokio-util = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
 tonic = { workspace = true }
-tonic-health = { workspace = true }
-tonic-reflection = { workspace = true }
-tonic-web = { workspace = true }
-transcode = { workspace = true }
+tonic-health = { workspace = true, optional = true }
+tonic-reflection = { workspace = true, optional = true }
+tonic-web = { workspace = true, optional = true }
+transcode = { workspace = true, optional = true }
 prost = { workspace = true }
-prost-reflect = { workspace = true }
-futures-util = { workspace = true }
-axum = { workspace = true }
-tower = { workspace = true }
-tower-http = { workspace = true }
-hyper = { workspace = true }
-hyper-util = { workspace = true }
-http = { workspace = true }
-bytes = { workspace = true }
-http-body = { workspace = true }
-http-body-util = { workspace = true }
+prost-reflect = { workspace = true, features = ["serde"] }
+prost-types = "0.14"
+futures-util = { workspace = true, optional = true }
+axum = { workspace = true, optional = true }
+tower = { workspace = true, optional = true }
+tower-http = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true }
+hyper-util = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+bytes = { workspace = true, optional = true }
+http-body = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
 
 rustls = { workspace = true, optional = true }
 rustls-pemfile = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }
 
-serde = { workspace = true }
+serde = { workspace = true, optional = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-owo-colors = { workspace = true }
-unicode-width = { workspace = true }
-async-trait = { workspace = true }
-telemetry = { workspace = true }
+thiserror = { workspace = true, optional = true }
+tracing = { workspace = true, optional = true }
+owo-colors = { workspace = true, optional = true }
+unicode-width = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+telemetry = { workspace = true, optional = true }
 tonic-types = { workspace = true }
-protovalidate = { workspace = true }
-sha2 = { workspace = true }
+protovalidate = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
 
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }

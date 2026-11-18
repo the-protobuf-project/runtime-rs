@@ -14,6 +14,16 @@ const C_CRYPTO: [&str; 3] = ["ring v", "aws-lc-rs v", "aws-lc-sys v"];
 /// Fails rather than returning an empty graph: a tree too small to hold axum was not read,
 /// and every absence asserted against it would pass for no reason.
 fn packages(package: &str, features: &[&str]) -> String {
+    let tree = graph(package, features);
+    assert!(
+        tree.lines().count() > 20 && tree.contains("axum v"),
+        "the graph of {package} was not read:\n{tree}"
+    );
+    tree
+}
+
+/// The packages a build of `package` with only `features` links, unchecked.
+fn graph(package: &str, features: &[&str]) -> String {
     let manifest = concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml");
     let cargo = std::env::var("CARGO").expect("cargo test sets CARGO");
     let mut command = Command::new(cargo);
@@ -26,12 +36,7 @@ fn packages(package: &str, features: &[&str]) -> String {
     }
     let output = command.output().expect("cargo tree runs");
     assert!(output.status.success(), "{output:?}");
-    let tree = String::from_utf8(output.stdout).expect("utf-8");
-    assert!(
-        tree.lines().count() > 20 && tree.contains("axum v"),
-        "the graph of {package} was not read:\n{tree}"
-    );
-    tree
+    String::from_utf8(output.stdout).expect("utf-8")
 }
 
 /// The C crypto crates `tree` names.
@@ -56,7 +61,7 @@ fn the_a2a_feature_brings_the_sdk_back() {
 
 #[test]
 fn without_tls_nothing_links_ring_or_aws_lc() {
-    let tree = packages("tpp-grpc", &[]);
+    let tree = packages("tpp-grpc", &["server"]);
     assert!(tree.contains("tonic v"), "the tree was read: {tree}");
     assert!(tree.contains("rmcp v"), "MCP stays: {tree}");
     for absent in ["rustls v", "tokio-rustls v", "quinn v"] {
@@ -69,6 +74,24 @@ fn without_tls_nothing_links_ring_or_aws_lc() {
 fn the_mcp_path_through_the_agents_crate_links_no_c_crypto() {
     let tree = packages("tpp-agents", &["mcp"]);
     assert!(tree.contains("rmcp v"), "the tree was read: {tree}");
+    assert!(c_crypto(&tree).is_empty(), "C crypto is linked:\n{tree}");
+}
+
+/// servicex alone, as a generated service depends on it, links none of this
+/// crate's server: no MCP, no REST gateway layers, no TLS, no QUIC and no C
+/// crypto. (axum and hyper still come in through tonic's own router, which
+/// every tonic service links anyway.)
+#[test]
+fn servicex_alone_links_no_server() {
+    let tree = graph("tpp-grpc", &[]);
+    assert!(
+        tree.contains("tonic v") && tree.contains("prost-reflect v"),
+        "the tree was read: {tree}"
+    );
+    let server = ["rmcp v", "tower-http v", "tonic-web v", "tpp-agents v"];
+    for absent in server.into_iter().chain(["rustls v", "quinn v"]) {
+        assert!(!tree.contains(absent), "{absent} is in the graph:\n{tree}");
+    }
     assert!(c_crypto(&tree).is_empty(), "C crypto is linked:\n{tree}");
 }
 
