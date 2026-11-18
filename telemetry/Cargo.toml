@@ -25,7 +25,9 @@ opentelemetry.workspace = true
 tracing.workspace = true
 tracing-opentelemetry = "0.34"
 opentelemetry_sdk = { version = "0.33", features = ["testing"], optional = true }
-telemetry-sdk = { package = "telemetry", git = "https://github.com/the-protobuf-project/telemetry", rev = "5b18b2cb02bb88d7dd1948333efb8e29ee688489", optional = true }
+# The application SDK, at its newest release, with every feature it ships
+# (continuous profiling to Pyroscope included).
+telemetry-sdk = { package = "telemetry-rs", git = "https://github.com/the-protobuf-project/telemetry", tag = "v1.3.3", optional = true }
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

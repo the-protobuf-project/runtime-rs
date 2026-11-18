@@ -12,12 +12,21 @@
 //! ```
 //!
 //! Use with_meter/with_tracer/with_logger with any OTel 0.33 provider. The
-//! optional tpp-sdk feature adapts the linked telemetry-rs SDK directly. Keep
-//! that SDK owner alive until runtime workers have drained, then flush/close it.
+//! optional tpp-sdk feature adapts the linked telemetry-rs SDK (1.3.3, with
+//! continuous profiling) directly. Keep that SDK owner alive until runtime
+//! workers have drained, then flush/close it.
+//!
+//! Every operation reports metrics, a span and a completion log. W3C baggage
+//! ([`set_baggage`]) travels with the trace through [`inject`] and [`extract`],
+//! and lands on each operation's span and log as `baggage.<key>`, never as a
+//! metric label. Profiling is the SDK's: with `with_profiling` on its builder,
+//! the whole process is sampled to Pyroscope. Samples are not tagged per
+//! operation, since an async operation moves between threads at every await.
 //! Logs contain bounded classifications and explicit trace/span IDs; libraries
 //! must never supply SQL, tenant names, tokens, record IDs or raw errors as
 //! attributes. Complete stream lifetime and future cancellation use guards.
 #![warn(missing_docs)]
+mod baggage;
 mod config;
 mod logging;
 mod metrics;
@@ -29,6 +38,7 @@ mod propagation;
 pub mod testing;
 #[cfg(feature = "tpp-sdk")]
 mod tpp;
+pub use baggage::{baggage, set_baggage};
 pub use config::Telemetry;
 pub use logging::{LogSink, Severity, TracingLogs};
 pub use observer::Observer;
@@ -39,7 +49,7 @@ pub use opentelemetry::{
 };
 pub use operation::Operation;
 pub use outcome::Outcome;
-pub use propagation::{TRACEPARENT, TRACESTATE, extract, extract_into, inject, trace_id};
+pub use propagation::{BAGGAGE, TRACEPARENT, TRACESTATE, extract, extract_into, inject, trace_id};
 
 /// Application SDK re-export; available only with the explicit tpp-sdk feature.
 #[cfg(feature = "tpp-sdk")]

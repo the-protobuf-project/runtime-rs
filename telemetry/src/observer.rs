@@ -106,6 +106,12 @@ impl Observer {
             }
         };
         let attributes = labels(self.0.component, backend, operation);
+        // The baggage the operation runs under, for its span and its log; never
+        // a metric label, its values being unbounded.
+        let baggage: Vec<KeyValue> = crate::baggage(&parent)
+            .into_iter()
+            .map(|(k, v)| KeyValue::new(format!("baggage.{k}"), v))
+            .collect();
         let context = if let Some(tracer) = &self.0.telemetry.tracer {
             let links = start
                 .links
@@ -117,7 +123,13 @@ impl Observer {
             let mut builder = tracer
                 .span_builder(format!("{}.{}", self.0.component, operation))
                 .with_kind(kind)
-                .with_attributes(attributes.iter().cloned().chain(start.attributes))
+                .with_attributes(
+                    attributes
+                        .iter()
+                        .cloned()
+                        .chain(baggage.iter().cloned())
+                        .chain(start.attributes),
+                )
                 .with_links(links);
             if let Some(time) = start.time {
                 builder = builder.with_start_time(time);
@@ -134,6 +146,7 @@ impl Observer {
             observer: self.clone(),
             context,
             attributes,
+            baggage,
             started: Instant::now(),
             finished: false,
             read: 0,
