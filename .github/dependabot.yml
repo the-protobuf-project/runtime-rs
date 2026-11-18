@@ -14,11 +14,7 @@ updates:
       - "/tools/docgen"
     schedule:
       interval: "weekly"
-    assignees:
-      - "ParthuReddy31"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
-    assignees:
-      - "ParthuReddy31"
