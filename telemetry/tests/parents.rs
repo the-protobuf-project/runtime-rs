@@ -31,7 +31,7 @@ async fn tracing_application_spans_parent_runtime_otel_spans() {
         .find(|span| span.name == "database.range")
         .unwrap();
     assert_eq!(child.parent_span_id, parent_id);
-    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 1);
+    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 2);
     for point in h.measurements() {
         if point.name == "runtime.operation.active" {
             assert_eq!(point.value, 0.0);
@@ -58,7 +58,7 @@ fn unwinding_is_recorded_once_as_panic_and_balances_active_operations() {
             .any(|attr| attr.key.as_str() == "outcome" && attr.value.to_string() == "panic")
     );
     assert!(!format!("{spans:?}").contains("confidential"));
-    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 1);
+    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 2);
     assert!(
         h.measurements()
             .iter()

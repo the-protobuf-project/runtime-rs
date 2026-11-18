@@ -96,7 +96,7 @@ impl PubSubManager {
         let channel = format!("__keyevent@{}__:expired", self.inner.database);
         let messages = open(&self.inner, &channel).await?;
         let want = self.inner.keys.pending_prefix(&self.stream.id, subject);
-        tracing::info!(subject, channel, prefix = %want, "subscribed to scheduled deliveries");
+        tracing::debug!(subject, channel, prefix = %want, "subscribed to scheduled deliveries");
 
         let inner = Arc::clone(&self.inner);
         let subject = subject.to_owned();
@@ -186,7 +186,7 @@ where
             }
             delivered += 1;
         }
-        tracing::info!(delivered, "subscription closed");
+        tracing::debug!(delivered, "subscription closed");
     });
     ReceiverStream::new(rx).boxed()
 }
@@ -272,7 +272,7 @@ impl Subscriber for PubSubManager {
 
         let channel = self.inner.keys.channel(&self.stream.id, subject);
         let messages = open(&self.inner, &channel).await?;
-        tracing::info!(subject, channel, "subscribed");
+        tracing::debug!(subject, channel, "subscribed");
 
         let registry = self.inner.registry.clone();
         let subject = subject.to_owned();

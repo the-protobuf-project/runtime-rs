@@ -54,5 +54,6 @@ fn a_trace_crosses_headers_into_a_child_span() {
             assert_eq!(m.value, 0.0);
         }
     }
-    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 2);
+    // Two operations, each logged when it starts and when it completes.
+    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 4);
 }

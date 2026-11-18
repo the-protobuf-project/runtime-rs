@@ -70,7 +70,8 @@ async fn rewiring_preserves_all_capabilities_and_emits_once_without_sensitive_da
     db.schema.drop_schema(&res).await.unwrap();
     assert_eq!(backend.calls.load(Ordering::SeqCst), 11);
     assert_eq!(spans(&h).len(), 11);
-    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 11);
+    // Each operation logs when it starts and when it completes.
+    assert_eq!(h.logs.get_emitted_logs().unwrap().len(), 22);
     let captured = format!("{:?}{:?}", spans(&h), h.logs.get_emitted_logs().unwrap());
     for secret in [
         "private_tenant",

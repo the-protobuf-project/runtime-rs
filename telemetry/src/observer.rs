@@ -1,6 +1,6 @@
 //! Starts operation guards without entering thread-local context across awaits.
 use crate::{
-    Operation, Telemetry,
+    Operation, Severity, Telemetry,
     metrics::{Metrics, labels},
 };
 use opentelemetry::{
@@ -141,6 +141,15 @@ impl Observer {
         };
         if let Some(metrics) = &self.0.metrics {
             metrics.active.add(1, &attributes);
+        }
+        if let Some(logs) = &self.0.telemetry.logs {
+            let fields: Vec<KeyValue> = attributes.iter().chain(&baggage).cloned().collect();
+            logs.emit(
+                &context,
+                Severity::Debug,
+                "runtime.operation.started",
+                &fields,
+            );
         }
         Operation {
             observer: self.clone(),

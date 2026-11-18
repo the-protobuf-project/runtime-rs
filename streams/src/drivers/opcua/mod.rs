@@ -321,7 +321,7 @@ impl Streams for OpcUaProvider {
         };
         let out = declaration(id.clone(), stream)?;
         self.write().insert(id.clone(), out.clone());
-        tracing::info!(stream = %id, name = %out.name, subjects = ?out.subjects, "opcua: stream declared");
+        tracing::debug!(stream = %id, name = %out.name, subjects = ?out.subjects, "opcua: stream declared");
         Ok(out)
     }
 

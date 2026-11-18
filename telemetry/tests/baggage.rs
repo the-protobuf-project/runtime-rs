@@ -68,10 +68,11 @@ fn an_operation_carries_its_baggage_on_span_and_log_never_metrics() {
             .iter()
             .any(|kv| kv.key.as_str() == "baggage.tenant" && kv.value.to_string() == "acme")
     );
+    // Started and completed, both carrying the baggage.
     let logs = h.logs.get_emitted_logs().unwrap();
-    assert_eq!(logs.len(), 1);
+    assert_eq!(logs.len(), 2);
     assert!(
-        logs[0]
+        logs[1]
             .record
             .attributes_iter()
             .any(|(k, v)| k.as_str() == "baggage.tenant" && format!("{v:?}").contains("acme"))

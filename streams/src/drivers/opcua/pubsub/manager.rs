@@ -450,7 +450,7 @@ impl Reader {
                             .record_gap(&publisher, &self.writer, u64::from(missed));
                     }
                     Step::Restart => {
-                        tracing::info!(publisher, writer = %self.writer, sequence,
+                        tracing::debug!(publisher, writer = %self.writer, sequence,
                             "opcua pubsub: the writer's sequence started again");
                     }
                 }

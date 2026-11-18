@@ -257,7 +257,7 @@ impl KafkaManager {
         let reader = self
             .consumer(subject, &Reader::Durable(safe_name(consumer), at))
             .await?;
-        tracing::info!(subject, consumer, from = ?at, "consuming");
+        tracing::debug!(subject, consumer, from = ?at, "consuming");
 
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();
@@ -325,7 +325,7 @@ impl KafkaManager {
                     break;
                 }
             }
-            tracing::info!(subject = %subject, consumer = %name, delivered, "consumer stopped");
+            tracing::debug!(subject = %subject, consumer = %name, delivered, "consumer stopped");
             // Commit what was acknowledged before leaving the group, so the
             // next member under this name starts after it.
             commits.close();
@@ -649,7 +649,7 @@ impl Subscriber for KafkaManager {
             None => Reader::Tail,
         };
         let consumer = self.consumer(subject, &reader).await?;
-        tracing::info!(subject, group = ?opts.group, "subscribed");
+        tracing::debug!(subject, group = ?opts.group, "subscribed");
 
         let (tx, rx) = mpsc::channel(provider::prefetch(opts).max(1));
         let registry = self.inner.config.registry.clone();
@@ -687,7 +687,7 @@ impl Subscriber for KafkaManager {
                     break;
                 }
             }
-            tracing::info!(subject = %subject, delivered, "subscription closed");
+            tracing::debug!(subject = %subject, delivered, "subscription closed");
             let _ = blocking(move || drop(consumer)).await;
         });
         Ok(receive(rx))

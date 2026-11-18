@@ -7,7 +7,7 @@ use std::{
 
 use async_nats::{Client, HeaderMap};
 use futures::StreamExt;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use crate::{
     Batch, Manager, Options, Payload, Publisher, Registry, Result, Stream, StreamError, Streams,
@@ -114,7 +114,7 @@ impl Streams for NatsProvider {
         };
         let out = declared(id.clone(), stream);
         self.write().insert(id.clone(), out.clone());
-        info!(id, name = %out.name, subjects = ?out.subjects, "stream declared");
+        debug!(id, name = %out.name, subjects = ?out.subjects, "stream declared");
         Ok(out)
     }
 
@@ -285,7 +285,7 @@ impl Subscriber for NatsManager {
             )
         })?;
 
-        info!(subject, queue = ?queue, "subscribed");
+        debug!(subject, queue = ?queue, "subscribed");
 
         // No task sits between the client and the caller: the stream is the
         // client's subscriber, so dropping it is the unsubscribe.

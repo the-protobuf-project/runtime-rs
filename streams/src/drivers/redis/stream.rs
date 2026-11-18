@@ -101,7 +101,7 @@ impl Streams for RedisProvider {
             )
             .await
             .map_err(fail(format!("redis: cannot create stream {id}")))?;
-        tracing::info!(id = %id, name = %out.name, "stream created");
+        tracing::debug!(id = %id, name = %out.name, "stream created");
         Ok(out)
     }
 
@@ -154,7 +154,7 @@ impl Streams for RedisProvider {
             )
             .await
             .map_err(fail(format!("redis: cannot update stream {id}")))?;
-        tracing::info!(id, "stream updated");
+        tracing::debug!(id, "stream updated");
         Ok(out)
     }
 
@@ -174,7 +174,7 @@ impl Streams for RedisProvider {
         if removed == 0 {
             return Err(StreamError::NotFound(format!("stream {id}")));
         }
-        tracing::info!(id, "stream deleted");
+        tracing::debug!(id, "stream deleted");
         Ok(())
     }
 

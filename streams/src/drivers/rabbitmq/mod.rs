@@ -338,7 +338,7 @@ impl Shared {
             // Another caller reopened it first; theirs wins.
             return Ok(slot.clone());
         }
-        tracing::info!("rabbitmq: reopened the publishing channel");
+        tracing::debug!("rabbitmq: reopened the publishing channel");
         *slot = fresh.clone();
         Ok(fresh)
     }
@@ -454,7 +454,7 @@ impl Streams for RabbitProvider {
             .write()
             .expect("declarations lock poisoned")
             .insert(id.clone(), out.clone());
-        tracing::info!(id = %id, name = %out.name, subjects = ?out.subjects, "rabbitmq: stream created");
+        tracing::debug!(id = %id, name = %out.name, subjects = ?out.subjects, "rabbitmq: stream created");
         Ok(out)
     }
 
@@ -484,7 +484,7 @@ impl Streams for RabbitProvider {
             .get_mut(id)
             .ok_or_else(|| StreamError::NotFound(format!("stream {id}")))?;
         *entry = stored(id.to_owned(), stream);
-        tracing::info!(id = %id, "rabbitmq: stream updated");
+        tracing::debug!(id = %id, "rabbitmq: stream updated");
         Ok(entry.clone())
     }
 
@@ -513,7 +513,7 @@ impl Streams for RabbitProvider {
             .map_err(|e| {
                 StreamError::internal(&format!("rabbitmq: cannot delete stream {id}"), e)
             })?;
-        tracing::info!(id = %id, "rabbitmq: stream deleted");
+        tracing::debug!(id = %id, "rabbitmq: stream deleted");
         Ok(())
     }
 

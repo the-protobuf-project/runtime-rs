@@ -16,7 +16,7 @@ use async_nats::{
     },
 };
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
 
 use crate::{
     Acker, Batch, Deliveries, Delivery, Durable, Headers, Manager, Options, Payload, Position,
@@ -175,7 +175,7 @@ impl Streams for JetStreamProvider {
                 StreamError::internal(&format!("nats: cannot create stream {id}"), error)
             })?;
 
-        info!(id, name = %stream.name, "stream created");
+        debug!(id, name = %stream.name, "stream created");
         Ok(stream_from(id, stream))
     }
 
@@ -215,7 +215,7 @@ impl Streams for JetStreamProvider {
                 CreateStreamErrorKind::NotFound => not_found(id),
                 _ => StreamError::internal(&format!("nats: cannot update stream {id}"), error),
             })?;
-        info!(id = name, "stream updated");
+        debug!(id = name, "stream updated");
         Ok(stream_from(name, stream))
     }
 
@@ -233,7 +233,7 @@ impl Streams for JetStreamProvider {
                 }
                 _ => StreamError::internal(&format!("nats: cannot delete stream {id}"), error),
             })?;
-        info!(id, "stream deleted");
+        debug!(id, "stream deleted");
         Ok(())
     }
 
@@ -518,7 +518,7 @@ impl Subscriber for JetStreamManager {
             .await
             .map_err(|error| fail(&error))?;
         let messages = consumer.messages().await.map_err(|error| fail(&error))?;
-        info!(subject, "subscribed");
+        debug!(subject, "subscribed");
 
         let registry = self.shared.registry.clone();
         let subject = subject.to_owned();
@@ -646,7 +646,7 @@ impl Positioned for JetStreamManager {
             .messages()
             .await
             .map_err(|error| fail(&error))?;
-        info!(subject, consumer = name, from = ?policy, "consuming");
+        debug!(subject, consumer = name, from = ?policy, "consuming");
 
         Ok(deliveries(
             messages.boxed(),

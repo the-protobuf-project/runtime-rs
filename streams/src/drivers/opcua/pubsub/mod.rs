@@ -426,7 +426,7 @@ impl PubSubProvider {
                 )
             })?;
         lock(&self.inner.versions).insert((group.group, writer.to_owned()), version.clone());
-        tracing::info!(stream, writer, topic, "opcua pubsub: metadata published");
+        tracing::debug!(stream, writer, topic, "opcua pubsub: metadata published");
         Ok(version)
     }
 
@@ -638,7 +638,7 @@ impl Streams for PubSubProvider {
         };
         let out = declaration(id.clone(), stream)?;
         self.inner.write().insert(id.clone(), out.clone());
-        tracing::info!(stream = %id, subjects = ?out.subjects, "opcua pubsub: stream declared");
+        tracing::debug!(stream = %id, subjects = ?out.subjects, "opcua pubsub: stream declared");
         Ok(out)
     }
 
