@@ -90,7 +90,12 @@ impl<R: Runtime> Provider for TauriStoreProvider<R> {
                 inner.save()
             })
         });
-        Ok(DB::build("tauri-store", name, caps, Some(release)))
+        Ok(crate::records::observe::instrument_default(DB::build(
+            "tauri-store",
+            name,
+            caps,
+            Some(release),
+        )))
     }
 
     fn backend(&self) -> &'static str {

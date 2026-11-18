@@ -39,7 +39,7 @@ pub mod testing;
 #[cfg(feature = "tpp-sdk")]
 mod tpp;
 pub use baggage::{baggage, set_baggage};
-pub use config::Telemetry;
+pub use config::{Telemetry, set_process_default};
 pub use logging::{LogSink, Severity, TracingLogs};
 pub use observer::Observer;
 pub use observer::Start;

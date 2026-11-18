@@ -123,6 +123,11 @@ path = "tests/orm_dialect.rs"
 required-features = ["orm-sqlite"]
 
 [[test]]
+name = "records_observe"
+path = "tests/records_observe.rs"
+required-features = ["orm-sqlite"]
+
+[[test]]
 name = "orm_sqlite"
 path = "tests/orm_sqlite.rs"
 required-features = ["orm-sqlite"]

@@ -14,9 +14,11 @@ use telemetry::{
     opentelemetry::propagation::Extractor,
 };
 
-/// `router` with every request traced through `telemetry`, or `router` as it is
-/// when `telemetry` carries no signal.
+/// `router` with every request traced through `telemetry`, else through the
+/// process's default ([`Telemetry::process`]), or `router` as it is when
+/// neither carries a signal.
 pub(crate) fn traced(router: Router, telemetry: &Telemetry) -> Router {
+    let telemetry = telemetry.clone().or_process();
     if !telemetry.is_enabled() {
         return router;
     }

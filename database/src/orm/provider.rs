@@ -82,7 +82,10 @@ impl Provider for OrmProvider {
         };
         let what = || format!("database {name:?} is not reachable");
         reached.map_err(|e| context(what(), map(e)))?;
-        Ok(build(&self.pool, name.to_owned()))
+        Ok(crate::records::observe::instrument_default(build(
+            &self.pool,
+            name.to_owned(),
+        )))
     }
 
     /// `orm`.

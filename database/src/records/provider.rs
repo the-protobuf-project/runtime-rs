@@ -69,7 +69,10 @@ pub struct DB {
     /// The selected database's name.
     pub name: String,
     batch_native: bool,
-    release: Option<ReleaseFn>,
+    pub(crate) release: Option<ReleaseFn>,
+    /// The backend's own DB when this one observes it, so observing again replaces the
+    /// observation rather than stacking a second one.
+    pub(crate) raw: Option<Arc<DB>>,
 }
 
 impl DB {
@@ -92,6 +95,7 @@ impl DB {
             backend,
             name: name.into(),
             release,
+            raw: None,
         }
     }
 

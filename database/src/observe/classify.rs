@@ -6,7 +6,7 @@ pub(crate) fn outcome(error: Option<&Error>) -> Outcome {
     match error {
         None => Outcome::Ok,
         Some(Error::NotFound) => Outcome::NotFound,
-        Some(Error::AlreadyExists) => Outcome::Conflict,
+        Some(Error::AlreadyExists | Error::Conflict) => Outcome::Conflict,
         Some(Error::Unimplemented { .. }) => Outcome::Unsupported,
         Some(Error::Invalid(_) | Error::Encoding(_)) => Outcome::Invalid,
         Some(Error::Timeout) => Outcome::Timeout,
