@@ -7,7 +7,7 @@
 //! runtime-go's SDK propagator encodes it.
 use opentelemetry::{Context, KeyValue, baggage::BaggageExt};
 
-/// Returns `cx` with `key=value` added to its W3C baggage, which [`inject`]
+/// Returns `cx` with `key=value` added to its W3C baggage, which [`inject`](crate::inject)
 /// sends on with the trace. Use it for what every hop needs (a tenant, a
 /// request class), never for large or secret values: it rides on every
 /// outgoing message and request.
