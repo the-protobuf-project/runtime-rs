@@ -6481,8 +6481,11 @@ version = "0.16.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "01b80ea363c31af2de2b92e3c07ed1156628f7838c4afb4df75ee78a37fedbd1"
 dependencies = [
+ "base64 0.22.1",
  "prost",
  "prost-types",
+ "serde",
+ "serde-value",
 ]
 
 [[package]]
@@ -9674,6 +9677,7 @@ dependencies = [
  "async-trait",
  "axum 0.8.9",
  "bytes",
+ "futures-core",
  "futures-util",
  "h3",
  "h3-quinn",
@@ -9686,6 +9690,7 @@ dependencies = [
  "owo-colors",
  "prost",
  "prost-reflect",
+ "prost-types",
  "protovalidate-rs",
  "quinn",
  "reqwest 0.13.5",
@@ -9710,6 +9715,7 @@ dependencies = [
  "tower",
  "tower-http 0.7.1",
  "tpp-agents",
+ "tpp-database",
  "tpp-telemetry",
  "tracing",
  "transcode",
