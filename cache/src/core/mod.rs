@@ -24,7 +24,7 @@ pub mod volatile;
 pub use aside::{Aside, Loader};
 pub use bulk::Bulk;
 pub use capabilities::Capabilities;
-pub use database::{DB, DatabaseSpec, Release, build_database};
+pub use database::{DB, DatabaseSpec, Release, build_database, instrument};
 pub use document::{Document, NewId};
 pub use driver::{Driver, ErrMiss};
 pub use drop::drop_database;

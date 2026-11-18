@@ -61,7 +61,9 @@ impl Provider for RedisProvider {
             batch: Some(driver.clone()),
             ..Capabilities::new(driver)
         };
-        Ok(DB::build(BACKEND, name, caps, None))
+        Ok(crate::records::observe::instrument_default(DB::build(
+            BACKEND, name, caps, None,
+        )))
     }
 
     /// `redis`.

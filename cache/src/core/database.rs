@@ -5,10 +5,12 @@ use std::{sync::Arc, time::Duration};
 use futures::future::BoxFuture;
 use tokio::sync::{Mutex, watch};
 
+use crate::observed::Observed;
 use crate::strategies::document::{DocumentWiring, default_new_id};
 use crate::strategies::{AsideImpl, DocumentImpl, IndexedImpl, VolatileImpl};
 use crate::strategies::{batch::DEFAULT_CONCURRENCY, flight::Flight, refresher::Refresher};
 use crate::{CacheError, Result};
+use telemetry::Telemetry;
 
 use super::{
     Aside, Capabilities, Document, Driver, Fenced, Indexed, Keyspace, Loader, NewId, Volatile,
@@ -140,6 +142,60 @@ pub struct DB {
     wiring: Wiring,
     /// Close-only ownership kept private so callers cannot bypass ordering.
     lifecycle: Lifecycle,
+    /// The signals every strategy is observed through; the no-op when it is not.
+    telemetry: Telemetry,
+    /// The strategies as the backend built them, when these are observed, so observing
+    /// again replaces the observation rather than stacking a second one.
+    raw: Option<Strategies>,
+}
+
+/// The three stable strategies as the backend built them.
+#[derive(Clone)]
+struct Strategies {
+    document: Arc<dyn Document>,
+    volatile: Arc<dyn Volatile>,
+    indexed: Arc<dyn Indexed>,
+}
+
+/// `db` with every strategy observed through `telemetry`, its [`DB::aside`] views
+/// included, labeled with the database's backend; as the backend built it when
+/// `telemetry` has no signals. Observing an observed `db` replaces its signals rather
+/// than adding a second layer. Every database a provider selects is observed through the
+/// process's default ([`Telemetry::process`]). Go's `cache.Instrument`.
+pub fn instrument(mut db: DB, telemetry: Telemetry) -> DB {
+    if let Some(raw) = db.raw.take() {
+        db.document = raw.document;
+        db.volatile = raw.volatile;
+        db.indexed = raw.indexed;
+    }
+    db.telemetry = Telemetry::default();
+    if !telemetry.is_enabled() {
+        return db;
+    }
+    let observer = telemetry.observer("cache");
+    let backend = crate::observed::backend_label(&db.backend);
+    db.raw = Some(Strategies {
+        document: db.document.clone(),
+        volatile: db.volatile.clone(),
+        indexed: db.indexed.clone(),
+    });
+    db.document = Arc::new(Observed {
+        next: db.document.clone(),
+        observer: observer.clone(),
+        backend,
+    });
+    db.volatile = Arc::new(Observed {
+        next: db.volatile.clone(),
+        observer: observer.clone(),
+        backend,
+    });
+    db.indexed = Arc::new(Observed {
+        next: db.indexed.clone(),
+        observer,
+        backend,
+    });
+    db.telemetry = telemetry;
+    db
 }
 
 /// The selection-independent half of a [`DatabaseSpec`] plus the backend, retained so
@@ -167,7 +223,7 @@ impl DB {
     /// **Concurrency**: Every view from this DB shares one Flight and Refresher.
     /// **Side effects**: None until the returned Aside performs an operation.
     pub fn aside(&self, loader: Loader) -> Arc<dyn Aside> {
-        Arc::new(AsideImpl::new(
+        let view: Arc<dyn Aside> = Arc::new(AsideImpl::new(
             self.aside.driver.clone(),
             self.aside.fenced.clone(),
             self.aside.keyspace.clone(),
@@ -179,7 +235,15 @@ impl DB {
             self.aside.refresher.clone(),
             NEGATIVE_TTL,
             LOCK_LEASE,
-        ))
+        ));
+        if !self.telemetry.is_enabled() {
+            return view;
+        }
+        Arc::new(Observed {
+            next: view,
+            observer: self.telemetry.observer("cache"),
+            backend: crate::observed::backend_label(&self.backend),
+        })
     }
 
     /// The same backend, prefix and policy selected under another namespace: every
@@ -199,7 +263,9 @@ impl DB {
     /// [`check_namespace`]: super::check_namespace
     pub fn under(&self, namespace: &str) -> Result<DB> {
         super::check_namespace(namespace)?;
-        Ok(assemble(self.wiring.clone(), namespace.to_owned(), None))
+        // A sibling reports through the same signals as the database it came from.
+        let sibling = assemble(self.wiring.clone(), namespace.to_owned(), None);
+        Ok(instrument(sibling, self.telemetry.clone()))
     }
 
     /// Drains background refreshes, then releases derived backend resources.
@@ -291,7 +357,11 @@ pub fn build_database(
         flight: Arc::new(Flight::new(FLIGHT_BUDGET, FLIGHT_TIMEOUT)),
         refresher: Arc::new(Refresher::new(REFRESH_BUDGET, LOAD_TIMEOUT)),
     };
-    assemble(wiring, spec.namespace, spec.release)
+    // Observed through the process's default signals, when it has any.
+    instrument(
+        assemble(wiring, spec.namespace, spec.release),
+        Telemetry::process(),
+    )
 }
 
 /// Wires every strategy over `wiring` under `namespace`.
@@ -354,6 +424,8 @@ fn assemble(wiring: Wiring, namespace: String, release: Option<Release>) -> DB {
             }),
         },
         wiring,
+        telemetry: Telemetry::default(),
+        raw: None,
     }
 }
 

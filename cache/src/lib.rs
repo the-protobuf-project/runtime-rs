@@ -169,7 +169,7 @@ pub mod typed;
 /// The signals [`with_observability`] and [`with_telemetry`] report through, so a caller
 /// configures them without naming the telemetry crate.
 pub use ::telemetry::Telemetry;
-pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database};
+pub use core::{DB, DatabaseSpec, NewId, Provider, Release, build_database, instrument};
 pub use dial_timeout::DialTimeout;
 pub use error::{CacheError, Result};
 pub use logging::{with_logging, with_logging_middleware};

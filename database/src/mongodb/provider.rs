@@ -63,7 +63,9 @@ impl Provider for MongoProvider {
             batch: Some(d.clone()),
             watch: Some(d),
         };
-        Ok(DB::build(BACKEND, name, caps, None))
+        Ok(crate::records::observe::instrument_default(DB::build(
+            BACKEND, name, caps, None,
+        )))
     }
 
     fn backend(&self) -> &'static str {

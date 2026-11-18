@@ -27,9 +27,11 @@ impl Injector for HeaderCarrier {
     }
 }
 
-/// The observer a client reports through, built once when it connects;
-/// `None` when the options carry no signal.
+/// The observer a client reports through, built once when it connects: the
+/// options' signals, else the process's default ([`Telemetry::process`]);
+/// `None` when neither carries any.
 pub(crate) fn observer(telemetry: &Telemetry) -> Option<Observer> {
+    let telemetry = telemetry.clone().or_process();
     telemetry
         .is_enabled()
         .then(|| telemetry.observer("network"))

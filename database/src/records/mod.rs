@@ -31,6 +31,7 @@ mod convert;
 pub mod core;
 mod driver;
 mod kind;
+pub mod observe;
 mod provider;
 mod refuses;
 mod resource;

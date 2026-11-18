@@ -6,7 +6,7 @@ use opentelemetry::{
     metrics::Meter,
     trace::{Span, Tracer},
 };
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 /// Shared signal bindings. Default is a true no-op; nothing starts exporters,
 /// reads environment configuration, installs globals or shuts down providers.
@@ -76,5 +76,39 @@ impl Telemetry {
     /// Creates reusable instruments for a fixed runtime component name.
     pub fn observer(&self, component: &'static str) -> Observer {
         Observer::new(self.clone(), component)
+    }
+
+    /// The process's default signals ([`set_process_default`]), or the no-op
+    /// when none were set: what every runtime crate reports through when it
+    /// was handed no signals of its own.
+    pub fn process() -> Self {
+        PROCESS
+            .read()
+            .map(|t| t.clone().unwrap_or_default())
+            .unwrap_or_default()
+    }
+
+    /// These signals when any was supplied, and [`Telemetry::process`]
+    /// otherwise: what a crate reports through, given what its caller passed.
+    pub fn or_process(self) -> Self {
+        if self.is_enabled() {
+            self
+        } else {
+            Self::process()
+        }
+    }
+}
+
+static PROCESS: RwLock<Option<Telemetry>> = RwLock::new(None);
+
+/// Makes `signals` the process's default: every runtime crate built
+/// afterwards without signals of its own (a provider, a manager, a client, a
+/// server) reports through them. The application calls it once, in main,
+/// before building anything; signals passed explicitly always win, and
+/// `Telemetry::default()` turns the default off. No runtime crate starts an
+/// exporter or a pipeline of its own without it.
+pub fn set_process_default(signals: Telemetry) {
+    if let Ok(mut slot) = PROCESS.write() {
+        *slot = signals.is_enabled().then_some(signals);
     }
 }
