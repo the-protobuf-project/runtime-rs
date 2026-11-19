@@ -2,16 +2,8 @@ version: 2
 updates:
   - package-ecosystem: "cargo"
     directories:
-      - "/"
-      - "/agents"
-      - "/cache"
-      - "/config"
-      - "/database"
-      - "/grpc"
-      - "/network"
-      - "/streams"
-      - "/telemetry"
-      - "/tools/docgen"
+      - "/" # the workspace: every crate under it
+      - "/tools/docgen" # excluded from the workspace
     schedule:
       interval: "weekly"
   - package-ecosystem: "github-actions"
