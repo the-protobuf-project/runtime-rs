@@ -43,6 +43,7 @@ The first part of this guide covers records and the second covers time series.
 | MongoDB (`mongodb`) | `mongodb` | One collection per resource, one document per record | You want documents, change streams and tenant isolation by database |
 | Redis (`redis`) | `redis` | One key per record, plus index and uniqueness keys | You want fast key access and already run Redis for the cache |
 | Tauri store (`tauri_store`) | `tauri-store` | One JSON file in a Tauri app's data directory | You ship a desktop or mobile app and need local, embedded storage |
+| Cloudflare D1 (`d1`) | `d1` | One table per resource in a D1 (SQLite) database, over its REST API | You serve from Cloudflare and want SQLite with a database per tenant |
 | Read-through cache (`cached`) | `cached` | In front of any provider above, in tpp-cache | Reads by key dominate and can tolerate a TTL's staleness |
 | InfluxDB 3 (`influxdb`) | `influxdb` (default) | InfluxDB tables of points | You store metrics and sensor readings and query them by time |
 | Arrow captures (`arrow`) | always on | Arrow IPC files on disk | You record time series locally, for replay or for pyarrow, polars or DuckDB |
@@ -55,6 +56,7 @@ What each records provider can do beyond create, get, update, delete, list, coun
 | MongoDB | yes, replica set needed | collection + unique indexes | yes | change streams | AIP-160 | first column |
 | Redis | refused | always present | yes | refused | refused | key only |
 | Tauri store | yes, nesting refused | always present | yes, all or nothing | refused | AIP-160, in memory | any columns |
+| D1 | refused | `CREATE TABLE` | yes, a batch per request | refused | AIP-160 | any columns |
 | Cache | the wrapped provider's | the wrapped provider's | the wrapped provider's | the wrapped provider's | passed through | passed through |
 
 A capability a provider lacks is never missing from the `DB`: calling it returns
@@ -78,6 +80,7 @@ each records provider you use, so a build links only the drivers it needs:
 | `redis` | `redis` 1, the same crate tpp-cache uses | |
 | `tauri-store` | `tauri` 2 and `tauri-plugin-store` 2 | On Linux, needs `libwebkit2gtk-4.1-dev` and `libgtk-3-dev`, as any Tauri app does |
 | `cached` | tpp-cache | |
+| `d1` | tpp-network | Cloudflare's Rust SDK has no D1 endpoints, so this calls the REST API itself |
 | `influxdb` | `influxdb3-client` 0.3 (Arrow 59) | Default. Turn it off for an Arrow-only build that links one Arrow major (60) and no HTTP client |
 
 ## The shape every provider shares

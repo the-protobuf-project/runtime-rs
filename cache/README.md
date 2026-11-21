@@ -30,20 +30,31 @@ The library is imported as `cache`.
 | Redis | `drivers::redis` | The general choice: every strategy and capability |
 | Dragonfly | `drivers::dragonfly` | You run Dragonfly: the same RESP implementation as Redis, as a typed preset |
 | memcached | `drivers::memcached` | You already run memcached and only need direct values and bulk reads |
+| Workers KV | `drivers::workerskv` | You serve from Cloudflare and want a value read everywhere and written rarely |
 
 Every strategy is on every `DB`. What a provider cannot back returns
 `CacheError::Unsupported` when you call it:
 
-| | Redis | Dragonfly | memcached |
-| --- | --- | --- | --- |
-| Direct values (`volatile` get, set, delete, touch) | yes | yes | yes |
-| Bulk reads | yes | yes | yes |
-| Remaining TTL (`ttl`) | yes | yes | Unsupported |
-| Enumeration (`document.keys`, `document.list`) | yes | yes | Unsupported |
-| Secondary indexes (`indexed`) | yes | yes | Unsupported |
-| Scans (`volatile.scan`), `drop_database` | yes | yes | Unsupported |
-| Read-through (`aside`), fenced across processes | yes | yes | in-process only |
-| Numeric databases (`select_index`) | native | native | a key namespace |
+| | Redis | Dragonfly | memcached | Workers KV |
+| --- | --- | --- | --- | --- |
+| Direct values (`volatile` get, set, delete) | yes | yes | yes | yes |
+| Lease extension (`volatile.touch`) | yes | yes | yes | Unsupported |
+| Conditional writes (`document.update`) | yes | yes | yes | Unsupported |
+| Bulk reads | yes | yes | yes | no |
+| Remaining TTL (`ttl`) | yes | yes | Unsupported | yes |
+| Enumeration (`document.keys`, `document.list`) | yes | yes | Unsupported | Unsupported |
+| Secondary indexes (`indexed`) | yes | yes | Unsupported | Unsupported |
+| Scans (`volatile.scan`), `drop_database` | yes | yes | Unsupported | yes, by prefix |
+| Read-through (`aside`), fenced across processes | yes | yes | in-process only | in-process only |
+| Numeric databases (`select_index`) | native | native | a key namespace | a key namespace |
+
+Workers KV is eventually consistent: a write can take up to a minute to be seen at
+other locations, a key takes at most one write a second, and a lease under sixty
+seconds is lengthened to sixty, the shortest KV keeps anything. It is reached through
+Cloudflare's official `cloudflare` crate.
+
+For what Cloudflare's CDN has cached, rather than what this crate stores,
+`cdn::Purger` purges a zone by URL, cache tag, host or prefix.
 
 ## Installing
 
@@ -51,8 +62,8 @@ Every strategy is on every `DB`. What a provider cannot back returns
 cargo add tpp-cache
 ```
 
-All three providers are always built; they share one `redis` 1.x crate (Redis and
-Dragonfly) and add a memcached client.
+All four providers are always built; they share one `redis` 1.x crate (Redis and
+Dragonfly), and add a memcached client and Cloudflare's `cloudflare` SDK (Workers KV).
 
 ## The shape every provider shares
 

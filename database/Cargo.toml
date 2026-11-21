@@ -4,14 +4,14 @@ version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "One database contract over many providers: proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri store, time series in InfluxDB 3 or Arrow"
+description = "One database contract over many providers: proto records in Postgres, MySQL, SQLite, Cloudflare D1, MongoDB, Redis or a Tauri store, time series in InfluxDB 3 or Arrow"
 repository = "https://github.com/the-protobuf-project/runtime-rs"
 keywords = ["database", "sql", "mongodb", "redis", "influxdb"]
 categories = ["database", "asynchronous"]
 
 [package.metadata.docgen]
 go-source = "runtime-go/database"
-use-for = "Store proto records in Postgres, MySQL, SQLite, MongoDB, Redis or a Tauri app, and time series in InfluxDB 3 or Arrow"
+use-for = "Store proto records in Postgres, MySQL, SQLite, Cloudflare D1, MongoDB, Redis or a Tauri app, and time series in InfluxDB 3 or Arrow"
 
 [lib]
 name = "database"
@@ -36,6 +36,9 @@ cached = ["dep:cache"]
 mongodb = ["dep:mongodb", "dep:bson"]
 # The Redis record backend, `database::redis`: runtime-go's `database/redis`.
 redis = ["dep:redis"]
+# The Cloudflare D1 record backend, `database::d1`: runtime-go's `database/d1`, over the
+# workspace's network client, since Cloudflare's Rust SDK has no D1 endpoints.
+d1 = ["dep:network"]
 # Makes the `*_live` test targets build. Once on, they fail rather than skip without a server:
 # start the one they name from database/docker first.
 # The Tauri store backend, `database::tauri_store`: records in a tauri-plugin-store file in
@@ -87,6 +90,7 @@ sqlx = { version = "0.9", optional = true, default-features = false, features = 
 sea-query = { version = "1", optional = true, default-features = false, features = ["thread-safe", "with-chrono"] }
 sea-query-sqlx = { version = "0.9", optional = true, default-features = false, features = ["with-chrono"] }
 cache = { workspace = true, optional = true }
+network = { workspace = true, optional = true }
 # `compat-3-3-0` is the driver's required forward-compatibility pledge; `rustls-tls` selects
 # ring, as everything else here does; `dns-resolver` resolves `mongodb+srv://` URIs.
 mongodb = { version = "3.10", default-features = false, features = ["compat-3-3-0", "bson-3", "rustls-tls", "dns-resolver"], optional = true }
@@ -121,6 +125,11 @@ required-features = ["orm-sqlite"]
 name = "orm_dialect"
 path = "tests/orm_dialect.rs"
 required-features = ["orm-sqlite"]
+
+[[test]]
+name = "d1"
+path = "tests/d1.rs"
+required-features = ["d1", "orm-sqlite"]
 
 [[test]]
 name = "records_observe"
@@ -207,4 +216,6 @@ tracing.workspace = true
 bson = "3.1"
 # The Redis live tests share one connection between the cache and the record store.
 cache.workspace = true
+# The d1 test serves a stand-in for D1's REST API.
+axum.workspace = true
 

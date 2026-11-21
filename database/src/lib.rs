@@ -59,6 +59,8 @@ mod buffered;
 #[cfg(feature = "cached")]
 pub mod cached;
 mod collection;
+#[cfg(feature = "d1")]
+pub mod d1;
 #[cfg(feature = "influxdb")]
 pub mod influxdb;
 pub mod ingest;

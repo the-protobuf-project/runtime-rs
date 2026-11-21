@@ -263,10 +263,42 @@ async fn request_returns_http_response_with_error_on_failure() {
             None,
         )
         .await;
+    // The 404 carried no body, so there is none to hand back; the retry driver wraps the last
+    // attempt's failure.
     assert!(resp.data.is_empty());
-    // Go sets only one of Data/Error; the retry driver wraps the last attempt's failure.
     assert!(matches!(resp.error, Some(Error::RetryExhausted { .. })));
     assert!(resp.into_result().is_err());
+}
+
+#[tokio::test]
+async fn request_keeps_the_body_a_refusal_came_with() {
+    let server = MockServer::start().await;
+    let reason = br#"{"success":false,"errors":[{"code":7500,"message":"UNIQUE constraint failed: users.id"}]}"#;
+    Mock::given(method("POST"))
+        .and(path("/query"))
+        .respond_with(ResponseTemplate::new(400).set_body_bytes(reason.to_vec()))
+        .mount(&server)
+        .await;
+
+    let mut http = HttpClient::default();
+    let mut opts = opts_for(&server, "/query");
+    opts.skip_connectivity_check = true;
+    http.connect(opts.clone()).await.unwrap();
+
+    let resp = http
+        .request(
+            HttpMethod::Post,
+            &opts.url,
+            b"{}".to_vec(),
+            &HashMap::new(),
+            0,
+            0,
+            None,
+        )
+        .await;
+    // An API says why it refused a request in the body; the status alone cannot.
+    assert_eq!(resp.data, reason.to_vec());
+    assert!(matches!(resp.error, Some(Error::RetryExhausted { .. })));
 }
 
 #[tokio::test]

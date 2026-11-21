@@ -14,6 +14,10 @@ pub mod dragonfly;
 /// Async Memcached client, Go-compatible router, Driver, and Bulk adapter.
 pub mod memcached;
 
+/// Cloudflare Workers KV client, Provider, Driver, Leases and Scanner, over the
+/// official `cloudflare` SDK.
+pub mod workerskv;
+
 // This test-only module pins the experimental dependency surface the private
 // production adapter relies on, catching minor-line API drift at compile time.
 #[cfg(test)]
