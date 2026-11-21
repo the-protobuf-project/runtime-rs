@@ -1,6 +1,6 @@
 # Source layout
 
-[Streams guide](../README.md) · [Drivers](drivers/README.md)
+[Streams guide](../README.md) | [Drivers](drivers/README.md)
 
 | Path | Role |
 | --- | --- |

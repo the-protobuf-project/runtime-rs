@@ -827,7 +827,7 @@ call that set it:
 
 **OPC UA**
 - Client/server refuses headers: the protocol has no place for them.
-- Subjects are node ids. The stable `nsu=<uri>;s=…` form is rebound after a
+- Subjects are node ids. The stable `nsu=<uri>;s=...` form is rebound after a
   reconnect.
 - The RSA security policies inherit the `rsa` crate's RUSTSEC-2023-0071 advisory.
 

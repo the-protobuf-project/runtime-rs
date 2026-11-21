@@ -1,6 +1,6 @@
 # Examples
 
-[Streams guide](../README.md) · [Local brokers](../docker/README.md)
+[Streams guide](../README.md) | [Local brokers](../docker/README.md)
 
 One runnable program per backend, each porting the matching runtime-go
 example. Start the broker from [docker/](../docker/README.md), then:

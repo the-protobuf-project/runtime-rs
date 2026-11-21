@@ -121,6 +121,6 @@ cargo test -p tpp-agents --no-default-features --features a2a
 cargo doc -p tpp-agents --no-deps
 ```
 
-[Source map](src/README.md) · [Test coverage and fixtures](tests/README.md).
+[Source map](src/README.md) | [Test coverage and fixtures](tests/README.md).
 Crate-level rustdoc contains compiled usage examples; these READMEs explain
 how the pieces connect.

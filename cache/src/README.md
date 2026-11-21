@@ -1,7 +1,7 @@
 # Cache assembly, typed views, and middleware
 
-[Crate guide](../README.md) · [Core](core/README.md) ·
-[Drivers](drivers/README.md) · [Strategies](strategies/README.md)
+[Crate guide](../README.md) | [Core](core/README.md) |
+[Drivers](drivers/README.md) | [Strategies](strategies/README.md)
 
 `lib.rs` is the public facade and defines shared `Config`. An application
 connects a backend client, constructs its provider, selects a `DB`, and wraps

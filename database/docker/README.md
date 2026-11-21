@@ -1,6 +1,6 @@
 # InfluxDB and optional telemetry collector
 
-[Database guide](../README.md) · [InfluxDB example](../examples/influxdb/README.md)
+[Database guide](../README.md) | [InfluxDB example](../examples/influxdb/README.md)
 
 `compose.yaml` runs InfluxDB 3 Core on `127.0.0.1:8181`, with file storage in
 its named `influxdb-data` volume. `INFLUXDB_IMAGE` can pin a release/digest.

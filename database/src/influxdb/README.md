@@ -1,6 +1,6 @@
 # InfluxDB 3 storage and administration
 
-[Database guide](../../README.md) · [Runnable workflow](../../examples/influxdb/README.md)
+[Database guide](../../README.md) | [Runnable workflow](../../examples/influxdb/README.md)
 
 This backend uses `influxdb3-client` for V3 point writes and Arrow Flight SQL
 queries. `InfluxAdmin` separately provisions/drops databases because selecting

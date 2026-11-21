@@ -1,6 +1,6 @@
 # Developer tools
 
-[Workspace guide](../README.md) · [README generator](docgen/README.md)
+[Workspace guide](../README.md) | [README generator](docgen/README.md)
 
 `docgen` is the current tool in this directory. It is excluded from workspace
 members and publication because it maintains repository documentation rather

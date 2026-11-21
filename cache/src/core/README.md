@@ -1,6 +1,6 @@
 # Cache contracts, capabilities, and DB construction
 
-[Cache guide](../../README.md) · [Strategies](../strategies/README.md)
+[Cache guide](../../README.md) | [Strategies](../strategies/README.md)
 
 Core is the boundary between byte-oriented backend commands and cache policy.
 A provider selects a backend and passes its `Driver`, optional `Capabilities`,

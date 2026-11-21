@@ -1,6 +1,6 @@
 # Tests
 
-[Streams guide](../README.md) · [Local brokers](../docker/README.md)
+[Streams guide](../README.md) | [Local brokers](../docker/README.md)
 
 Unit tests live beside the code: the wire frame (including a byte-level check
 against Go's layout), subject wildcards, codecs, retry, and each driver's

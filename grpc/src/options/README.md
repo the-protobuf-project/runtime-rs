@@ -1,6 +1,6 @@
 # Hybrid server settings
 
-[Hybrid server](../../README.md) · [Environment overrides](../environment.rs)
+[Hybrid server](../../README.md) | [Environment overrides](../environment.rs)
 
 Build `Options`, pass it to `HybridServer::new`, register services, then start.
 Port 0 asks the operating system for a free port; `Options::default()` carries

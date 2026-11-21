@@ -1,6 +1,6 @@
 # Database composition and backend routing
 
-[Database guide](../README.md) · [Contracts](store/README.md)
+[Database guide](../README.md) | [Contracts](store/README.md)
 
 `lib.rs` exports a backend-neutral facade. Resource descriptors and typed
 models bind to a selected DB; backend implementations supply capabilities.

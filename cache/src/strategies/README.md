@@ -1,6 +1,6 @@
 # Cache strategy execution
 
-[Cache guide](../../README.md) · [Contracts](../core/README.md)
+[Cache guide](../../README.md) | [Contracts](../core/README.md)
 
 Strategies combine a Driver with optional server capabilities. They never own
 a second in-memory copy of cached application data. Choose Document for

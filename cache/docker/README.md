@@ -1,6 +1,6 @@
 # Local cache backends
 
-[Cache guide](../README.md) · [Live contract tests](../tests/README.md)
+[Cache guide](../README.md) | [Live contract tests](../tests/README.md)
 
 Each Compose file supplies an isolated loopback service for examples and
 feature-gated integration tests. Run all commands from the repository root.

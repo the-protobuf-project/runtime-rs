@@ -1,6 +1,6 @@
 # Telemetry signal and context verification
 
-[Telemetry guide](../README.md) · [Exporter harness](support/README.md)
+[Telemetry guide](../README.md) | [Exporter harness](support/README.md)
 
 ```bash
 cargo test -p tpp-telemetry

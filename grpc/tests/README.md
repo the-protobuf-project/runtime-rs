@@ -1,7 +1,7 @@
 # Hybrid server integration tests
 
-[Crate guide](../README.md) · [Shop helpers](common/README.md) ·
-[Fixtures](fixtures/README.md) · [Protocol sources](proto/README.md)
+[Crate guide](../README.md) | [Shop helpers](common/README.md) |
+[Fixtures](fixtures/README.md) | [Protocol sources](proto/README.md)
 
 Tests start local servers and exercise behavior with tonic/HTTP/MCP clients.
 They need no external API or service credentials. Use the workspace Rust

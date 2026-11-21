@@ -1,6 +1,6 @@
 # A2A agents, discovery, and transports
 
-[Agent runtime](../../README.md) · [Source map](../README.md)
+[Agent runtime](../../README.md) | [Source map](../README.md)
 
 This module adapts the pinned A2A SDK to `agents::Service`. The SDK implements
 protocol requests and task handling; this module supplies identity, endpoints,

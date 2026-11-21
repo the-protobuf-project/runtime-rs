@@ -1,6 +1,6 @@
 # Shop test API and annotation imports
 
-[Hybrid tests](../README.md) · [Generated outputs](../fixtures/README.md)
+[Hybrid tests](../README.md) | [Generated outputs](../fixtures/README.md)
 
 This is the include root for test protobuf compilation. The
 [shop API](shop/README.md) imports [Google API options](google/README.md) and

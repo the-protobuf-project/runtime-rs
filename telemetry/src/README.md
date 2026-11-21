@@ -1,6 +1,6 @@
 # Shared telemetry implementation
 
-[Telemetry guide](../README.md) · [Signal verification](../tests/README.md)
+[Telemetry guide](../README.md) | [Signal verification](../tests/README.md)
 
 `Telemetry` holds optional caller-supplied meter, tracer, and log sink handles.
 `observer(component)` creates shared instruments once; `start` returns an

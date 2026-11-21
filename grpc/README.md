@@ -180,7 +180,7 @@ socket, is refused with `Error::Listen` and left alone. The socket is removed
 when the server stops, but only if the path still names the socket it created.
 `grpc_listen_addr()` reports the bound endpoint of either kind. `grpc_addr()`
 stays TCP-only, so it is `None` for a local endpoint. The banner prints
-`unix:/…` or `pipe:\\.\pipe\…` in the gRPC rows.
+`unix:/...` or `pipe:\\.\pipe\...` in the gRPC rows.
 
 An MCP tool calls gRPC services in-process through the `Loopback` it is built
 from, so MCP over stdio or over its own `unix:` socket needs no gRPC socket to
@@ -234,5 +234,5 @@ cargo run -p tpp-grpc --example banner
 cargo doc -p tpp-grpc --no-deps
 ```
 
-[Source map](src/README.md) · [Tests and fixture regeneration](tests/README.md) ·
-[Examples](examples/README.md) · [Banner font](assets/README.md).
+[Source map](src/README.md) | [Tests and fixture regeneration](tests/README.md) |
+[Examples](examples/README.md) | [Banner font](assets/README.md).

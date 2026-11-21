@@ -1,6 +1,6 @@
 # Network client construction and lifecycle
 
-[Crate guide](../README.md) · [Examples](../examples/README.md)
+[Crate guide](../README.md) | [Examples](../examples/README.md)
 
 `lib.rs` exports the three clients plus the factory/options/error vocabulary.
 `network.rs` stores a concrete `Client` inside `Network`, records connection

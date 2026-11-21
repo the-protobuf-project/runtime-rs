@@ -1,6 +1,6 @@
 # Cache usage walkthroughs
 
-[Cache guide](../README.md) · [Backend setup](../docker/README.md)
+[Cache guide](../README.md) | [Backend setup](../docker/README.md)
 
 `redis.rs` demonstrates the public API from client connection through provider
 selection, typed document storage, indexing/Aside, and orderly cleanup.

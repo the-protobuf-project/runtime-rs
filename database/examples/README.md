@@ -1,6 +1,6 @@
 # Database end-to-end programs
 
-[Database guide](../README.md) · [Local services](../docker/README.md)
+[Database guide](../README.md) | [Local services](../docker/README.md)
 
 Each subfolder is a Cargo example target with a `main.rs` and small helper
 modules. Run from the repository root:
