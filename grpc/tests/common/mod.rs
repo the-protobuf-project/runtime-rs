@@ -3,7 +3,10 @@
 
 #![allow(dead_code)]
 
-use std::net::TcpListener;
+mod port;
+
+pub use port::free_port;
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -142,13 +145,6 @@ impl ShopService for Shop {
     ) -> Result<Response<Shelf>, Status> {
         Err(Status::unimplemented("not in this test"))
     }
-}
-
-pub fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
 }
 
 /// Starts a server for `shop` with the shop's descriptors registered, configured further by

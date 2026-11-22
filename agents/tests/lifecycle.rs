@@ -9,7 +9,7 @@ use common::*;
 
 #[tokio::test]
 async fn shutdown_releases_the_port() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime =
         Runtime::new(config(port)).register(Fake::mounting(Protocol::Mcp, "/mcp", "tools"));
 

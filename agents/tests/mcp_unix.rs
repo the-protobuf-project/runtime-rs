@@ -38,7 +38,7 @@ async fn serve(path: &std::path::Path, transport: Transport) -> (Runtime, Cancel
     let service = mcp::Service::from_handler(Probe::new("probe"))
         .transports([transport])
         .addr(format!("unix:{}", path.display()));
-    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let runtime = Runtime::new(config(free_port())).register(service);
     let cancel = CancellationToken::new();
     runtime.start(cancel.clone()).await.expect("start");
     (runtime, cancel)
@@ -110,7 +110,7 @@ async fn a_socket_something_answers_on_is_refused_and_left_alone() {
     let _live = std::os::unix::net::UnixListener::bind(&path).expect("someone else's socket");
     let service =
         mcp::Service::from_handler(Probe::new("probe")).addr(format!("unix:{}", path.display()));
-    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let runtime = Runtime::new(config(free_port())).register(service);
     let error = runtime
         .start(CancellationToken::new())
         .await
@@ -131,7 +131,7 @@ async fn a_stale_socket_is_replaced_and_a_file_that_is_not_one_is_kept() {
     std::fs::write(&file, "keep me").expect("a file");
     let service =
         mcp::Service::from_handler(Probe::new("probe")).addr(format!("unix:{}", file.display()));
-    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let runtime = Runtime::new(config(free_port())).register(service);
     runtime
         .start(CancellationToken::new())
         .await
@@ -149,7 +149,7 @@ async fn a_socket_that_cannot_be_connected_to_is_not_unlinked() {
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     let service =
         mcp::Service::from_handler(Probe::new("probe")).addr(format!("unix:{}", path.display()));
-    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let runtime = Runtime::new(config(free_port())).register(service);
     runtime
         .start(CancellationToken::new())
         .await

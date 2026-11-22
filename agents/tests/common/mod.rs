@@ -6,6 +6,10 @@
 
 #![allow(dead_code)]
 
+mod port;
+
+pub use port::free_port;
+
 use std::sync::Arc;
 
 use agents::error::ServiceError;
@@ -108,16 +112,6 @@ impl Service for Fake {
         cancel.cancelled().await;
         Ok(())
     }
-}
-
-/// A port nothing is listening on, for a test that needs to name one in advance.
-pub async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
 }
 
 pub fn config(port: u16) -> Config {

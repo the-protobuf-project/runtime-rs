@@ -59,7 +59,7 @@ async fn start(runtime: &Runtime) -> CancellationToken {
 
 #[tokio::test]
 async fn extras_interceptors_and_cache_hints_are_applied_around_the_handler() {
-    let port = free_port().await;
+    let port = free_port();
     let calls = Arc::new(AtomicUsize::new(0));
     let method = Arc::new(std::sync::Mutex::new(String::new()));
     let mut hints = CacheHints {
@@ -136,7 +136,7 @@ async fn extras_interceptors_and_cache_hints_are_applied_around_the_handler() {
 
 #[tokio::test]
 async fn a_resource_handler_overrides_the_placeholder() {
-    let port = free_port().await;
+    let port = free_port();
     let service = mcp::Service::from_handler(Probe::new("probe")).resource_handler(
         "probe://probe",
         Arc::new(|request, _| {
@@ -166,7 +166,7 @@ async fn a_resource_handler_overrides_the_placeholder() {
 
 #[tokio::test]
 async fn mapped_headers_reach_the_call_as_incoming_metadata() {
-    let port = free_port().await;
+    let port = free_port();
     let hook: mcp::ElicitHook = Arc::new(|_, fields| Box::pin(async move { Ok(fields) }));
     let service = mcp::Service::from_handler(Probe::new("probe"))
         .headers(agents::shared::default_header_mappings())
@@ -198,7 +198,7 @@ async fn mapped_headers_reach_the_call_as_incoming_metadata() {
 
 #[tokio::test]
 async fn a_stateless_server_issues_no_session() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime = Runtime::new(config(port))
         .register(mcp::Service::from_handler(Probe::new("probe")).stateless());
     let cancel = start(&runtime).await;
@@ -227,7 +227,7 @@ async fn a_stateless_server_issues_no_session() {
 
 #[tokio::test]
 async fn the_health_route_answers_in_ping_shape() {
-    let port = free_port().await;
+    let port = free_port();
     let healthy = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let flag = Arc::clone(&healthy);
     let check: mcp::HealthCheck = Arc::new(move || {
@@ -269,7 +269,7 @@ async fn the_health_route_answers_in_ping_shape() {
 
 #[tokio::test]
 async fn a_group_mounts_each_service_at_its_own_path() {
-    let port = free_port().await;
+    let port = free_port();
     let group = ServiceGroup::new()
         .with(mcp::Service::from_handler(Probe::new("alpha")).base_path("/alpha/mcp"))
         .with(mcp::Service::from_handler(Probe::new("beta")).base_path("/beta/mcp"));
@@ -292,7 +292,7 @@ async fn a_group_mounts_each_service_at_its_own_path() {
 
 #[tokio::test]
 async fn a_combined_group_serves_every_service_at_one_path() {
-    let port = free_port().await;
+    let port = free_port();
     let group = ServiceGroup::new()
         .with(mcp::Service::from_handler(Probe::new("alpha")))
         .with(mcp::Service::from_handler(Probe::new("beta")))
@@ -362,7 +362,7 @@ async fn a_combined_group_serves_every_service_at_one_path() {
 
 #[tokio::test]
 async fn a_combined_group_with_clashing_names_fails_the_start() {
-    let port = free_port().await;
+    let port = free_port();
     let group = ServiceGroup::new()
         .with(mcp::Service::from_handler(Probe::new("same")))
         .with(mcp::Service::from_handler(Probe::new("same")))
@@ -382,7 +382,7 @@ async fn a_combined_group_with_clashing_names_fails_the_start() {
 
 #[tokio::test]
 async fn an_ask_without_elicitation_support_becomes_a_tool_error() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime =
         Runtime::new(config(port)).register(mcp::Service::from_handler(Probe::new("probe")));
     let cancel = start(&runtime).await;
@@ -401,7 +401,7 @@ async fn an_ask_without_elicitation_support_becomes_a_tool_error() {
 
 #[tokio::test]
 async fn a_legacy_client_answers_an_ask_through_an_elicitation_round_trip() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime =
         Runtime::new(config(port)).register(mcp::Service::from_handler(Probe::new("probe")));
     let cancel = start(&runtime).await;
@@ -449,7 +449,7 @@ async fn a_legacy_client_answers_an_ask_through_an_elicitation_round_trip() {
 async fn the_legacy_sse_transport_serves_a_session() {
     use futures::StreamExt;
 
-    let port = free_port().await;
+    let port = free_port();
     let runtime = Runtime::new(config(port))
         .register(mcp::Service::from_handler(Probe::new("probe")).transports([Transport::Sse]));
     let cancel = start(&runtime).await;
@@ -524,7 +524,7 @@ async fn the_legacy_sse_transport_serves_a_session() {
 
 #[tokio::test]
 async fn stdio_is_reported_with_no_url_and_no_detail() {
-    let port = free_port().await;
+    let port = free_port();
     // Stdio alongside HTTP, so the test never touches the process's own pipes beyond a
     // listener that is cancelled straight away.
     let service = mcp::Service::from_handler(Probe::new("probe"))
@@ -544,7 +544,7 @@ async fn stdio_is_reported_with_no_url_and_no_detail() {
 
 #[tokio::test]
 async fn start_server_serves_one_server_until_cancelled() {
-    let port = free_port().await;
+    let port = free_port();
     let config = mcp::ServerConfig {
         name: "standalone".into(),
         addr: format!("127.0.0.1:{port}"),
@@ -582,7 +582,7 @@ async fn a_streamable_http_server_on_port_zero_advertises_the_port_it_bound() {
     let service = mcp::Service::from_handler(Probe::new("probe"))
         .transports([Transport::StreamableHttp])
         .addr("127.0.0.1:0");
-    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let runtime = Runtime::new(config(free_port())).register(service);
     let cancel = start(&runtime).await;
 
     let endpoint = runtime

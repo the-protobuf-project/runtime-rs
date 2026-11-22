@@ -3,19 +3,15 @@
 
 #![cfg(feature = "a2a")]
 
-use std::net::TcpListener;
+#[path = "common/port.rs"]
+mod port;
+
 use std::sync::{Arc, Mutex};
 
 use agents::a2a::{self, pb};
 use grpc::options::{A2aOptions, A2aTransport, Endpoint, Options};
 use grpc::{A2aServerConfig, HybridServer};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
+use port::free_port;
 
 /// Options for a server with A2A on, both transports, and every port pinned.
 fn options(grpc_port: u16, a2a_port: u16) -> Options {

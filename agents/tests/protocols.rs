@@ -3,10 +3,14 @@
 
 #![cfg(all(feature = "mcp", feature = "a2a"))]
 
+#[path = "common/port.rs"]
+mod port;
+
 use a2a::{A2AError, StreamResponse};
 use a2a_server::{AgentExecutor, ExecutorContext};
 use agents::{Config, Identity, Protocol, Runtime, a2a as a2a_svc, mcp as mcp_svc};
 use futures::stream::BoxStream;
+use port::free_port;
 use rmcp::ServerHandler;
 use tokio_util::sync::CancellationToken;
 
@@ -36,18 +40,9 @@ struct Tools;
 
 impl ServerHandler for Tools {}
 
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind ephemeral");
-    let port = listener.local_addr().expect("local addr").port();
-    drop(listener);
-    port
-}
-
 #[tokio::test]
 async fn an_agent_and_a_tool_server_share_one_listener() {
-    let port = free_port().await;
+    let port = free_port();
 
     let runtime = Runtime::new(Config {
         identity: Identity {

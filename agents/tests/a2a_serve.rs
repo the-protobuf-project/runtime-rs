@@ -32,7 +32,7 @@ fn send_message(text: &str) -> serde_json::Value {
 
 /// Serves `routes` on a tonic server bound to a free port, returning the address and a stop.
 async fn serve_grpc(routes: &GrpcRoutes) -> (String, CancellationToken) {
-    let port = free_port().await;
+    let port = free_port();
     let addr = format!("127.0.0.1:{port}");
     let stop = CancellationToken::new();
     let server = tonic::transport::Server::builder()
@@ -54,7 +54,7 @@ async fn a_message_round_trips_over_the_grpc_binding() {
     let routes = GrpcRoutes::new();
     let runtime = Runtime::new(Config {
         grpc_routes: Some(routes.clone()),
-        ..config(free_port().await)
+        ..config(free_port())
     })
     .register(a2a::Service::from_arc(replying_agent(), vec![]).transports([Transport::Grpc]));
 
@@ -119,7 +119,7 @@ async fn a_grpc_binding_without_routes_is_refused() {
 
 #[tokio::test]
 async fn a_standalone_server_owns_its_listener_and_always_serves_the_card() {
-    let port = free_port().await;
+    let port = free_port();
     let ready: Arc<Mutex<Option<ServerConfig>>> = Arc::default();
     let seen = Arc::clone(&ready);
     let cfg = ServerConfig {
@@ -246,7 +246,7 @@ async fn two_agents_on_one_mux_share_the_card_path_without_panicking() {
         rx.await.expect("mounted");
     }
 
-    let port = free_port().await;
+    let port = free_port();
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .unwrap();
@@ -287,7 +287,7 @@ async fn two_agents_on_one_mux_share_the_card_path_without_panicking() {
 
 #[tokio::test]
 async fn a_service_function_receives_the_assembled_config() {
-    let port = free_port().await;
+    let port = free_port();
     let seen: Arc<Mutex<Option<ServerConfig>>> = Arc::default();
     let record = Arc::clone(&seen);
     let layered = Arc::new(AtomicUsize::new(0));

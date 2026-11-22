@@ -262,7 +262,7 @@ fn an_ipv6_listen_address_keeps_its_brackets() {
 async fn jsonrpc_and_rest_cannot_share_a_root_base_path() {
     let runtime = Runtime::new(Config {
         host: "127.0.0.1".into(),
-        port: common::free_port().await,
+        port: common::free_port(),
         ..Default::default()
     })
     .register(
@@ -279,7 +279,7 @@ async fn jsonrpc_and_rest_cannot_share_a_root_base_path() {
 async fn an_agent_with_no_transports_is_refused() {
     let runtime = Runtime::new(Config {
         host: "127.0.0.1".into(),
-        port: common::free_port().await,
+        port: common::free_port(),
         ..Default::default()
     })
     .register(a2a::Service::new(echo_agent(), vec![]).transports([]));

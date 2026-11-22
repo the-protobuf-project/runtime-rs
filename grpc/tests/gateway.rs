@@ -4,10 +4,12 @@
 //! The service is the built-in `grpc.health.v1.Health`, so the test needs no generated
 //! code of its own: the route table below is written in the form `protoc-gen-http` emits.
 
-use std::net::TcpListener;
+#[path = "common/port.rs"]
+mod port;
 
 use grpc::HybridServer;
 use grpc::options::{Endpoint, Options};
+use port::free_port;
 use serde::Serialize;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
@@ -67,14 +69,6 @@ impl Dispatcher for Health {
         .unwrap_or_default();
         call.reply_with(&JsonCodec::new(), http::StatusCode::OK, &Status { status })
     }
-}
-
-/// A port nothing is listening on, found by binding and releasing one.
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
 }
 
 /// Rejects any call carrying `x-deny`, to prove the chain runs on the loopback.
