@@ -4,6 +4,15 @@
 //! `database/d1`, which reaches the same endpoint through Cloudflare's Go SDK; Cloudflare's
 //! Rust SDK has no D1 endpoints.
 //!
+//! Two layers, as the SQL backend has a sqlx pool under its driver:
+//!
+//! - [`D1Client`] is SQL in and rows out, and knows nothing about proto:
+//!   [`query`](D1Client::query) runs [`Statement`]s and returns an [`Outcome`] each, rows as
+//!   JSON objects; [`ping`](D1Client::ping) and [`lookup`](D1Client::lookup) find a
+//!   database. [`D1Client::connect`] builds it from an account and an API token.
+//! - [`D1Provider`] selects a database and gives the records driver over it: proto
+//!   messages read and written through their descriptors, as every records provider.
+//!
 //! ```ignore
 //! use database::d1::{D1Client, D1Config, D1Provider};
 //! use database::records::Provider;
@@ -50,6 +59,7 @@ mod write;
 
 pub use client::{D1Client, D1Config};
 pub use provider::D1Provider;
+pub use wire::{Outcome, Statement};
 
 /// The backend name in errors and telemetry.
 const BACKEND: &str = "d1";
