@@ -4,8 +4,9 @@
 //! — posts one message to `/<package.Service>/<Method>` as `application/proto` or
 //! `application/json`. [`ConnectBridge`] turns that into a gRPC call on the server's own
 //! [`Loopback`], so it runs the same interceptor chain as a gRPC client, and turns the reply
-//! or the `grpc-status` back into a Connect response. Unary calls first; server, client
-//! and bidi streaming follow.
+//! or the `grpc-status` back into a Connect response. Unary calls use `application/proto` or
+//! `application/json`; server-streaming, client-streaming and bidi calls use
+//! `application/connect+proto` or `application/connect+json` (see [`stream`]).
 //!
 //! A binary call needs no type information: the Connect body is exactly the message a gRPC
 //! frame carries. It therefore reaches every unary method, with or without a
@@ -19,6 +20,7 @@
 //! [`HybridServer::with_reflection`]: crate::HybridServer::with_reflection
 
 mod error;
+mod stream;
 mod wire;
 
 use std::convert::Infallible;
@@ -63,6 +65,11 @@ impl ConnectBridge {
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or_default();
+        if let Some(format) = stream::stream_format(content_type) {
+            let path = parts.uri.path().to_owned();
+            return stream::serve(self.loopback, self.pool, format, path, parts.headers, body)
+                .await;
+        }
         let Some(format) = Format::from_content_type(content_type) else {
             return unsupported_media_type();
         };
@@ -86,7 +93,8 @@ impl ConnectBridge {
         let path = parts.uri.path().to_owned();
         let request = format
             .request(&self.pool, &path, body)
-            .and_then(|message| wire::grpc_request(&path, &parts.headers, message));
+            .and_then(|message| wire::unary_body(&message))
+            .and_then(|body| wire::grpc_request(&path, &parts.headers, body));
         let request = match request {
             Ok(request) => request,
             Err(status) => return connect_error(status.code(), status.message(), &[], None),

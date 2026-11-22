@@ -98,7 +98,10 @@ impl HybridServer {
     /// is converted against the descriptor sets registered with
     /// [`HybridServer::with_reflection`]. Connect paths never clash with REST ones: a
     /// Connect path's first segment is a service's full name, so it contains a dot. HTTP/1.1
-    /// and HTTP/3 serve it alike. Unary calls first; streaming follows.
+    /// and HTTP/3 serve it alike. Every call shape: unary as `application/proto` or `application/json`; server
+    /// streaming, client streaming and bidi as `application/connect+proto` or
+    /// `application/connect+json`. Bidi needs a full-duplex connection: HTTP/2 (TLS or
+    /// cleartext) or HTTP/3.
     ///
     /// Go's `WithConnect`, answering the same codes, statuses and error bodies.
     #[must_use]
