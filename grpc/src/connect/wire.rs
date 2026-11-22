@@ -32,7 +32,7 @@ impl Format {
         }
     }
 
-    fn content_type(self) -> &'static str {
+    pub(super) fn content_type(self) -> &'static str {
         match self {
             Self::Binary => "application/proto",
             Self::Json => "application/json",
@@ -93,7 +93,7 @@ fn method(pool: &DescriptorPool, path: &str) -> Result<MethodDescriptor, Status>
 }
 
 /// Headers that belong to HTTP or to the protocols themselves, not to the call's metadata.
-fn is_protocol_header(name: &HeaderName) -> bool {
+pub(super) fn is_protocol_header(name: &HeaderName) -> bool {
     let name = name.as_str();
     matches!(
         name,
@@ -115,29 +115,38 @@ fn is_protocol_header(name: &HeaderName) -> bool {
         || name.starts_with("grpc-")
 }
 
-/// A gRPC request for `path` carrying `message` and the caller's headers as metadata, with
-/// `Connect-Timeout-Ms` as `grpc-timeout`. `-bin` values are base64 on both wires, so they
-/// pass through unchanged.
-pub(super) fn grpc_request(
-    path: &str,
-    headers: &HeaderMap,
-    message: Bytes,
-) -> Result<http::Request<tonic::body::Body>, Status> {
+/// One gRPC frame: an uncompressed flag, the big-endian length, the message.
+pub(super) fn frame(message: &[u8]) -> Result<Bytes, Status> {
     let len = u32::try_from(message.len())
         .map_err(|_| Status::resource_exhausted("message too large"))?;
     let mut frame = BytesMut::with_capacity(5 + message.len());
     frame.put_u8(0);
     frame.put_u32(len);
-    frame.put_slice(&message);
+    frame.put_slice(message);
+    Ok(frame.freeze())
+}
 
+/// The body of a unary gRPC request: one frame.
+pub(super) fn unary_body(message: &[u8]) -> Result<tonic::body::Body, Status> {
+    Ok(tonic::body::Body::new(http_body_util::Full::new(frame(
+        message,
+    )?)))
+}
+
+/// A gRPC request for `path` with `body`, carrying the caller's headers as metadata and
+/// `Connect-Timeout-Ms` as `grpc-timeout`. `-bin` values are base64 on both wires, so they
+/// pass through unchanged.
+pub(super) fn grpc_request(
+    path: &str,
+    headers: &HeaderMap,
+    body: tonic::body::Body,
+) -> Result<http::Request<tonic::body::Body>, Status> {
     let mut request = http::Request::builder()
         .method(http::Method::POST)
         .uri(path)
         .header(http::header::CONTENT_TYPE, "application/grpc")
         .header(http::header::TE, "trailers")
-        .body(tonic::body::Body::new(http_body_util::Full::new(
-            frame.freeze(),
-        )))
+        .body(body)
         .map_err(|err| Status::invalid_argument(format!("bad request path: {err}")))?;
     for (name, value) in headers {
         if !is_protocol_header(name) {
@@ -231,7 +240,7 @@ fn unframe(framed: &Bytes) -> Result<Bytes, Status> {
 }
 
 /// Copies call metadata, leaving out the protocols' own headers, each name prefixed.
-fn copy_metadata(from: &HeaderMap, into: &mut HeaderMap, prefix: &str) {
+pub(super) fn copy_metadata(from: &HeaderMap, into: &mut HeaderMap, prefix: &str) {
     for (name, value) in from {
         if is_protocol_header(name) {
             continue;

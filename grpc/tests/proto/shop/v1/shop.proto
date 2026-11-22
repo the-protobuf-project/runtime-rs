@@ -44,6 +44,16 @@ service ShopService {
       body: "*"
     };
   }
+  // Server streaming: three versions of the shelf; shelves/fail errors after the first.
+  rpc WatchShelf(GetShelfRequest) returns (stream Shelf);
+  // Client streaming: counts the books sent.
+  rpc ImportBooks(stream CreateBookRequest) returns (ImportBooksResponse);
+  // Bidi: answers each request with its shelf as it arrives.
+  rpc Chat(stream GetShelfRequest) returns (stream Shelf);
+}
+
+message ImportBooksResponse {
+  int32 imported = 1;
 }
 
 message Shelf {
