@@ -86,6 +86,8 @@ pub struct HybridServer {
     pub(crate) descriptor_sets: Vec<&'static [u8]>,
     /// Whether the REST gateway should emit proto (snake_case) field names.
     pub(crate) rest_snake_case: bool,
+    /// Serve Connect unary calls on the HTTP surface ([`HybridServer::with_connect`]).
+    pub(crate) connect: bool,
     /// A2A service functions, turned into services at start once `opts.a2a` is resolved.
     #[cfg(feature = "a2a")]
     pub(crate) a2a_service_funcs: Vec<crate::a2a::A2aServiceFunc>,
@@ -144,6 +146,7 @@ impl HybridServer {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             descriptor_sets: Vec::new(),
             rest_snake_case: false,
+            connect: false,
             cors: None,
             stream_interceptors: Vec::new(),
             validation_last: false,

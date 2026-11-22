@@ -118,6 +118,10 @@ pub(crate) fn configure_grpc(
     builder: tonic::transport::Server,
     cert: &Certificate,
 ) -> Result<tonic::transport::Server> {
+    // tonic builds its rustls config here, before any HTTP listener has run, so the
+    // provider must be chosen now: with both ring and aws-lc compiled in, rustls refuses
+    // to pick one and panics.
+    install_crypto_provider();
     let config = tonic::transport::ServerTlsConfig::new().identity(cert.identity());
     Ok(builder.tls_config(config)?)
 }
