@@ -2,7 +2,9 @@
 //! runs the server's interceptor chain with the MCP caller's headers, and the combined
 //! endpoint and path options mount what Go's do.
 
-use std::net::TcpListener;
+#[path = "common/port.rs"]
+mod port;
+
 use std::sync::Arc;
 
 use agents::mcp::rmcp::model::{
@@ -14,16 +16,10 @@ use agents::mcp::rmcp::{ErrorData as McpError, ServerHandler};
 use agents::mcp::{self, HeaderMapping};
 use grpc::options::{Endpoint, McpTransport, Options};
 use grpc::{HybridServer, Loopback};
+use port::free_port;
 use serde_json::{Value, json};
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
 
 /// A tool that asks the server's health service, through the loopback, whether it serves.
 #[derive(Clone)]

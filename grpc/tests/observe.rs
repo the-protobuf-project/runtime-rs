@@ -4,23 +4,18 @@
 //!
 //! One test, because the providers are process-global.
 
-use std::net::TcpListener;
+#[path = "common/port.rs"]
+mod port;
 
 use grpc::options::{Endpoint, Options};
 use grpc::{HybridServer, Observer};
 use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData, ResourceMetrics};
 use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+use port::free_port;
 use telemetry::opentelemetry::trace::SpanKind;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
 
 /// The sum of a counter's points, or the count of a histogram's.
 fn total(metrics: &ResourceMetrics, name: &str) -> u64 {

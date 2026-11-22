@@ -18,7 +18,7 @@ async fn cards_and_ready_endpoints_name_the_bound_unix_socket() {
     let service = a2a::Service::new(echo_agent(), vec![])
         .addr(format!("unix:{}", path.display()))
         .serve_agent_card(true);
-    let runtime = Runtime::new(config(free_port().await)).register(service);
+    let runtime = Runtime::new(config(free_port())).register(service);
     let cancel = CancellationToken::new();
     runtime.start(cancel.clone()).await.unwrap();
     let endpoints = runtime.endpoints();

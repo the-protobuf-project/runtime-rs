@@ -15,7 +15,7 @@ const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"p
 const ORIGIN: &str = "https://app.example.com";
 
 async fn serve(service: impl agents::Service) -> (Runtime, CancellationToken, u16) {
-    let port = free_port().await;
+    let port = free_port();
     let runtime = Runtime::new(config(port)).register(service);
     let cancel = CancellationToken::new();
     runtime.start(cancel.clone()).await.expect("start");
@@ -143,8 +143,7 @@ async fn empty_host_lists_are_rejected_for_members_and_groups() {
             .with(Service::from_handler(Probe::new("probe")))
             .allowed_hosts(std::iter::empty::<String>());
         for group in [member, group] {
-            let runtime =
-                Runtime::new(config(free_port().await)).register(group.transports([transport]));
+            let runtime = Runtime::new(config(free_port())).register(group.transports([transport]));
             let error = runtime
                 .start(CancellationToken::new())
                 .await

@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 const INIT: &str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"t","version":"1"}}}"#;
 
 async fn serve(service: mcp::Service<Probe>) -> (Runtime, CancellationToken, u16) {
-    let port = free_port().await;
+    let port = free_port();
     let runtime = Runtime::new(config(port)).register(service);
     let cancel = CancellationToken::new();
     runtime.start(cancel.clone()).await.expect("start");

@@ -1,18 +1,14 @@
 //! A CORS policy on a running server answers preflights before routing and decorates every
 //! HTTP response, `/health` included; an invalid one stops the server from starting.
 
-use std::net::TcpListener;
+#[path = "common/port.rs"]
+mod port;
+
 use std::time::Duration;
 
 use grpc::options::{Endpoint, Options};
 use grpc::{CorsPolicy, Error, HybridServer};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
+use port::free_port;
 
 fn server(http_port: u16, policy: CorsPolicy) -> HybridServer {
     HybridServer::new(Options {

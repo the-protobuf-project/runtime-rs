@@ -19,7 +19,7 @@ async fn start_with_nothing_registered_is_refused() {
 
 #[tokio::test]
 async fn a_second_start_is_refused() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime =
         Runtime::new(config(port)).register(Fake::mounting(Protocol::Mcp, "/mcp", "tools"));
     let cancel = CancellationToken::new();
@@ -48,7 +48,7 @@ async fn a_grpc_binding_without_a_registry_is_refused() {
 async fn a_service_that_never_mounts_times_out() {
     let runtime = Runtime::new(Config {
         ready_timeout: Some(Duration::from_millis(150)),
-        ..config(free_port().await)
+        ..config(free_port())
     })
     .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools").behaving(Behaviour::NeverMount));
 
@@ -67,7 +67,7 @@ async fn a_service_that_never_mounts_times_out() {
 
 #[tokio::test]
 async fn a_service_that_fails_on_the_way_up_reports_its_own_error() {
-    let runtime = Runtime::new(config(free_port().await)).register(
+    let runtime = Runtime::new(config(free_port())).register(
         Fake::mounting(Protocol::Mcp, "/mcp", "tools").behaving(Behaviour::FailBeforeReady),
     );
 
@@ -83,7 +83,7 @@ async fn a_service_that_fails_on_the_way_up_reports_its_own_error() {
 
 #[tokio::test]
 async fn a_service_that_returns_before_mounting_is_not_a_stall() {
-    let runtime = Runtime::new(config(free_port().await)).register(
+    let runtime = Runtime::new(config(free_port())).register(
         Fake::mounting(Protocol::A2a, "/a2a", "agent").behaving(Behaviour::StopBeforeReady),
     );
 
@@ -98,7 +98,7 @@ async fn a_service_that_returns_before_mounting_is_not_a_stall() {
 async fn identity_and_defaults_reach_the_placement() {
     let runtime = Runtime::new(Config {
         host: String::new(),
-        ..config(free_port().await)
+        ..config(free_port())
     });
     assert_eq!(runtime.config().host, agents::DEFAULT_HOST);
     assert_eq!(runtime.config().identity.version, "1.2.3");

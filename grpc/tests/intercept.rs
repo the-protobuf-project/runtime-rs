@@ -3,23 +3,16 @@
 
 mod common;
 
-use std::net::TcpListener;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use common::free_port;
 use grpc::options::{Endpoint, Options};
 use grpc::{HybridServer, Interceptor, Next, UnaryCall, UnaryReply};
 use prost_reflect::Value;
 use tonic::Status;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
 
 /// Rejects a check for the service named `forbidden`, rewrites `alias` to the whole-server
 /// check, and records the status it saw in every reply.

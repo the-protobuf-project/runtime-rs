@@ -72,7 +72,7 @@ fn runtime_at(port: u16) -> Runtime {
 
 #[tokio::test]
 async fn a_generated_handler_answers_a_full_mcp_conversation() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime = runtime_at(port);
     let cancel = CancellationToken::new();
     runtime.start(cancel.clone()).await.expect("start");
@@ -118,7 +118,7 @@ async fn a_generated_handler_answers_a_full_mcp_conversation() {
 
 #[tokio::test]
 async fn the_generated_base_path_is_where_it_mounts() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime = runtime_at(port);
     let cancel = CancellationToken::new();
     runtime.start(cancel.clone()).await.expect("start");

@@ -1,22 +1,18 @@
 //! A server with its gRPC listener off still serves REST and MCP through the loopback, and
 //! opens no port for gRPC to do it.
 
+#[path = "common/port.rs"]
+mod port;
+
 use std::future::Future;
-use std::net::TcpListener;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use grpc::options::{A2aTransport, Endpoint, Options};
 use grpc::{Error, HybridServer, Loopback, RestGateway};
+use port::free_port;
 use tonic_health::pb::HealthCheckRequest;
 use tonic_health::pb::health_client::HealthClient;
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
 
 /// Answers `/check` by calling the health service through the loopback.
 struct Check(Loopback);

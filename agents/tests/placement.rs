@@ -12,7 +12,7 @@ use common::*;
 
 #[tokio::test]
 async fn two_protocols_naming_no_address_share_one_port() {
-    let port = free_port().await;
+    let port = free_port();
     let runtime = Runtime::new(config(port))
         .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools"))
         .register(Fake::mounting(Protocol::A2a, "/a2a", "agent"));
@@ -41,8 +41,8 @@ async fn two_protocols_naming_no_address_share_one_port() {
 
 #[tokio::test]
 async fn a_service_naming_an_address_gets_a_port_of_its_own() {
-    let shared = free_port().await;
-    let own = free_port().await;
+    let shared = free_port();
+    let own = free_port();
 
     let runtime = Runtime::new(config(shared))
         .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools"))
@@ -80,7 +80,7 @@ async fn a_service_naming_an_address_gets_a_port_of_its_own() {
 
 #[tokio::test]
 async fn a_host_router_is_mounted_onto_rather_than_bound() {
-    let port = free_port().await;
+    let port = free_port();
     let host_mux = Mux::from_router(Router::new().route("/host", get(|| async { "host" })));
 
     let runtime = Runtime::new(Config {
@@ -128,7 +128,7 @@ async fn a_host_router_is_mounted_onto_rather_than_bound() {
 
 #[tokio::test]
 async fn a_service_on_port_zero_is_placed_on_and_reports_the_port_it_got() {
-    let runtime = Runtime::new(config(free_port().await))
+    let runtime = Runtime::new(config(free_port()))
         .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools").at("127.0.0.1:0"));
 
     let cancel = CancellationToken::new();
@@ -170,9 +170,9 @@ async fn a_service_on_port_zero_is_placed_on_and_reports_the_port_it_got() {
 
 #[tokio::test]
 async fn a_service_on_a_fixed_port_is_reported_exactly_as_configured() {
-    let port = free_port().await;
+    let port = free_port();
     let addr = format!("127.0.0.1:{port}");
-    let runtime = Runtime::new(config(free_port().await))
+    let runtime = Runtime::new(config(free_port()))
         .register(Fake::mounting(Protocol::Mcp, "/mcp", "tools").at(&addr));
 
     let cancel = CancellationToken::new();

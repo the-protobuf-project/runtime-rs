@@ -1,12 +1,15 @@
 //! Stream interceptors guard streaming calls on the TCP listener and the loopback alike, in
 //! registration order, and see how each stream ended.
 
-use std::net::TcpListener;
+#[path = "common/port.rs"]
+mod port;
+
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use grpc::options::{Endpoint, Options};
 use grpc::{HybridServer, Loopback, RestGateway, StreamCall, StreamInterceptor, StreamNext};
+use port::free_port;
 use tokio_stream::StreamExt as _;
 use tonic::Status;
 use tonic_health::pb::HealthCheckRequest;
@@ -14,13 +17,6 @@ use tonic_health::pb::health_client::HealthClient;
 use tonic_reflection::pb::v1::server_reflection_client::ServerReflectionClient;
 use tonic_reflection::pb::v1::server_reflection_request::MessageRequest;
 use tonic_reflection::pb::v1::{FILE_DESCRIPTOR_SET as REFLECTION_SET, ServerReflectionRequest};
-
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .and_then(|listener| listener.local_addr())
-        .map(|addr| addr.port())
-        .expect("a free port")
-}
 
 type Log = Arc<Mutex<Vec<String>>>;
 
