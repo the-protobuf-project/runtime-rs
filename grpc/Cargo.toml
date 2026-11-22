@@ -57,7 +57,7 @@ prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["serde"] }
 prost-types = "0.14"
 futures-util = { workspace = true, optional = true }
-axum = { workspace = true, optional = true }
+axum = { workspace = true, optional = true, features = ["http2"] }
 tower = { workspace = true, optional = true }
 tower-http = { workspace = true, optional = true }
 hyper = { workspace = true, optional = true }

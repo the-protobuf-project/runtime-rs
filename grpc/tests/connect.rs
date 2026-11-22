@@ -201,3 +201,24 @@ async fn connect_is_off_by_default_and_health_stays_beside_it() {
     assert_eq!(health.status(), 200);
     server.stop().await.unwrap();
 }
+
+/// The HTTP port speaks cleartext HTTP/2 (h2c) as well as HTTP/1.1, so a Connect client
+/// gets multiplexing and full-duplex streams without TLS.
+#[tokio::test]
+async fn the_http_port_serves_cleartext_http2() {
+    let (server, base) = shop(true).await;
+    let client = reqwest::Client::builder()
+        .http2_prior_knowledge()
+        .build()
+        .unwrap();
+    let response = client
+        .post(format!("{base}{GET_SHELF}"))
+        .header("content-type", "application/json")
+        .body(r#"{"name":"shelves/1"}"#)
+        .send()
+        .await
+        .expect("h2c request");
+    assert_eq!(response.version(), reqwest::Version::HTTP_2);
+    assert_eq!(response.status(), 200);
+    server.stop().await.unwrap();
+}
