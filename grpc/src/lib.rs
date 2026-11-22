@@ -12,6 +12,8 @@ mod builder;
 #[cfg(feature = "server")]
 pub mod codes;
 #[cfg(feature = "server")]
+mod connect;
+#[cfg(feature = "server")]
 pub mod cors;
 #[cfg(feature = "server")]
 pub mod environment;

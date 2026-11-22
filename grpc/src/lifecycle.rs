@@ -235,11 +235,34 @@ impl HybridServer {
         self.start().await
     }
 
-    /// The router HTTP/1.1 and HTTP/3 both serve.
-    ///
+    /// The router HTTP/1.1 and HTTP/3 both serve: the REST routes, with Connect calls sent
+    /// to the bridge under [`HybridServer::with_connect`].
+    fn http_router(&self) -> Result<Router> {
+        let router = self.rest_router()?;
+        if !self.connect {
+            return Ok(router);
+        }
+        let loopback = self.running_loopback()?;
+        let mut descriptors = self.descriptor_sets.clone();
+        descriptors.push(tonic_health::pb::FILE_DESCRIPTOR_SET);
+        descriptors.push(tonic_reflection::pb::v1::FILE_DESCRIPTOR_SET);
+        let pool = crate::intercept::descriptor_pool(&descriptors);
+        Ok(crate::connect::ConnectBridge::new(loopback, pool).route(router))
+    }
+
+    /// The loopback of the running gRPC server.
+    fn running_loopback(&self) -> Result<crate::loopback::Loopback> {
+        self.state
+            .lock()
+            .expect("grpc: server state poisoned")
+            .loopback
+            .clone()
+            .ok_or_else(|| Error::Gateway("the gRPC server is not running".into()))
+    }
+
     /// `/health` always; then either the caller's own handler, or every REST gateway over
     /// the loopback plus every dialling gateway registration.
-    fn http_router(&self) -> Result<Router> {
+    fn rest_router(&self) -> Result<Router> {
         // The bound port, so a gateway dials where gRPC is rather than port 0.
         let grpc_port = self
             .grpc_addr()
@@ -261,13 +284,7 @@ impl HybridServer {
         }
 
         if !self.gateways.is_empty() {
-            let loopback = self
-                .state
-                .lock()
-                .expect("grpc: server state poisoned")
-                .loopback
-                .clone()
-                .ok_or_else(|| Error::Gateway("the gRPC server is not running".into()))?;
+            let loopback = self.running_loopback()?;
             let gateways = self
                 .gateways
                 .iter()

@@ -88,6 +88,26 @@ impl HybridServer {
         self
     }
 
+    /// Serves the Connect protocol's unary calls on the HTTP surface, beside the REST routes:
+    /// `POST /<package.Service>/<Method>` with an `application/proto` or `application/json`
+    /// body.
+    ///
+    /// Each call runs through the server's own services over the [`Loopback`], with the
+    /// same interceptor chain as a gRPC client. A binary call needs no descriptors and
+    /// reaches every unary method, with or without a `google.api.http` binding; a JSON call
+    /// is converted against the descriptor sets registered with
+    /// [`HybridServer::with_reflection`]. Connect paths never clash with REST ones: a
+    /// Connect path's first segment is a service's full name, so it contains a dot. HTTP/1.1
+    /// and HTTP/3 serve it alike. Unary calls first; streaming follows.
+    ///
+    /// Go's `WithConnect`, answering the same codes, statuses and error bodies.
+    #[must_use]
+    pub fn with_connect(mut self) -> Self {
+        tracing::debug!("with_connect: serving Connect unary calls on the HTTP surface");
+        self.connect = true;
+        self
+    }
+
     /// Serves `router` in place of the gateway routes, with the health endpoint beside it.
     ///
     /// Go's `WithHTTPHandler`: the seam for a caller composing its own HTTP surface. The

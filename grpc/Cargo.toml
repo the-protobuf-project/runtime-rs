@@ -22,7 +22,7 @@ default = ["server", "tls", "http3", "a2a"]
 # The hybrid gRPC/REST/MCP server: everything in this crate but servicex. A generated
 # service in the handler model depends on this crate with default-features = false for
 # servicex alone, and compiles none of the server stack.
-server = ["dep:agents", "dep:tokio", "dep:tokio-util", "dep:tokio-stream", "dep:tonic-health", "dep:tonic-reflection", "dep:tonic-web", "dep:transcode", "dep:futures-util", "dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:hyper-util", "dep:http", "dep:bytes", "dep:http-body", "dep:http-body-util", "dep:serde", "dep:thiserror", "dep:tracing", "dep:owo-colors", "dep:unicode-width", "dep:async-trait", "dep:telemetry", "dep:protovalidate", "dep:sha2"]
+server = ["dep:agents", "dep:tokio", "dep:tokio-util", "dep:tokio-stream", "dep:tonic-health", "dep:tonic-reflection", "dep:tonic-web", "dep:transcode", "dep:futures-util", "dep:axum", "dep:tower", "dep:tower-http", "dep:hyper", "dep:hyper-util", "dep:http", "dep:bytes", "dep:http-body", "dep:http-body-util", "dep:serde", "dep:thiserror", "dep:tracing", "dep:owo-colors", "dep:unicode-width", "dep:async-trait", "dep:telemetry", "dep:protovalidate", "dep:sha2", "dep:base64"]
 # servicex's standard-method handlers over runtime-rs repositories (store=true).
 servicex-store = ["dep:database"]
 # TLS for gRPC, the REST gateway and HTTP/3, on rustls with ring. A feature because ring
@@ -82,6 +82,7 @@ telemetry = { workspace = true, optional = true }
 tonic-types = { workspace = true }
 protovalidate = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+base64 = { version = "0.23", optional = true }
 
 h3 = { workspace = true, optional = true }
 h3-quinn = { workspace = true, optional = true }
