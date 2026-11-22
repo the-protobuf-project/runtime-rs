@@ -41,7 +41,25 @@ pub(super) fn connect_error(
     details: &[u8],
     metadata: Option<&HeaderMap>,
 ) -> axum::response::Response {
-    let (name, status) = connect_code(code);
+    let (_, status) = connect_code(code);
+    let body = error_json(code, message, details);
+    let mut response = axum::response::Response::new(axum::body::Body::from(body.to_string()));
+    *response.status_mut() = status;
+    if let Some(metadata) = metadata {
+        response.headers_mut().extend(metadata.clone());
+    }
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+/// Connect's error object: the code's name, the message, and each `google.rpc.Status`
+/// detail from `details` (the encoded status of `grpc-status-details-bin`) as its type name,
+/// without the `type.googleapis.com/` prefix, and its bytes in base64.
+pub(super) fn error_json(code: Code, message: &str, details: &[u8]) -> serde_json::Value {
+    let (name, _) = connect_code(code);
     let details: Vec<serde_json::Value> = tonic_types::Status::decode(details)
         .map(|s| s.details)
         .unwrap_or_default()
@@ -60,16 +78,7 @@ pub(super) fn connect_error(
     if !details.is_empty() {
         body["details"] = details.into();
     }
-    let mut response = axum::response::Response::new(axum::body::Body::from(body.to_string()));
-    *response.status_mut() = status;
-    if let Some(metadata) = metadata {
-        response.headers_mut().extend(metadata.clone());
-    }
-    response.headers_mut().insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json"),
-    );
-    response
+    body
 }
 
 /// `415` for a body that is neither `application/proto` nor `application/json`.
@@ -83,7 +92,9 @@ pub(super) fn unsupported_media_type() -> axum::response::Response {
     *response.status_mut() = StatusCode::UNSUPPORTED_MEDIA_TYPE;
     response.headers_mut().insert(
         "accept-post",
-        HeaderValue::from_static("application/proto, application/json"),
+        HeaderValue::from_static(
+            "application/proto, application/json, application/connect+proto, application/connect+json",
+        ),
     );
     response
 }

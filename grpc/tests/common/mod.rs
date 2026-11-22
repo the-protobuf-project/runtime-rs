@@ -145,7 +145,67 @@ impl ShopService for Shop {
     ) -> Result<Response<Shelf>, Status> {
         Err(Status::unimplemented("not in this test"))
     }
+
+    type WatchShelfStream = ShelfStream;
+
+    async fn watch_shelf(
+        &self,
+        request: Request<GetShelfRequest>,
+    ) -> Result<Response<ShelfStream>, Status> {
+        let name = request.into_inner().name;
+        let shelf = |v: u8| Shelf {
+            name: name.clone(),
+            theme: format!("v{v}"),
+        };
+        let versions = if name == "shelves/fail" {
+            vec![
+                Ok(shelf(1)),
+                Err(Status::failed_precondition("the shelf went away")),
+            ]
+        } else {
+            vec![Ok(shelf(1)), Ok(shelf(2)), Ok(shelf(3))]
+        };
+        let mut response = Response::new(Box::pin(tokio_stream::iter(versions)) as ShelfStream);
+        response
+            .metadata_mut()
+            .insert("x-watch", "on".parse().unwrap());
+        Ok(response)
+    }
+
+    async fn import_books(
+        &self,
+        request: Request<tonic::Streaming<CreateBookRequest>>,
+    ) -> Result<Response<ImportBooksResponse>, Status> {
+        use tokio_stream::StreamExt;
+        let mut books = request.into_inner();
+        let mut imported = 0;
+        while let Some(book) = books.next().await {
+            book?;
+            imported += 1;
+        }
+        Ok(Response::new(ImportBooksResponse { imported }))
+    }
+
+    type ChatStream = ShelfStream;
+
+    async fn chat(
+        &self,
+        request: Request<tonic::Streaming<GetShelfRequest>>,
+    ) -> Result<Response<ShelfStream>, Status> {
+        use tokio_stream::StreamExt;
+        let replies = request.into_inner().map(|asked| {
+            asked.map(|asked| Shelf {
+                name: asked.name,
+                theme: "chat".into(),
+            })
+        });
+        Ok(Response::new(Box::pin(replies) as ShelfStream))
+    }
 }
+
+/// The shop's streamed replies.
+pub type ShelfStream =
+    std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Shelf, Status>> + Send + 'static>>;
 
 /// Starts a server for `shop` with the shop's descriptors registered, configured further by
 /// `configure`, and a client dialled to it.
