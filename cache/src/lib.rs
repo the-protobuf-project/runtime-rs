@@ -153,6 +153,7 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "cdn")]
 pub mod cdn;
 pub mod core;
 mod dial_timeout;

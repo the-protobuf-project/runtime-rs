@@ -44,6 +44,10 @@ use cloudflare::{
     framework::{client::async_api::Client, response::ApiFailure},
 };
 
+/// The Cloudflare SDK this backend is built on, so a caller builds the client it hands
+/// [`WorkersKvClient::connect`] with the same version, without depending on it.
+pub use cloudflare;
+
 use crate::{
     CacheError, Config, Result,
     core::{
