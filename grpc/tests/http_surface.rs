@@ -13,32 +13,19 @@ fn generated_routes() -> Router {
         .route("/v1/artists/{id}", get(|| async { "artist" }))
 }
 
-async fn free_port() -> u16 {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind");
-    let port = listener.local_addr().expect("addr").port();
-    drop(listener);
-    port
-}
-
 #[tokio::test]
 async fn a_generated_router_keeps_the_paths_the_api_declares() {
-    let port = free_port().await;
     let surface = Surface::new().mount(generated_routes());
     let cancel = CancellationToken::new();
 
-    let task = h1::serve(
-        surface.router(),
-        &format!("127.0.0.1:{port}"),
-        None,
-        cancel.clone(),
-    )
-    .await
-    .expect("serve");
+    // Port 0, and the port bound read back: a port probed and released first can be taken
+    // by another test before the server binds it.
+    let (task, bound) = h1::serve_bound(surface.router(), "127.0.0.1:0", None, cancel.clone())
+        .await
+        .expect("serve");
 
     let client = reqwest::Client::new();
-    let base = format!("http://127.0.0.1:{port}");
+    let base = format!("http://{bound}");
 
     // The generated routes are reachable at their declared paths, unprefixed.
     let listed = client
@@ -65,19 +52,14 @@ async fn a_generated_router_keeps_the_paths_the_api_declares() {
 
 #[tokio::test]
 async fn an_unmounted_path_is_a_404_rather_than_a_hang() {
-    let port = free_port().await;
     let cancel = CancellationToken::new();
-    let task = h1::serve(
-        Surface::new().router(),
-        &format!("127.0.0.1:{port}"),
-        None,
-        cancel.clone(),
-    )
-    .await
-    .expect("serve");
+    let (task, bound) =
+        h1::serve_bound(Surface::new().router(), "127.0.0.1:0", None, cancel.clone())
+            .await
+            .expect("serve");
 
     let response = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{port}/v1/nothing"))
+        .get(format!("http://{bound}/v1/nothing"))
         .send()
         .await
         .expect("request");
@@ -109,21 +91,16 @@ async fn an_address_already_in_use_fails_at_bind() {
 
 #[tokio::test]
 async fn cancelling_releases_the_port() {
-    let port = free_port().await;
     let cancel = CancellationToken::new();
-    let task = h1::serve(
-        Surface::new().router(),
-        &format!("127.0.0.1:{port}"),
-        None,
-        cancel.clone(),
-    )
-    .await
-    .expect("serve");
+    let (task, bound) =
+        h1::serve_bound(Surface::new().router(), "127.0.0.1:0", None, cancel.clone())
+            .await
+            .expect("serve");
 
     cancel.cancel();
     let _ = task.await;
 
-    tokio::net::TcpListener::bind(("127.0.0.1", port))
+    tokio::net::TcpListener::bind(bound)
         .await
         .expect("port released");
 }
