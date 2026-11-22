@@ -54,7 +54,7 @@ seconds is lengthened to sixty, the shortest KV keeps anything. It is reached th
 Cloudflare's official `cloudflare` crate.
 
 For what Cloudflare's CDN has cached, rather than what this crate stores,
-`cdn::Purger` purges a zone by URL, cache tag, host or prefix.
+`cdn::Purger` (feature `cdn`) purges a zone by URL, cache tag, host or prefix.
 
 ## Installing
 
