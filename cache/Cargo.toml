@@ -20,6 +20,9 @@ name = "cache"
 [features]
 default = []
 live-tests = []
+# `cdn`: purging Cloudflare's CDN cache, over tpp-network. A feature because tpp-network's
+# reqwest brings aws-lc, which a cache that does not purge should not have to build.
+cdn = ["dep:network"]
 
 [dependencies]
 telemetry.workspace = true
@@ -36,7 +39,7 @@ redis.workspace = true
 memcache = { version = "0.21", default-features = false, features = ["tokio"] }
 crc32fast = "1.5"
 cloudflare.workspace = true
-network.workspace = true
+network = { workspace = true, optional = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
