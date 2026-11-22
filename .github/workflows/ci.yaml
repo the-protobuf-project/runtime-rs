@@ -141,6 +141,10 @@ jobs:
       - name: Test (SQLite in-process, with the ordinary suite)
         run: cargo test -p tpp-database --features orm
 
+      # D1 is SQLite over HTTP; its test serves a stand-in API over in-process SQLite.
+      - name: Test (D1 against an in-process stand-in)
+        run: cargo test -p tpp-database --features d1,orm-sqlite --test d1
+
       - name: Test (live Postgres and MySQL)
         run: cargo test -p tpp-database --features orm,live-tests --test orm_live
 
@@ -171,7 +175,7 @@ jobs:
       # Feature-gated code the workspace run does not compile: the SQL, MongoDB and
       # cached backends of database are off by default.
       - name: Clippy (tpp-database, all features)
-        run: cargo clippy -p tpp-database --all-targets --features orm,mongodb,redis,cached,live-tests -- -D warnings
+        run: cargo clippy -p tpp-database --all-targets --features orm,mongodb,redis,cached,d1,live-tests -- -D warnings
 
       # servicex alone, as a generated service depends on it: no server stack,
       # and with the standard methods over repositories.
@@ -215,7 +219,7 @@ jobs:
       - name: Build docs (tpp-database, all features)
         env:
           RUSTDOCFLAGS: "-D warnings"
-        run: cargo doc -p tpp-database --no-deps --features orm,mongodb,redis,cached,live-tests
+        run: cargo doc -p tpp-database --no-deps --features orm,mongodb,redis,cached,d1,live-tests
 
       - uses: extractions/setup-just@v4
 

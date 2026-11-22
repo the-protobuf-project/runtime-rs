@@ -13,12 +13,17 @@ const DEFAULT_RETRY_DELAY: Duration = Duration::from_secs(2);
 /// The result of an HTTP request: the raw body bytes and an error (from a transport failure or a
 /// non-2xx status).
 ///
+/// On a non-2xx status `data` holds the body the server sent with it, which is where an API puts
+/// the reason a request was refused. runtime-go's `sendRequest` returns that body alongside its
+/// error for the same inspection.
+///
 /// Go returns this over a channel, because a channel carries one value and the body and the error
 /// have to travel together. Here it is what [`crate::HttpClient::request`] resolves to; most callers want
 /// [`crate::HttpClient::request_sync`], which unpacks it into a `Result`.
 #[derive(Debug, Default)]
 pub struct HttpResponse {
-    /// The response body. Empty when `error` is set.
+    /// The response body. When `error` is set it is the body of a non-2xx response, and empty for
+    /// any other failure.
     pub data: Vec<u8>,
     /// The failure, if the request did not succeed.
     pub error: Option<Error>,
@@ -66,8 +71,8 @@ impl super::HttpClient {
             .await
         {
             Ok(data) => HttpResponse { data, error: None },
-            Err(error) => HttpResponse {
-                data: Vec::new(),
+            Err(Failed { error, body }) => HttpResponse {
+                data: body,
                 error: Some(error),
             },
         }
@@ -111,20 +116,20 @@ impl super::HttpClient {
         path_index: i64,
         max_retries: usize,
         cancel: Option<&CancellationToken>,
-    ) -> Result<Vec<u8>> {
+    ) -> std::result::Result<Vec<u8>, Failed> {
         let retry_delay = if self.options.retry_delay.is_zero() {
             DEFAULT_RETRY_DELAY
         } else {
             self.options.retry_delay
         };
 
-        let mut last_err: Option<Error> = None;
+        let mut last_err: Option<Failed> = None;
         for attempt in 0..=max_retries {
             if attempt > 0 {
                 if let Some(cancel) = cancel {
                     tokio::select! {
                         _ = tokio::time::sleep(retry_delay) => {}
-                        _ = cancel.cancelled() => return Err(Error::Cancelled),
+                        _ = cancel.cancelled() => return Err(Error::Cancelled.into()),
                     }
                 } else {
                     tokio::time::sleep(retry_delay).await;
@@ -132,20 +137,20 @@ impl super::HttpClient {
             }
 
             let full_url = build_full_url(url_options, path_index)
-                .map_err(|e| Error::BuildUrl(Box::new(e)))?;
+                .map_err(|e| Failed::from(Error::BuildUrl(Box::new(e))))?;
             let attempt_fut = self.send_once(method, &full_url, body.clone(), headers);
             let attempt_result = match cancel {
                 Some(cancel) => {
                     tokio::select! {
                         res = tokio::time::timeout(self.options.timeout, attempt_fut) => {
-                            res.map_err(|_| Error::Timeout)
+                            res.map_err(|_| Failed::from(Error::Timeout))
                         }
-                        _ = cancel.cancelled() => return Err(Error::Cancelled),
+                        _ = cancel.cancelled() => return Err(Error::Cancelled.into()),
                     }
                 }
                 None => tokio::time::timeout(self.options.timeout, attempt_fut)
                     .await
-                    .map_err(|_| Error::Timeout),
+                    .map_err(|_| Failed::from(Error::Timeout)),
             };
 
             match attempt_result.and_then(|inner| inner) {
@@ -154,11 +159,13 @@ impl super::HttpClient {
             }
         }
 
-        Err(Error::RetryExhausted {
-            retries: max_retries,
-            source: Box::new(
-                last_err.expect("at least one attempt runs when max_retries loop executes"),
-            ),
+        let last = last_err.expect("at least one attempt runs when max_retries loop executes");
+        Err(Failed {
+            error: Error::RetryExhausted {
+                retries: max_retries,
+                source: Box::new(last.error),
+            },
+            body: last.body,
         })
     }
 
@@ -168,7 +175,7 @@ impl super::HttpClient {
         full_url: &str,
         body: Vec<u8>,
         headers: &HashMap<String, String>,
-    ) -> Result<Vec<u8>> {
+    ) -> std::result::Result<Vec<u8>, Failed> {
         let client = self.client.as_ref().ok_or(Error::HttpNotConnected)?;
         let method: reqwest::Method = method.into();
         let traced = crate::transport::Traced::start(
@@ -190,14 +197,34 @@ impl super::HttpClient {
             Ok(resp) => resp,
             Err(err) => {
                 traced.failed(err.is_timeout());
-                return Err(Error::SendRequest(err));
+                return Err(Error::SendRequest(err).into());
             }
         };
         let status = resp.status();
         traced.answered(status.as_u16());
         let data = resp.bytes().await.map_err(Error::ReadBody)?.to_vec();
-        validate_status_code(status.as_u16())?;
-        Ok(data)
+        match validate_status_code(status.as_u16()) {
+            Ok(()) => Ok(data),
+            Err(error) => Err(Failed { error, body: data }),
+        }
+    }
+}
+
+/// A failed attempt, with the body of a non-2xx response kept beside its error so
+/// [`crate::HttpClient::request`] can hand it back in [`HttpResponse::data`].
+struct Failed {
+    /// Why the request failed.
+    error: Error,
+    /// The response body for a status failure; empty otherwise.
+    body: Vec<u8>,
+}
+
+impl From<Error> for Failed {
+    fn from(error: Error) -> Self {
+        Self {
+            error,
+            body: Vec::new(),
+        }
     }
 }
 

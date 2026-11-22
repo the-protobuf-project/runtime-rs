@@ -1,4 +1,5 @@
-//! Backend-independent cache strategies over Redis, Dragonfly, and Memcached.
+//! Backend-independent cache strategies over Redis, Dragonfly, Memcached, and Cloudflare
+//! Workers KV.
 //!
 //! The crate separates cache policy from storage protocols. Applications first
 //! connect a caller-owned backend client, bind cache-wide [`Config`] policy to
@@ -152,6 +153,7 @@
 
 #![warn(missing_docs)]
 
+pub mod cdn;
 pub mod core;
 mod dial_timeout;
 pub mod drivers;

@@ -1865,6 +1865,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "cloudflare"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1678b3295890df5895480a7c080430e73df2b7101f1763f62a3b32dd532f1d37"
+dependencies = [
+ "chrono",
+ "http 1.5.0",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "serde_with",
+ "thiserror 2.0.21",
+ "url",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4930,6 +4949,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
+name = "mime_guess"
+version = "2.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f7c44f8e672c00fe5308fa235f821cb4198414e1c77935c1ab6948d3fd78550e"
+dependencies = [
+ "mime",
+ "unicase",
+]
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7042,6 +7071,7 @@ dependencies = [
  "hyper-util",
  "js-sys",
  "log",
+ "mime_guess",
  "percent-encoding",
  "pin-project-lite",
  "quinn",
@@ -9603,6 +9633,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cloudflare",
  "crc32fast",
  "futures",
  "memcache",
@@ -9612,9 +9643,11 @@ dependencies = [
  "thiserror 2.0.21",
  "tokio",
  "tokio-test",
+ "tpp-network",
  "tpp-telemetry",
  "tracing",
  "uuid",
+ "wiremock",
 ]
 
 [[package]]
@@ -9636,6 +9669,7 @@ dependencies = [
  "arrow-ipc 60.1.0",
  "arrow-schema 60.1.0",
  "async-trait",
+ "axum 0.8.9",
  "base64 0.23.1",
  "bson",
  "chrono",
@@ -9662,6 +9696,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tpp-cache",
+ "tpp-network",
  "tpp-telemetry",
  "tracing",
  "ulid",
@@ -10092,6 +10127,12 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
+
+[[package]]
+name = "urlencoding"
+version = "2.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "daf8dba3b7eb870caf1ddeed7bc9d2a049f3cfdfae7cb521b087cc33ae4c49da"
 
 [[package]]
 name = "urlpattern"

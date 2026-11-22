@@ -86,6 +86,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # One redis-rs for the cache and the database, so a connection manager built for one is the
 # type the other accepts: Go hands one client to the cache, database and streams layers.
 redis = { version = "1.8", features = ["tokio-comp", "connection-manager"] }
+# Cloudflare's official Rust SDK, for Workers KV. Default features off: they select
+# native-tls, and everything here runs on rustls.
+cloudflare = { version = "0.14", default-features = false, features = ["rustls-tls"] }
 
 # gRPC and the transports the hybrid server speaks. tonic is the repo the gRPC
 # organisation points at for Rust: github.com/grpc/grpc-rust redirects here.
