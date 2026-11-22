@@ -1,4 +1,5 @@
-//! The three calls the driver makes: run statements, read a database, and find one by name.
+//! The client's SQL, with no proto in it: run statements, read a database, and find one by
+//! name. The records driver is built on these three calls.
 
 use std::collections::HashMap;
 
@@ -13,7 +14,7 @@ use crate::{Error, Result};
 impl D1Client {
     /// Runs statements against database `id`, one request for all of them; D1 applies a
     /// batch as a single unit.
-    pub(crate) async fn query(&self, id: &str, stmts: &[Statement]) -> Result<Vec<Outcome>> {
+    pub async fn query(&self, id: &str, stmts: &[Statement]) -> Result<Vec<Outcome>> {
         let body = match stmts {
             [one] => one.body(),
             many => json!({ "batch": many.iter().map(Statement::body).collect::<Vec<_>>() }),
@@ -50,7 +51,7 @@ impl D1Client {
     }
 
     /// Reads database `id`, proving it is there and the token reaches it.
-    pub(crate) async fn reach(&self, id: &str) -> Result<()> {
+    pub async fn ping(&self, id: &str) -> Result<()> {
         let url = self.at(&format!("/{id}"), HashMap::new());
         self.call::<Json>(HttpMethod::Get, url, Vec::new())
             .await
@@ -63,7 +64,7 @@ impl D1Client {
 
     /// The id of the database named `name`. The list endpoint filters by name loosely, so
     /// the result is checked for an exact match: `tenant_a` must not select `tenant_ab`.
-    pub(crate) async fn lookup(&self, name: &str) -> Result<String> {
+    pub async fn lookup(&self, name: &str) -> Result<String> {
         let mut page = 1;
         loop {
             let params = HashMap::from([

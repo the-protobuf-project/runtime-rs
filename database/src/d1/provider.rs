@@ -38,7 +38,7 @@ impl Provider for D1Provider {
                             .to_owned(),
                     ));
                 }
-                self.client.reach(&id).await?;
+                self.client.ping(&id).await?;
                 id
             }
             name => self.client.lookup(name).await?,

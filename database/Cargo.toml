@@ -132,6 +132,11 @@ path = "tests/d1.rs"
 required-features = ["d1", "orm-sqlite"]
 
 [[test]]
+name = "d1_client"
+path = "tests/d1_client.rs"
+required-features = ["d1", "orm-sqlite"]
+
+[[test]]
 name = "records_observe"
 path = "tests/records_observe.rs"
 required-features = ["orm-sqlite"]
