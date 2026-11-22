@@ -7,15 +7,20 @@ use serde_json::{Map, Value as Json, json};
 use super::BACKEND;
 use crate::Error;
 
-/// One statement and the text bound into it.
+/// One SQL statement and the values bound into it. The query endpoint binds every
+/// parameter as text; SQLite's column affinity turns a numeric string back into a number
+/// for an `INTEGER` or `REAL` column.
 #[derive(Clone, Debug)]
-pub(crate) struct Statement {
-    pub(crate) sql: String,
-    pub(crate) args: Vec<String>,
+pub struct Statement {
+    /// The SQL, with `?` for each bound value.
+    pub sql: String,
+    /// The values, in order, as text.
+    pub args: Vec<String>,
 }
 
 impl Statement {
-    pub(crate) fn new(sql: impl Into<String>, args: Vec<String>) -> Self {
+    /// A statement binding `args`.
+    pub fn new(sql: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             sql: sql.into(),
             args,
@@ -30,11 +35,13 @@ impl Statement {
     }
 }
 
-/// What one statement produced: its rows as JSON objects, and how many it changed.
+/// What one statement produced.
 #[derive(Debug, Default)]
-pub(crate) struct Outcome {
-    pub(crate) rows: Vec<Map<String, Json>>,
-    pub(crate) changes: i64,
+pub struct Outcome {
+    /// The rows a `SELECT` returned, column name to JSON value.
+    pub rows: Vec<Map<String, Json>>,
+    /// How many rows an `INSERT`, `UPDATE` or `DELETE` changed.
+    pub changes: i64,
 }
 
 #[derive(Deserialize)]

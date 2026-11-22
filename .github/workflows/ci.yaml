@@ -143,7 +143,7 @@ jobs:
 
       # D1 is SQLite over HTTP; its test serves a stand-in API over in-process SQLite.
       - name: Test (D1 against an in-process stand-in)
-        run: cargo test -p tpp-database --features d1,orm-sqlite --test d1
+        run: cargo test -p tpp-database --features d1,orm-sqlite --test d1 --test d1_client
 
       - name: Test (live Postgres and MySQL)
         run: cargo test -p tpp-database --features orm,live-tests --test orm_live
