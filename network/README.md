@@ -11,7 +11,7 @@ built around async clients and explicit lifecycle/error handling.
 cargo add tpp-network
 ```
 
-The library crate is imported as `network` regardless of the published package name — see
+The library crate is imported as `network` regardless of the published package name - see
 `[lib] name` in `Cargo.toml`.
 
 ## Quick start

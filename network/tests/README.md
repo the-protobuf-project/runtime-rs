@@ -1,6 +1,6 @@
 # Network client verification
 
-[Network guide](../README.md) · [Implementation](../src/README.md)
+[Network guide](../README.md) | [Implementation](../src/README.md)
 
 ```bash
 cargo test -p tpp-network

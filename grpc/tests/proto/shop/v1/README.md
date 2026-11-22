@@ -1,6 +1,6 @@
 # Version 1 shop test contract
 
-[Proto include root](../../README.md) · [Generated outputs](../../../fixtures/README.md)
+[Proto include root](../../README.md) | [Generated outputs](../../../fixtures/README.md)
 
 `shop.proto` is the application fixture for validation, reflected unary
 interceptors, rich errors, idempotency, and resource hints. It deliberately

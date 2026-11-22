@@ -1,6 +1,6 @@
 # MCP hosting and generated-handler support
 
-[Agent runtime](../../README.md) · [Source map](../README.md)
+[Agent runtime](../../README.md) | [Source map](../README.md)
 
 This module wraps `rmcp`. Generated or handwritten `ServerHandler` values own
 tools and dispatch; this layer adds runtime placement, transport lifecycle,

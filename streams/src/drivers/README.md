@@ -1,6 +1,6 @@
 # Stream drivers
 
-[Streams guide](../../README.md) · [Local services](../../docker/README.md)
+[Streams guide](../../README.md) | [Local services](../../docker/README.md)
 
 Each driver is a Cargo feature of its name and ports the matching package in
 runtime-go. The client crate for each is the most-starred maintained Rust
@@ -163,7 +163,7 @@ an expiry by name until updated through the provider. The server never turns
 is refused by the server. Core NATS refuses an expiry: it holds nothing.
 `retain` is refused on both: core NATS keeps nothing, and JetStream's
 last-per-subject form (`max_msgs_per_subject: 1`) would discard the log durable
-consumers read. `nak_after` is JetStream's `-NAK {"delay":…}`, held back by the
+consumers read. `nak_after` is JetStream's `-NAK {"delay":...}`, held back by the
 server (`can_delay_redelivery() == true`); core NATS has no deliveries.
 
 ## Redis headers, expiry, retain, delayed nak

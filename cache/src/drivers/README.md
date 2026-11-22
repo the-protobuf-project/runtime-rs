@@ -1,6 +1,6 @@
 # Redis, Dragonfly, and Memcached adapters
 
-[Cache guide](../../README.md) · [Local services](../../docker/README.md)
+[Cache guide](../../README.md) | [Local services](../../docker/README.md)
 
 A driver translates storage primitives and capabilities to backend commands.
 Key qualification, freshness envelopes, indexing, and loaders live in core and

@@ -1,6 +1,6 @@
 # Capability-preserving database observations
 
-[Database guide](../../README.md) · [Shared signals](../../../telemetry/README.md)
+[Database guide](../../README.md) | [Shared signals](../../../telemetry/README.md)
 
 Use the public `store::instrument` re-export to instrument an already selected
 DB, or pass telemetry into a backend provider before selecting one.

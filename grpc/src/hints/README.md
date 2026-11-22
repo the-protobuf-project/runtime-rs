@@ -1,6 +1,6 @@
 # Descriptor-derived error hints
 
-[Hybrid server](../../README.md) · [Implementation and usage](mod.rs)
+[Hybrid server](../../README.md) | [Implementation and usage](mod.rs)
 
 Hints enrich generic missing/duplicate/conflict failures after the handler
 returns. Descriptors supply `google.api.resource` identity and

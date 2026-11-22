@@ -1,6 +1,6 @@
 # Hybrid server implementation
 
-[Crate guide](../README.md) · [Tests](../tests/README.md)
+[Crate guide](../README.md) | [Tests](../tests/README.md)
 
 `HybridServer` stores registrations until startup, builds fresh route registries
 for each start, and owns the resulting listener tasks and drain tokens.

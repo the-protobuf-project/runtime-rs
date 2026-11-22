@@ -1,6 +1,6 @@
 # Agent runtime integration tests
 
-[Module guide](../README.md) · [Common fixtures](common/README.md) ·
+[Module guide](../README.md) | [Common fixtures](common/README.md) |
 [Generated MCP fixture](fixtures/README.md)
 
 These tests drive runtime lifecycles and real local protocol conversations.

@@ -188,7 +188,7 @@ Every new source/test file stays below 200 lines including documentation.
 
 ## Source and tests
 
-[Source walkthrough and asynchronous guard example](src/README.md) ·
+[Source walkthrough and asynchronous guard example](src/README.md) |
 [Exporter tests](tests/README.md).
 
 ```bash

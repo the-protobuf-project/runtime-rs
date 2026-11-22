@@ -1,6 +1,6 @@
 # Banner preview program
 
-[Hybrid server guide](../README.md) · [Banner source](../src/banner/README.md)
+[Hybrid server guide](../README.md) | [Banner source](../src/banner/README.md)
 
 `banner.rs` constructs sample server options and startup summaries, then prints
 banners for local inspection. It exercises rendering without starting any

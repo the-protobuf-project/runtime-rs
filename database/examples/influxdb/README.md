@@ -25,8 +25,8 @@ needs administrative permission. No database-creation CLI command is required.
 | Shared | [model.rs](model.rs) | Typed model and backend-neutral descriptor |
 | 1 | [provision.rs](provision.rs) | Create/select a database with one-hour retention |
 | 2 | [records.rs](records.rs) | Write, rewrite and read typed observations |
-| 3–4 | [queries.rs](queries.rs) | Filtering, ordering and time-bucket aggregation |
-| 5–6 | [ingest.rs](ingest.rs) | Background batching, flush/close, pages and streams |
+| 3-4 | [queries.rs](queries.rs) | Filtering, ordering and time-bucket aggregation |
+| 5-6 | [ingest.rs](ingest.rs) | Background batching, flush/close, pages and streams |
 | 7 | [retention.rs](retention.rs) | Verify expiry of old observations |
 | 8 | [cleanup.rs](cleanup.rs) | Drop the table; main then drops the database |
 

@@ -1,6 +1,6 @@
 # Root README generator
 
-[Tools](../README.md) · [Implementation](src/README.md)
+[Tools](../README.md) | [Implementation](src/README.md)
 
 This unpublished standalone Cargo package owns the repository-root README.
 Run it from within the repository; it walks upward to the Cargo workspace.

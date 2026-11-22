@@ -1,6 +1,6 @@
 # Append-only Arrow IPC captures
 
-[Database guide](../../README.md) · [Capture example](../../examples/capture/README.md)
+[Database guide](../../README.md) | [Capture example](../../examples/capture/README.md)
 
 An `ArrowProvider` maps database/table names to local directories and writes
 self-describing Arrow IPC stream segments. It provides time-series create,

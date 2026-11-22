@@ -1,6 +1,6 @@
 # Cache observability and live contracts
 
-[Cache guide](../README.md) · [Compose setup](../docker/README.md)
+[Cache guide](../README.md) | [Compose setup](../docker/README.md)
 
 The ordinary suite runs in-memory/unit assertions and shared telemetry checks:
 

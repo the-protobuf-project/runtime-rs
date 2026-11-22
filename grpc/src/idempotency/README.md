@@ -1,6 +1,6 @@
 # Request-ID claim and replay
 
-[Hybrid server](../../README.md) · [Interceptor implementation](mod.rs)
+[Hybrid server](../../README.md) | [Interceptor implementation](mod.rs)
 
 Register this message interceptor and your service's descriptors to deduplicate
 unary RPCs with a nonempty singular string `request_id`. Calls without a usable

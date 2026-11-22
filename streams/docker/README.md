@@ -1,6 +1,6 @@
 # Local brokers
 
-[Streams guide](../README.md) · [Tests](../tests/README.md)
+[Streams guide](../README.md) | [Tests](../tests/README.md)
 
 One compose file per broker, each on a host port that does not collide with a
 default install. Run from the workspace root:

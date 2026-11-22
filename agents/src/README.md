@@ -1,6 +1,6 @@
 # Agent runtime implementation
 
-[Module guide](../README.md) · [Tests](../tests/README.md)
+[Module guide](../README.md) | [Tests](../tests/README.md)
 
 `lib.rs` exports the runtime vocabulary and feature-gated protocols. Runtime
 code decides where and when a service runs; protocol modules decide what

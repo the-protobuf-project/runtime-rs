@@ -1,6 +1,6 @@
 # Shop code/descriptors and banner reference output
 
-[Hybrid tests](../README.md) · [Proto inputs](../proto/README.md)
+[Hybrid tests](../README.md) | [Proto inputs](../proto/README.md)
 
 `shop.v1.rs` and `shop.binpb` are paired generated outputs used by the common
 shop service. The Rust file supplies tonic messages/services; the descriptor

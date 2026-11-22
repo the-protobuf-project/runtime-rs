@@ -1,6 +1,6 @@
 # Database contract, backend, and lifecycle tests
 
-[Database guide](../README.md) · [Common fixtures](common/README.md) ·
+[Database guide](../README.md) | [Common fixtures](common/README.md) |
 [Support fixtures](support/README.md)
 
 The default suite uses local files, controlled HTTP peers, an in-process

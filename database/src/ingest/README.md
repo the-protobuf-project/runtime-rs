@@ -1,6 +1,6 @@
 # Bounded background ingestion
 
-[Database guide](../../README.md) · [Composition](../README.md)
+[Database guide](../../README.md) | [Composition](../README.md)
 
 `BatchWriter` queues records for one Resource, amortizing backend requests
 while bounding memory and concurrent writes. Queue admission is not durable

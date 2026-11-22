@@ -1,6 +1,6 @@
 # Throughput benchmark results
 
-[How to run](RUNNING.md) · [Per-backend notes](results/) · [Streams guide](../README.md)
+[How to run](RUNNING.md) | [Per-backend notes](results/) | [Streams guide](../README.md)
 
 ## Run
 
@@ -16,7 +16,7 @@
 | Subjects | 10 |
 | Paced run | 5 s of messages at the target rate, at least 100,000 |
 | Unpaced run | 500,000 messages (20,000 with sync every message) |
-| Target held | nothing lost or undecodable, delivered ≥ 95% of the target |
+| Target held | nothing lost or undecodable, delivered >= 95% of the target |
 | Host | Apple Silicon Mac, Docker Desktop VM, broker and client on one machine |
 
 ## Method
@@ -234,7 +234,7 @@ xychart-beta horizontal
 
 Same machine, same broker, both through Docker Desktop's port forward.
 
-| Broker | Official tool | Tool msg/s | Our scenario | Our msg/s | Ours ÷ tool |
+| Broker | Official tool | Tool msg/s | Our scenario | Our msg/s | Ours / tool |
 | --- | --- | ---: | --- | ---: | ---: |
 | NATS core | `nats bench` pub + sub, 1 client each | 509,981 | fanout, unpaced | 450,360 | 88% |
 | NATS JetStream | `nats bench js pub async`, message ids | 195,332 | batch, unpaced | 124,506 | 64% |
@@ -254,7 +254,7 @@ Same machine, same broker, both through Docker Desktop's port forward.
 | Mosquitto | 40,000 msg/s | point-to-point, c5.4xlarge | [EMQX](https://www.emqx.com/en/blog/open-mqtt-benchmarking-comparison-mqtt-brokers-in-2023) | 96,232 msg/s (fanout) |
 | Mosquitto | 80,000 msg/s | fan-out, c5.4xlarge | [EMQX](https://www.emqx.com/en/blog/open-mqtt-benchmarking-comparison-mqtt-brokers-in-2023) | 96,232 msg/s (fanout) |
 | NATS core | 7,670,000 msg/s | 16-byte messages, 1 publisher, no subscriber | [NATS docs](https://docs.nats.io/using-nats/nats-tools/nats_cli/natsbench) | 1,323,559 msg/s (batch) |
-| NATS JetStream | ≈250,000 msg/s | R3 file storage, async publish | [community guidance](https://stackoverflow.com/questions/70550060/performance-of-nats-jetstream) | 124,506 msg/s (batch) |
+| NATS JetStream | ~250,000 msg/s | R3 file storage, async publish | [community guidance](https://stackoverflow.com/questions/70550060/performance-of-nats-jetstream) | 124,506 msg/s (batch) |
 
 ## Before and after each change
 

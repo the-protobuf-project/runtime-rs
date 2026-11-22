@@ -107,7 +107,7 @@ fn run(check: bool) -> Result<ExitCode, String> {
 
     let readme_path = root.join("README.md");
     let current = fs::read_to_string(&readme_path).unwrap_or_default();
-    let rendered = render(&workspace);
+    let rendered = plain(&render(&workspace))?;
 
     if check {
         let mut ok = true;
@@ -369,7 +369,7 @@ fn render(ws: &Workspace) -> String {
             c.rel,
             c.go_source
                 .as_ref()
-                .map_or_else(|| "—".to_string(), |s| format!("`{s}`")),
+                .map_or_else(|| "none".to_string(), |s| format!("`{s}`")),
         ));
     }
     b.push_str("\nEach crate's guide walks through it with examples, and its rustdoc says how it works.\n\n");
@@ -416,7 +416,7 @@ fn render(ws: &Workspace) -> String {
     for c in &ws.crates {
         let docs = if c.publishable {
             format!(
-                "[Guide]({0}/README.md) · [Source]({0}/src/README.md) · [Tests]({0}/tests/README.md) · [API](https://docs.rs/{1})",
+                "[Guide]({0}/README.md) | [Source]({0}/src/README.md) | [Tests]({0}/tests/README.md) | [API](https://docs.rs/{1})",
                 c.rel, c.package
             )
         } else {
@@ -460,9 +460,64 @@ fn render(ws: &Workspace) -> String {
 
     if let Some(license) = &ws.license {
         b.push_str(&format!(
-            "\n## License\n\n{license} — see [LICENSE](LICENSE).\n"
+            "\n## License\n\n{license} - see [LICENSE](LICENSE).\n"
         ));
     }
 
     b
+}
+
+/// What each non-ASCII character Cargo metadata or crate docs may carry becomes
+/// in the README, which is plain ASCII: no emoji, no symbols, and "yes" or "no"
+/// where a mark would have said it.
+const ASCII_FOR: &[(char, &str)] = &[
+    ('\u{2014}', "-"),
+    ('\u{2013}', "-"),
+    ('\u{00b7}', "|"),
+    ('\u{2026}', "..."),
+    ('\u{2018}', "'"),
+    ('\u{2019}', "'"),
+    ('\u{201c}', "\""),
+    ('\u{201d}', "\""),
+    ('\u{2192}', "->"),
+    ('\u{2265}', ">="),
+    ('\u{2264}', "<="),
+    ('\u{2248}', "~"),
+    ('\u{00f7}', "/"),
+    ('\u{00d7}', "x"),
+    ('\u{2212}', "-"),
+    ('\u{00b1}', "+/-"),
+    ('\u{00a9}', "(c)"),
+    ('\u{2705}', "yes"),
+    ('\u{2713}', "yes"),
+    ('\u{2714}', "yes"),
+    ('\u{2717}', "no"),
+    ('\u{2718}', "no"),
+    ('\u{274c}', "no"),
+    ('\u{2500}', "-"),
+    ('\u{2502}', "|"),
+    ('\u{251c}', "|"),
+    ('\u{2514}', "`"),
+    ('\u{250c}', "+"),
+    ('\u{2510}', "+"),
+    ('\u{2518}', "+"),
+];
+
+/// Rewrites the README in ASCII, and refuses a character it has no word for
+/// rather than letting it through or dropping it unseen.
+fn plain(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else if let Some((_, rep)) = ASCII_FOR.iter().find(|(k, _)| *k == c) {
+            out.push_str(rep);
+        } else {
+            return Err(format!(
+                "README text has {c:?} (U+{:04X}), which has no ASCII form here; reword the source or add it to ASCII_FOR",
+                c as u32
+            ));
+        }
+    }
+    Ok(out)
 }
