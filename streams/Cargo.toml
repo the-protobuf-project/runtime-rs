@@ -60,7 +60,7 @@ prost = { workspace = true, optional = true }
 # Backend clients. Each is the most-starred maintained Rust client for its broker; see
 # src/drivers/README.md for how each was chosen.
 rdkafka = { version = "0.39", optional = true }
-async-nats = { version = "0.52", optional = true }
+async-nats = { version = "0.53", optional = true }
 # The workspace runs rustls on ring; lapin and rumqttc default to aws-lc, so both are pinned to ring.
 lapin = { version = "4.12", optional = true, default-features = false, features = ["default-runtime", "rustls--ring", "rustls-native-certs"] }
 redis = { version = "1.8", optional = true, features = ["tokio-comp", "connection-manager", "streams"] }
