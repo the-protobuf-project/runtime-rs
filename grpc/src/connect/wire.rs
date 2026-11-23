@@ -153,22 +153,57 @@ pub(super) fn grpc_request(
             request.headers_mut().append(name.clone(), value.clone());
         }
     }
-    if let Some(timeout) = headers.get("connect-timeout-ms") {
-        let ms = timeout
-            .to_str()
-            .ok()
-            .filter(|v| !v.is_empty() && v.len() <= 10)
-            .and_then(|v| v.parse::<u64>().ok())
-            .ok_or_else(|| {
-                Status::invalid_argument(
-                    "Connect-Timeout-Ms must be a positive integer of at most 10 digits",
-                )
-            })?;
-        if let Ok(value) = HeaderValue::from_str(&format!("{ms}m")) {
+    if let Some(ms) = timeout_ms(headers)? {
+        // gRPC allows eight digits per unit, so a long deadline is sent in seconds.
+        let value = if ms < 100_000_000 {
+            format!("{ms}m")
+        } else {
+            format!("{}S", ms / 1000)
+        };
+        if let Ok(value) = HeaderValue::from_str(&value) {
             request.headers_mut().insert("grpc-timeout", value);
         }
     }
     Ok(request)
+}
+
+/// `Connect-Timeout-Ms`, if the caller sent one.
+fn timeout_ms(headers: &HeaderMap) -> Result<Option<u64>, Status> {
+    let Some(timeout) = headers.get("connect-timeout-ms") else {
+        return Ok(None);
+    };
+    timeout
+        .to_str()
+        .ok()
+        .filter(|v| !v.is_empty() && v.len() <= 10)
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Some)
+        .ok_or_else(|| {
+            Status::invalid_argument(
+                "Connect-Timeout-Ms must be a positive integer of at most 10 digits",
+            )
+        })
+}
+
+/// When the call must end. The Loopback has no deadline layer of its own (tonic enforces
+/// `grpc-timeout` in its listener, not in the routes), so the bridge enforces it.
+pub(super) fn deadline(headers: &HeaderMap) -> Result<Option<tokio::time::Instant>, Status> {
+    Ok(timeout_ms(headers)?
+        .map(|ms| tokio::time::Instant::now() + std::time::Duration::from_millis(ms)))
+}
+
+/// Runs `work` until `deadline`, ending it with DEADLINE_EXCEEDED after. Dropping the
+/// future is what cancels the handler.
+pub(super) async fn until<T>(
+    deadline: Option<tokio::time::Instant>,
+    work: impl std::future::Future<Output = T>,
+) -> Result<T, Status> {
+    match deadline {
+        None => Ok(work.await),
+        Some(at) => tokio::time::timeout_at(at, work)
+            .await
+            .map_err(|_| Status::deadline_exceeded("the Connect-Timeout-Ms deadline passed")),
+    }
 }
 
 /// What a unary gRPC call returned: its message, its status (absent means OK), and the

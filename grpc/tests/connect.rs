@@ -222,3 +222,29 @@ async fn the_http_port_serves_cleartext_http2() {
     assert_eq!(response.status(), 200);
     server.stop().await.unwrap();
 }
+
+/// `Connect-Timeout-Ms` bounds the call: a handler still running at the deadline ends with
+/// `deadline_exceeded`, as Go's `WithConnect` answers.
+#[tokio::test]
+async fn the_connect_deadline_ends_a_call_that_runs_over() {
+    let (server, base) = shop(true).await;
+    let started = std::time::Instant::now();
+    let response = reqwest::Client::new()
+        .post(format!("{base}{CREATE_BOOK}"))
+        .header("content-type", "application/json")
+        .header("connect-timeout-ms", "300")
+        .timeout(std::time::Duration::from_secs(5))
+        .body(r#"{"parent":"shelves/1","bookId":"wait"}"#)
+        .send()
+        .await
+        .expect("an answer before the client gives up");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(3),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(response.status(), 504);
+    let body: Value = response.json().await.unwrap();
+    assert_eq!(body["code"], "deadline_exceeded", "{body}");
+    server.stop().await.unwrap();
+}

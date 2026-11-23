@@ -110,6 +110,15 @@ async fn serve_connection(
     }
 }
 
+/// Whether a request is a Connect stream, which must flow both ways at once.
+fn is_connect_stream(request: &http::Request<()>) -> bool {
+    request
+        .headers()
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.to_ascii_lowercase().starts_with("application/connect+"))
+}
+
 /// Reads one request body, runs the router, and writes the response back.
 async fn respond<S>(
     router: Router,
@@ -118,7 +127,12 @@ async fn respond<S>(
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: h3::quic::BidiStream<Bytes> + Send + 'static,
+    S::RecvStream: Send + 'static,
+    S::SendStream: Send,
 {
+    if is_connect_stream(&request) {
+        return respond_duplex(router, request, stream).await;
+    }
     let mut body = Vec::new();
     while let Some(mut chunk) = stream.recv_data().await? {
         // Rejected as soon as it would pass the limit, before the chunk is copied, so an
@@ -154,5 +168,65 @@ where
         stream.send_data(bytes).await?;
     }
     stream.finish().await?;
+    Ok(())
+}
+
+/// Serves a Connect stream: the request body reaches the router as it arrives, and each
+/// response frame is sent as it is produced, so bidi is full duplex. A Connect stream's
+/// status is always 200, with its outcome in the end-stream envelope, so committing the
+/// status before the body is done is what the protocol asks for.
+async fn respond_duplex<S>(
+    router: Router,
+    request: http::Request<()>,
+    stream: h3::server::RequestStream<S, Bytes>,
+) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: h3::quic::BidiStream<Bytes> + Send + 'static,
+    S::RecvStream: Send + 'static,
+    S::SendStream: Send,
+{
+    let (mut send, mut recv) = stream.split();
+    let (tx, rx) = tokio::sync::mpsc::channel::<
+        std::result::Result<http_body::Frame<Bytes>, std::io::Error>,
+    >(16);
+    tokio::spawn(async move {
+        loop {
+            let chunk = match recv.recv_data().await {
+                Ok(Some(mut chunk)) => Ok(http_body::Frame::data(
+                    chunk.copy_to_bytes(chunk.remaining()),
+                )),
+                Ok(None) => return,
+                Err(err) => Err(std::io::Error::other(err.to_string())),
+            };
+            let failed = chunk.is_err();
+            // The router stopped reading: the response is done, so the rest is not wanted.
+            if tx.send(chunk).await.is_err() || failed {
+                return;
+            }
+        }
+    });
+
+    let (parts, ()) = request.into_parts();
+    let body = Body::new(http_body_util::StreamBody::new(
+        tokio_stream::wrappers::ReceiverStream::new(rx),
+    ));
+    let response = router
+        .oneshot(http::Request::from_parts(parts, body))
+        .await?;
+    let (parts, mut response_body) = response.into_parts();
+    send.send_response(http::Response::from_parts(parts, ()))
+        .await?;
+    while let Some(frame) = response_body.frame().await {
+        match frame?.into_data() {
+            Ok(data) if data.is_empty() => {}
+            Ok(data) => send.send_data(data).await?,
+            Err(frame) => {
+                if let Ok(trailers) = frame.into_trailers() {
+                    send.send_trailers(trailers).await?;
+                }
+            }
+        }
+    }
+    send.finish().await?;
     Ok(())
 }
