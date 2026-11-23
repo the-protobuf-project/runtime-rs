@@ -89,6 +89,8 @@ h3-quinn = { workspace = true, optional = true }
 quinn = { workspace = true, optional = true }
 
 [dev-dependencies]
+# Self-signed certificates for the TLS and HTTP/3 tests.
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
 tokio = { workspace = true, features = ["test-util"] }
 reqwest = { workspace = true }
 unicode-width = { workspace = true }

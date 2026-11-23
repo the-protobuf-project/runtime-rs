@@ -44,7 +44,8 @@ pub use health::health_router;
 /// default maximum message size and the limit a `transcode` gateway applies.
 ///
 /// Only HTTP/3 buffers before routing — it has to rebuild the request for the router — so
-/// it is the path that needs a limit of its own. HTTP/1.1 streams the body to the router,
+/// it is the path that needs a limit of its own. Connect streams are the exception: HTTP/3
+/// streams them both ways, and the bridge limits each message instead. HTTP/1.1 streams the body to the router,
 /// where the gateway enforces the same limit as it reads.
 pub const MAX_REQUEST_BODY: usize = 4 * 1024 * 1024;
 

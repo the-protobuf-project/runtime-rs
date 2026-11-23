@@ -91,6 +91,10 @@ impl ConnectBridge {
             return connect_error(Code::ResourceExhausted, &message, &[], None);
         };
         let path = parts.uri.path().to_owned();
+        let deadline = match wire::deadline(&parts.headers) {
+            Ok(deadline) => deadline,
+            Err(status) => return connect_error(status.code(), status.message(), &[], None),
+        };
         let request = format
             .request(&self.pool, &path, body)
             .and_then(|message| wire::unary_body(&message))
@@ -99,7 +103,10 @@ impl ConnectBridge {
             Ok(request) => request,
             Err(status) => return connect_error(status.code(), status.message(), &[], None),
         };
-        let reply = wire::call(self.loopback, request).await;
+        let reply = match wire::until(deadline, wire::call(self.loopback, request)).await {
+            Ok(reply) => reply,
+            Err(status) => return connect_error(status.code(), status.message(), &[], None),
+        };
         match reply.status {
             Some(status) if status.code() != Code::Ok => connect_error(
                 status.code(),

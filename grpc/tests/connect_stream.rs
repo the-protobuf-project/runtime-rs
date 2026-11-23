@@ -194,3 +194,40 @@ async fn bidi_answers_each_request_before_the_next_is_sent() {
     assert!(end.get("error").is_none(), "{end}");
     server.stop().await.unwrap();
 }
+
+/// A deadline ends a stream whose client is still sending.
+#[tokio::test]
+async fn the_connect_deadline_ends_an_open_stream() {
+    let (server, base, client) = shop().await;
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, std::io::Error>>(1);
+    tx.send(Ok(envelope(
+        0,
+        &GetShelfRequest {
+            name: "shelves/a".into(),
+        }
+        .encode_to_vec(),
+    )))
+    .await
+    .unwrap();
+    let response = client
+        .post(format!("{base}Chat"))
+        .header("content-type", "application/connect+proto")
+        .header("connect-timeout-ms", "300")
+        .timeout(std::time::Duration::from_secs(5))
+        .body(reqwest::Body::wrap_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .send()
+        .await
+        .unwrap();
+    let (replies, end) = envelopes(
+        response
+            .bytes()
+            .await
+            .expect("the stream ends before the client gives up"),
+    );
+    assert_eq!(replies.len(), 1);
+    assert_eq!(end["error"]["code"], "deadline_exceeded", "{end}");
+    drop(tx);
+    server.stop().await.unwrap();
+}

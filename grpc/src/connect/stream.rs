@@ -143,6 +143,13 @@ pub(super) async fn serve(
         );
     }
 
+    let deadline = match wire::deadline(&headers) {
+        Ok(deadline) => deadline,
+        Err(status) => {
+            let end = end_stream(Some(&status), &HeaderMap::new());
+            return response(format, HeaderMap::new(), end.into());
+        }
+    };
     let failure: Failure = Arc::default();
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, Status>>(16);
     tokio::spawn(pump(
@@ -166,7 +173,13 @@ pub(super) async fn serve(
     };
 
     let mut loopback = loopback;
-    let Ok(reply) = tower::Service::call(&mut loopback, request).await;
+    let reply = match wire::until(deadline, tower::Service::call(&mut loopback, request)).await {
+        Ok(Ok(reply)) => reply,
+        Err(status) => {
+            let end = end_stream(Some(&status), &HeaderMap::new());
+            return response(format, HeaderMap::new(), end.into());
+        }
+    };
     let (parts, body) = reply.into_parts();
     let mut metadata = HeaderMap::new();
     wire::copy_metadata(&parts.headers, &mut metadata, "");
@@ -178,7 +191,7 @@ pub(super) async fn serve(
             end_stream(Some(&status), &parts.headers).into(),
         );
     }
-    let replies = relay(body, format, pool, path, failure);
+    let replies = relay(body, format, pool, path, failure, deadline);
     response(format, metadata, axum::body::Body::from_stream(replies))
 }
 
@@ -258,6 +271,7 @@ fn relay(
     pool: Arc<DescriptorPool>,
     path: String,
     failure: Failure,
+    deadline: Option<tokio::time::Instant>,
 ) -> impl futures_util::Stream<Item = Result<Bytes, std::convert::Infallible>> + Send {
     struct State {
         body: tonic::body::Body,
@@ -288,7 +302,17 @@ fn relay(
                 end_stream(reported.as_ref(), trailers)
             };
             loop {
-                let out = match state.body.frame().await {
+                // Dropping the reply body at the deadline is what ends the call.
+                let frame = match wire::until(deadline, state.body.frame()).await {
+                    Ok(frame) => frame,
+                    Err(status) => {
+                        return Some((
+                            Ok(finish(&mut state, Some(status), &HeaderMap::new())),
+                            state,
+                        ));
+                    }
+                };
+                let out = match frame {
                     None => {
                         let status = Status::internal("the call ended without a status");
                         finish(&mut state, Some(status), &HeaderMap::new())
